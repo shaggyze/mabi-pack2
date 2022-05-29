@@ -34,19 +34,19 @@ SUBCOMMANDS:
 To extract all `.xml` and `.txt` files from a pack:
 
 ```
-mabi-pack2 extract -i D:\Mabinogi\package\data_00788.it -o D:\data --filter "\.xml" --filter "\.txt"
+mabi-pack2 extract -i D:\Mabinogi\package\data_00788.it -o D:\data -k "SaltKey" --filter "\.xml" --filter "\.txt"
 ```
 
 To list all files of a pack:
 
 ```
-mabi-pack2 list -i D:\Mabinogi\package\data_00000.it
+mabi-pack2 list -i D:\Mabinogi\package\data_00000.it -k "SaltKey"
 ```
 
 To pack files to a .it file:
 
 ```
-mabi-pack2 pack -i D:\Mabinogi\pkg -o zz_00.it
+mabi-pack2 pack -i D:\Mabinogi\pkg -o zz_00.it -k "SaltKey"
 ```
 
 *Note:* Renaming of \*.it files is not allowed, or extracting and listing will fail.
