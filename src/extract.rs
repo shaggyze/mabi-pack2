@@ -69,11 +69,11 @@ fn make_regex(strs: Vec<&str>) -> Result<Vec<Regex>, Error> {
         .collect()
 }
 
-pub fn run_extract(fname: &str, output_folder: &str, filters: Vec<&str>) -> Result<(), Error> {
+pub fn run_extract(fname: &str, output_folder: &str,skey:&str, filters: Vec<&str>) -> Result<(), Error> {
     let fp = File::open(fname)?;
     let mut rd = BufReader::new(fp);
     let final_file_name = common::get_final_file_name(fname)?;
-    let header = common::read_header(&final_file_name, &mut rd).context("reading header failed")?;
+    let header = common::read_header(&final_file_name, skey,&mut rd).context("reading header failed")?;
 
     common::validate_header(&header)?;
     if header.version != 2 {
@@ -83,7 +83,7 @@ pub fn run_extract(fname: &str, output_folder: &str, filters: Vec<&str>) -> Resu
         )));
     }
 
-    let entries = common::read_entries(&final_file_name, &header, &mut rd)
+    let entries = common::read_entries(&final_file_name, &header, skey,&mut rd)
         .context("reading entries failed")?;
     common::validate_entries(&entries)?;
 

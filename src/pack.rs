@@ -94,6 +94,7 @@ fn ceil_1024(v: u64) -> u64 {
 pub fn run_pack(
     input_folder: &str,
     output_fname: &str,
+    skey:&str,
     compress_ext: Vec<&str>,
 ) -> Result<(), Error> {
     let file_names: Vec<String> = WalkDir::new(input_folder)
@@ -112,8 +113,8 @@ pub fn run_pack(
     let final_file_name = common::get_final_file_name(output_fname)?;
     let header_off = encryption::gen_header_offset(&final_file_name);
     let entries_off = encryption::gen_entries_offset(&final_file_name);
-    let header_key = encryption::gen_header_key(&final_file_name);
-    let entries_key = encryption::gen_entries_key(&final_file_name);
+    let header_key = encryption::gen_header_key(&final_file_name,skey);
+    let entries_key = encryption::gen_entries_key(&final_file_name,skey);
 
     let fs = OpenOptions::new()
         .create(true)

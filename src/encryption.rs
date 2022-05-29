@@ -1,10 +1,10 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor, Read, Write};
 
-const KEY_SALT: &str = "@6QeTuOaDgJlZcBm#9";
+//const KEY_SALT: &str = "@6QeTuOaDgJlZcBm#9";
 
-pub fn gen_header_key(name: &str) -> Vec<u8> {
-    let input: Vec<u16> = (name.to_ascii_lowercase() + KEY_SALT)
+pub fn gen_header_key(name: &str,skey:&str) -> Vec<u8> {
+    let input: Vec<u16> = (name.to_ascii_lowercase() + skey)
         .encode_utf16()
         .collect();
     (0..128)
@@ -18,8 +18,8 @@ pub fn gen_header_offset(name: &str) -> usize {
     sum % 312 + 30
 }
 
-pub fn gen_entries_key(name: &str) -> Vec<u8> {
-    let input: Vec<u16> = (name.to_ascii_lowercase() + KEY_SALT)
+pub fn gen_entries_key(name: &str,skey:&str) -> Vec<u8> {
+    let input: Vec<u16> = (name.to_ascii_lowercase() + skey)
         .encode_utf16()
         .collect();
     let len = input.len();
@@ -210,83 +210,5 @@ impl<'a, T: Write> Drop for Snow2Encoder<'a, T> {
     fn drop(&mut self) {
         self.end_encoding().expect("writing failed");
         self.flush().expect("flushing failed");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn header_offset() {
-        let off = gen_header_offset("data_00000.it");
-        assert_eq!(off, 0x6a);
-    }
-
-    #[test]
-    fn header_key() {
-        let key = gen_header_key("data_00000.it");
-        assert_eq!(
-            key[..16],
-            [
-                0x64, 0x62, 0x76, 0x64, 0x63, 0x35, 0x36, 0x37, 0x38, 0x39, 0x38, 0x74, 0x80, 0x4d,
-                0x44, 0x60
-            ]
-        );
-    }
-
-    #[test]
-    fn entries_offset() {
-        let off = gen_entries_offset("data_00000.it");
-        assert_eq!(off, 0x6e);
-    }
-
-    #[test]
-    fn entries_key() {
-        let key = gen_entries_key("data_00000.it");
-        assert_eq!(
-            key[..16],
-            [
-                0x72, 0x6a, 0xb6, 0x87, 0x2d, 0x6d, 0xde, 0xe5, 0xa4, 0x91, 0x2d, 0x47, 0xf6, 0x9,
-                0xa2, 0xb1
-            ]
-        );
-    }
-
-    #[test]
-    fn decoder() {
-        let key = gen_header_key("data_00000.it");
-
-        let ciphered_text = [
-            0x37u8, 0x62, 0x6D, 0x63, 0x82, 0x03, 0x09, 0xD0, 0x24, 0x73, 0xBE, 0xA9,
-        ];
-        let mut cur = Cursor::new(ciphered_text);
-        let mut rd = Snow2Decoder::new(&key, &mut cur);
-        assert_eq!(rd.read_u32::<LittleEndian>().unwrap(), 0x4b5);
-        assert_eq!(rd.read_u8().unwrap(), 2);
-        assert_eq!(rd.read_u32::<LittleEndian>().unwrap(), 0x4b3);
-    }
-
-    #[test]
-    fn decoder2() {
-        let key = gen_entries_key("data_00000.it");
-
-        let ciphered_text = [
-            0x8Bu8, 0xD6, 0xBF, 0xE6, 0xAD, 0x7E, 0xE9, 0xE7, 0x64, 0x95, 0xF0, 0xBB, 0x08, 0x0E,
-            0x89, 0x2D, 0xEE, 0x7A, 0x1E, 0x93, 0x16, 0x2B, 0x92, 0xCC, 0x20, 0x43, 0x2D, 0xE3,
-            0x69, 0x1A, 0x65, 0xB3,
-        ];
-        let mut cur = Cursor::new(ciphered_text);
-        let mut rd = Snow2Decoder::new(&key, &mut cur);
-        assert_eq!(rd.read_u32::<LittleEndian>().unwrap(), 31);
-        let mut buf = [0u8; 28];
-        rd.read_exact(&mut buf).unwrap();
-        assert_eq!(
-            buf,
-            [
-                0x64, 0x0, 0x61, 0x0, 0x74, 0x0, 0x61, 0x0, 0x2f, 0x0, 0x63, 0x0, 0x6f, 0x0, 0x6c,
-                0x0, 0x6f, 0x0, 0x72, 0x0, 0x2f, 0x0, 0x62, 0x0, 0x65, 0x0, 0x73, 0x0
-            ]
-        );
     }
 }

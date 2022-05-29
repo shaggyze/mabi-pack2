@@ -71,11 +71,11 @@ pub fn get_final_file_name(fname: &str) -> Result<String, Error> {
         .map(|s| s.to_str().expect("not a valid unicode string").to_owned())
 }
 
-pub fn read_header<T>(fname: &str, rd: &mut T) -> Result<FileHeader, Error>
+pub fn read_header<T>(fname: &str,skey:&str, rd: &mut T) -> Result<FileHeader, Error>
 where
     T: Read + Seek,
 {
-    let key = encryption::gen_header_key(&fname);
+    let key = encryption::gen_header_key(fname,skey);
     let offset = encryption::gen_header_offset(&fname);
     rd.seek(SeekFrom::Start(offset as u64))?;
     let mut dec_stream = encryption::Snow2Decoder::new(&key, rd);
@@ -93,12 +93,13 @@ pub fn validate_header(hdr: &FileHeader) -> Result<(), Error> {
 pub fn read_entries<T>(
     fname: &str,
     header: &FileHeader,
+    skey:&str,
     rd: &mut T,
 ) -> Result<Vec<FileEntry>, Error>
 where
     T: Read + Seek,
 {
-    let key = encryption::gen_entries_key(&fname);
+    let key = encryption::gen_entries_key(&fname,skey);
     let offset_header = encryption::gen_header_offset(&fname);
     let offset_entry = encryption::gen_entries_offset(&fname);
     //println!("header offset: {:x}", offset_header);
