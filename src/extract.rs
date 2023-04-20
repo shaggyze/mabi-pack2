@@ -53,7 +53,6 @@ where
         if v.len() != ent.original_size as usize {
             return Err(Error::msg("original size not match"));
         }
-        v
     } else {
         content
     };

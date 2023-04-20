@@ -102,6 +102,7 @@ where
     let key = encryption::gen_entries_key(&fname,skey);
     let offset_header = encryption::gen_header_offset(&fname);
     let offset_entry = encryption::gen_entries_offset(&fname);
+    println!("Ok: {} = {}", &fname, skey);
     //println!("header offset: {:x}", offset_header);
     //println!("entry offset: {:x}", offset_entry);
     rd.seek(SeekFrom::Start((offset_header + offset_entry) as u64))?;
