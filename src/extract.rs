@@ -70,19 +70,24 @@ fn extract_file<RMF: Read + Seek>(
         }
     }
     let final_content = if (ent.flags & FLAG_COMPRESSED) != 0 {
-        debug!("[EXTRACT_FILE] For '{}': File is compressed. Decompressing {} bytes to expected {} bytes...",
-            ent.name, content.len(), ent.original_size);
-        let v = decompress_to_vec_zlib(&content).map_err(|e| {
-            error!("[EXTRACT_FILE] For '{}': ZLIB Decompression failed: {:?}", ent.name, e);
-            Error::msg(format!("zlib decompress failed for {}: {:?}", ent.name, e))
-        })?;
-        trace!("[EXTRACT_FILE] For '{}': Decompressed from {} to {} bytes.", ent.name, content.len(), v.len());
-        if v.len() != ent.original_size as usize {
-            error!("[EXTRACT_FILE] For '{}': Original size mismatch after decompression. Expected: {}, Got: {}. File might be corrupted or key/compression wrong.",
-                ent.name, ent.original_size, v.len());
-            return Err(Error::msg(format!("original size not match for {}. Expected {}, got {}", ent.name, ent.original_size, v.len())));
+        if ent.raw_size == 0 {
+            debug!("[EXTRACT_FILE] For '{}': File is flagged as compressed but raw_size is 0. Treating as an empty file.", ent.name);
+            Vec::new() // Return an empty vector, effectively creating an empty file.
+        } else {
+            debug!("[EXTRACT_FILE] For '{}': File is compressed. Decompressing {} bytes to expected {} bytes...",
+                ent.name, content.len(), ent.original_size);
+            let v = decompress_to_vec_zlib(&content).map_err(|e| {
+                error!("[EXTRACT_FILE] For '{}': ZLIB Decompression failed: {:?}", ent.name, e);
+                Error::msg(format!("zlib decompress failed for {}: {:?}", ent.name, e))
+            })?;
+            trace!("[EXTRACT_FILE] For '{}': Decompressed from {} to {} bytes.", ent.name, content.len(), v.len());
+            if v.len() != ent.original_size as usize {
+                error!("[EXTRACT_FILE] For '{}': Original size mismatch after decompression. Expected: {}, Got: {}. File might be corrupted or key/compression wrong.",
+                    ent.name, ent.original_size, v.len());
+                return Err(Error::msg(format!("original size not match for {}. Expected {}, got {}", ent.name, ent.original_size, v.len())));
+            }
+            v
         }
-        v
     } else {
         trace!("[EXTRACT_FILE] For '{}': File is not compressed. Using raw content ({} bytes).", ent.name, content.len());
         content
@@ -143,10 +148,31 @@ pub fn run_extract_with_key_and_offset_search(
         let mut rd = StdBufReader::new(StdFile::open(fname_str)?);
         
         let formula_offset = encryption::gen_header_offset(&fname_for_key_derivation) as u64;
-        let mut candidate_offsets = vec![formula_offset];
-        if formula_offset > 8 { candidate_offsets.push(formula_offset - 8); candidate_offsets.push(formula_offset - 4); }
+        
+        // --- NEW STRATEGY ---
+        let mut candidate_offsets: Vec<u64> = vec![
+            // 1. Add a list of common, fixed offsets found in many file formats.
+            // These are just examples; you might find others through analysis.
+            0x20,  // 32
+            0x30,  // 48
+            0x40,  // 64
+            0x60,  // 96
+            0x80,  // 128
+            0x100, // 256
+
+            // 2. Keep your original formula-based heuristic.
+            formula_offset,
+        ];
+        
+        // Add variations around the formula offset, just like before.
+        if formula_offset > 8 {
+            candidate_offsets.push(formula_offset - 8);
+            candidate_offsets.push(formula_offset - 4);
+        }
         candidate_offsets.push(formula_offset + 4);
         candidate_offsets.push(formula_offset + 8);
+        
+        // 3. Clean up the list to ensure we don't test the same offset twice.
         candidate_offsets.sort_unstable();
         candidate_offsets.dedup();
         

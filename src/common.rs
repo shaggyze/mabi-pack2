@@ -1,3 +1,5 @@
+// common.rs
+
 use crate::encryption;
 use anyhow::{Context as AnyhowContext, Error};
 use byte_slice_cast::AsSliceOf;
@@ -132,17 +134,29 @@ pub fn get_final_file_name(fname: &str) -> Result<String, Error> {
         .map(|s| s.to_str().unwrap_or("").to_owned())
 }
 
-pub fn read_header<RUND: Read + Seek>(fname_for_key: &str, skey: &str, underlying_rd: &mut RUND) -> Result<FileHeader, Error> {
-    trace!("[HEADER] read_header: Using fname_for_key='{}', skey='{}'", fname_for_key, skey);
+// --- START OF FIX ---
+// Changed function signature to accept `header_offset`
+pub fn read_header<RUND: Read + Seek>(
+    fname_for_key: &str,
+    skey: &str,
+    underlying_rd: &mut RUND,
+    header_offset: u64,
+) -> Result<FileHeader, Error> {
+    trace!("[HEADER] read_header: Using fname_for_key='{}', skey='{}', testing at offset 0x{:X}", fname_for_key, skey, header_offset);
     let key = encryption::gen_header_key(fname_for_key, skey);
-    let offset = encryption::gen_header_offset(fname_for_key);
-    trace!("[HEADER] read_header: Generated header key (first 4 bytes): {:?}, calculated offset: 0x{:X}", &key[..std::cmp::min(key.len(), 4)], offset);
+    trace!("[HEADER] read_header: Generated header key (first 4 bytes): {:?}", &key[..std::cmp::min(key.len(), 4)]);
+    
+    // No longer calculating offset here, using the one passed in.
     let current_pos_before_seek = underlying_rd.stream_position().context("Failed to get stream position before header seek")?;
     trace!("[HEADER] read_header: Underlying stream position before seek: 0x{:X}", current_pos_before_seek);
-    underlying_rd.seek(SeekFrom::Start(offset as u64)).context(format!("Failed to seek to header offset 0x{:X}", offset))?;
-    trace!("[HEADER] read_header: Seeked underlying stream to 0x{:X} for header data.", offset);
+    
+    // Using the passed-in `header_offset` instead of a locally calculated one.
+    underlying_rd.seek(SeekFrom::Start(header_offset)).context(format!("Failed to seek to header offset 0x{:X}", header_offset))?;
+    trace!("[HEADER] read_header: Seeked underlying stream to 0x{:X} for header data.", header_offset);
+    
     let mut dec_stream = encryption::Snow2Decoder::new(&key, underlying_rd);
     trace!("[HEADER] read_header: Initialized Snow2Decoder for header.");
+    
     let header_result = FileHeader::new(&mut dec_stream);
     match &header_result {
         Ok(h) => trace!("[HEADER] read_header: FileHeader::new successfully returned: {:?}", h),
@@ -153,6 +167,8 @@ pub fn read_header<RUND: Read + Seek>(fname_for_key: &str, skey: &str, underlyin
     }
     header_result.map_err(Error::new)
 }
+// --- END OF FIX ---
+
 
 pub fn validate_header(hdr: &FileHeader) -> Result<(), Error> {
     trace!("[HEADER] validate_header: Validating header: {:?}", hdr);
@@ -169,13 +185,12 @@ pub fn validate_header(hdr: &FileHeader) -> Result<(), Error> {
     }
 }
 
-// Modify read_entries to conditionally run the offset heuristic
 pub fn read_entries<RUND: Read + Seek>(
     fname_for_key: &str,
     header: &FileHeader,
     skey: &str,
     underlying_rd: &mut RUND,
-    use_formula_only: bool, // NEW FLAG
+    use_formula_only: bool,
 ) -> Result<Vec<FileEntry>, Error> {
     debug!("[ENTRIES] read_entries: Reading {} file entries for '{}'. Heuristic Mode: {}", header.file_cnt, fname_for_key, !use_formula_only);
 
@@ -184,15 +199,13 @@ pub fn read_entries<RUND: Read + Seek>(
     
     let mut candidate_offsets = vec![formula_calculated_entries_offset];
     
-    // If we're in full heuristic mode, add more candidates
     if !use_formula_only {
         debug!("[ENTRIES] Formula failed, trying internal offset heuristics...");
         let offset_header_block_abs = encryption::gen_header_offset(fname_for_key) as u64;
         let offset_entry_sub_block_abs = encryption::gen_entries_offset(fname_for_key) as u64;
         
-        // Add other strategies
-        candidate_offsets.push(offset_entry_sub_block_abs); // Strategy: Entry offset is absolute
-        candidate_offsets.push(offset_header_block_abs + 9); // Strategy: Right after header data
+        candidate_offsets.push(offset_entry_sub_block_abs);
+        candidate_offsets.push(offset_header_block_abs + 9);
         if formula_calculated_entries_offset > 8 {
             candidate_offsets.push(formula_calculated_entries_offset - 8);
             candidate_offsets.push(formula_calculated_entries_offset - 4);
@@ -214,13 +227,11 @@ pub fn read_entries<RUND: Read + Seek>(
 
         let mut dec_stream = encryption::Snow2Decoder::new(&entries_key, underlying_rd);
         
-        // Try to read all entries from this offset
         let entries_result: Result<Vec<FileEntry>, _> = (0..header.file_cnt)
             .map(|_| FileEntry::new(&mut dec_stream))
             .collect();
 
         if let Ok(entries) = entries_result {
-            // We read all entries without an IO error, this is our best shot
             debug!("[ENTRIES] Successfully read all {} declared entries from offset 0x{:X}", entries.len(), offset);
             return Ok(entries);
         } else {
@@ -228,8 +239,7 @@ pub fn read_entries<RUND: Read + Seek>(
         }
     }
     
-    // If all candidate offsets failed
-    underlying_rd.seek(SeekFrom::Start(original_rd_pos))?; // Restore for safety
+    underlying_rd.seek(SeekFrom::Start(original_rd_pos))?;
     Err(Error::msg("All candidate entry offsets failed for the given key."))
 }
 
@@ -262,25 +272,25 @@ pub fn try_read_and_validate_header<RUND: Read + Seek>(
     fname_for_key: &str,
     skey: &str,
     candidate_offset: u64,
-) -> Result<Option<(FileHeader, u64)>, Error> { // Returns Ok(Some(header, pos_after_header)) or Ok(None)
+) -> Result<Option<(FileHeader, u64)>, Error> {
     trace!("[HEADER_HEURISTIC] Testing offset 0x{:X} with skey '{}'", candidate_offset, skey);
     
     underlying_rd.seek(SeekFrom::Start(candidate_offset))
         .with_context(|| format!("Heuristic seek to offset 0x{:X} failed", candidate_offset))?;
     
-    // read_header will perform decryption
-    let header = match read_header(fname_for_key, skey, underlying_rd) {
+    // --- START OF FIX ---
+    // The call to `read_header` now passes the `candidate_offset` it's supposed to be testing.
+    let header = match read_header(fname_for_key, skey, underlying_rd, candidate_offset) {
         Ok(h) => h,
-        Err(_) => return Ok(None), // Failed to decrypt/read, this is not the one.
+        Err(_) => return Ok(None),
     };
+    // --- END OF FIX ---
     
-    // Check if the decrypted header is "sane" before validating checksum
     if header.version >= 10 || header.file_cnt >= 50000 {
         trace!("[HEADER_HEURISTIC]   Offset 0x{:X} -> Insane header data: {:?}", candidate_offset, header);
         return Ok(None);
     }
     
-    // Checksum validation
     if validate_header(&header).is_ok() {
         let pos_after_header = underlying_rd.stream_position()?;
         debug!("[HEADER_HEURISTIC]   SUCCESS! Found valid header at offset 0x{:X} with skey '{}'. Reader now at 0x{:X}", 
@@ -288,5 +298,5 @@ pub fn try_read_and_validate_header<RUND: Read + Seek>(
         return Ok(Some((header, pos_after_header)));
     }
 
-    Ok(None) // Checksum did not match
+    Ok(None)
 }

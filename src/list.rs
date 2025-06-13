@@ -1,11 +1,13 @@
+// list.rs
+
 use crate::common::{self, FileHeader};
+use crate::encryption; // Import encryption to use gen_header_offset
 
 use anyhow::{Context, Error};
 use std::fs::File as StdFile;
-use std::io::{self, BufReader as StdBufReader, Write}; // Re-added Seek/SeekFrom for heuristic test
-use log::{debug, info, trace}; // Removed unused error, warn
+use std::io::{self, BufReader as StdBufReader, Write};
+use log::{debug, info, trace};
 
-// This helper function remains the same.
 fn perform_listing(
     writer: &mut dyn Write,
     entries: &[common::FileEntry],
@@ -56,15 +58,22 @@ pub fn run_list_with_key_search(
         Box::new(io::stdout())
     };
 
+    // --- START OF FIX ---
+    // This function doesn't search offsets, it only uses the one from the formula.
+    // We calculate it once here to pass to read_header.
+    let formula_offset = encryption::gen_header_offset(&final_file_name_for_key_derivation) as u64;
+
     for header_skey_candidate in &keys_to_try {
         info!("[LIST_SEARCH] Trying HEADER skey: '{}' for file '{}'", header_skey_candidate, fname_str);
         
         let mut rd_for_header_attempt = StdBufReader::new(StdFile::open(fname_str)?);
         
-        let header: FileHeader = match common::read_header(&final_file_name_for_key_derivation, header_skey_candidate, &mut rd_for_header_attempt) {
+        // Pass the calculated offset to read_header
+        let header: FileHeader = match common::read_header(&final_file_name_for_key_derivation, header_skey_candidate, &mut rd_for_header_attempt, formula_offset) {
             Ok(h) => h,
             Err(_) => continue, 
         };
+    // --- END OF FIX ---
 
         if common::validate_header(&header).is_err() {
             debug!("[LIST_SEARCH] Header validation failed for skey '{}'.", header_skey_candidate);
@@ -79,7 +88,6 @@ pub fn run_list_with_key_search(
         for entries_skey_candidate in entries_keys_to_try {
             let mut rd_for_entries = StdBufReader::new(StdFile::open(fname_str)?);
             
-            // Call read_entries with `use_formula_only = false` to enable its internal offset heuristic
             if let Ok(entries) = common::read_entries(&final_file_name_for_key_derivation, &header, entries_skey_candidate, &mut rd_for_entries, false) {
                 if common::validate_entries(&entries).is_ok() {
                     info!("[LIST_SEARCH] >>> SUCCESS! Found working keys for listing '{}': HEADER='{}', ENTRIES='{}'",
@@ -95,21 +103,24 @@ pub fn run_list_with_key_search(
     Err(Error::msg(format!("Exhausted all key combinations for listing '{}'.", fname_str)))
 }
 
-// The direct run_list function which assumes a single, correct key is provided.
 pub fn run_list(fname: &str, skey: &str, output_file_path: Option<&str>) -> Result<(), Error> {
     info!("[LIST_DIRECT] Listing with directly provided skey: '{}'", skey);
     let mut rd = StdBufReader::new(StdFile::open(fname)?);
     let final_file_name = common::get_final_file_name(fname)?;
     
-    let header = common::read_header(&final_file_name, skey, &mut rd)
+    // --- START OF FIX ---
+    // Calculate the offset and pass it to read_header.
+    let offset = encryption::gen_header_offset(&final_file_name) as u64;
+    let header = common::read_header(&final_file_name, skey, &mut rd, offset)
         .with_context(|| format!("Reading header failed with skey: {}", skey))?;
+    // --- END OF FIX ---
+        
     common::validate_header(&header)?;
     if header.version != 2 {
         return Err(Error::msg(format!("Header version {} not supported", header.version)));
     }
     info!("[LIST_DIRECT] Header validated with skey '{}'.", skey);
 
-    // Call with use_formula_only = false, to allow heuristics even when a direct key is given
     let entries = common::read_entries(&final_file_name, &header, skey, &mut rd, false)?;
     common::validate_entries(&entries)?;
     info!("[LIST_DIRECT] Entries validated. {} entries found.", entries.len());
@@ -120,7 +131,6 @@ pub fn run_list(fname: &str, skey: &str, output_file_path: Option<&str>) -> Resu
         Box::new(io::stdout())
     };
 
-    // Corrected the function call here from the typo in the error message.
     perform_listing(&mut writer, &entries)?;
     
     Ok(())
