@@ -23,12 +23,15 @@ USAGE:
 OPTIONS:
     -h, --help       Print help information
     -V, --version    Print version information
+    -v               Shows only INFO and ERROR messages.
+    -vv              Shows DEBUG, INFO, and ERROR messages.
+    -vvv             Shows everything (TRACE, DEBUG, INFO, ERROR).
 
 SUBCOMMANDS:
-    extract    Extract a .it pack
+    extract    Extract a .it pack (SaltKey Optional, uses salts.txt)
     help       Print this message or the help of the given subcommand(s)
-    list       Output the file list of a .it pack
-    pack       Create a .it pack
+    list       Output the file list of a .it pack (SaltKey Optional, uses salts.txt)
+    pack       Create a .it pack (SaltKey Required)
 ```
 
 To extract all `.xml` and `.txt` files from a pack:
