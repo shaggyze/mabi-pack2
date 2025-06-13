@@ -1,4 +1,9 @@
-use clap::{arg, Command};
+// src/main.rs
+use clap::Command;
+
+use log::{error, info, warn};
+use env_logger;
+use anyhow::Result; // Using anyhow::Result directly
 
 mod common;
 mod encryption;
@@ -7,92 +12,117 @@ mod list;
 mod pack;
 
 fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let args = Command::new("Mabinogi pack utilities 2")
         .version("v1.3.3")
         .author("regomne <fallingsunz@gmail.com>")
         .subcommand(
             Command::new("pack")
                 .about("Create a .it pack")
-                .arg(arg!(-i --input <FOLDER> "Set the input folder to pack"))
-                .arg(arg!(-o --output <PACK_NAME> "Set the output .it file name"))
-                .arg(arg!(-k --key <KEY_SALT> "Set the key for the .it file encryption"))
-                .arg(arg!(-a --additional_data "DEPRECATED: Add original filename to package").hide(true))
+                .arg(clap::Arg::new("input").short('i').long("input").value_name("FOLDER").help("Set the input folder to pack").required(true).takes_value(true))
+                .arg(clap::Arg::new("output").short('o').long("output").value_name("PACK_NAME").help("Set the output .it file name").required(true).takes_value(true))
+                .arg(clap::Arg::new("key").short('k').long("key").value_name("KEY_SALT").help("Set the key for the .it file encryption").required(true).takes_value(true))
+                .arg(clap::Arg::new("additional_data").long("additional_data").help("DEPRECATED: Add original filename to package").hide(true).action(clap::ArgAction::SetTrue))
                 .arg(
-                    arg!(-f --"compress-format" <EXTENSTION> ... "Add an extension to compress in .it (Default: txt xml dds pmg set raw)")
+                    clap::Arg::new("compress-format")
+                        .short('f')
+                        .long("compress-format")
+                        .value_name("EXTENSION")
+                        .help("Add an extension to compress in .it (Default: txt xml dds pmg set raw)")
                         .required(false)
+                        .takes_value(true)
+                        .multiple_occurrences(true)
                         .number_of_values(1)
                 )
         )
         .subcommand(
             Command::new("extract")
                 .about("Extract a .it pack")
-                .arg(arg!(-i --input <PACK_NAME> "Set the input pack name to extract"))
-                .arg(arg!(-o --output <FOLDER> "Set the output folder"))
-                .arg(arg!(-k --key <KEY_SALT> "Set the key for the .it file encryption"))
+                .arg(clap::Arg::new("input").short('i').long("input").value_name("PACK_NAME").help("Set the input pack name to extract").required(true).takes_value(true))
+                .arg(clap::Arg::new("output").short('o').long("output").value_name("FOLDER").help("Set the output folder").required(true).takes_value(true))
+                .arg(clap::Arg::new("key").short('k').long("key").value_name("KEY_SALT").help("Set the key for the .it file encryption").required(true).takes_value(true))
                 .arg(
-                    arg!(-f --filter <FILTER> ... "Set a filter when extracting, in regexp, multiple occurrences mean OR")
+                    clap::Arg::new("filter")
+                        .short('f')
+                        .long("filter")
+                        .value_name("FILTER")
+                        .help("Set a filter when extracting, in regexp, multiple occurrences mean OR")
                         .required(false)
+                        .takes_value(true)
+                        .multiple_occurrences(true)
                         .number_of_values(1)
                 )
-                .arg(arg!(-c --check_additional "DEPRECATED: check additional data of filename").hide(true)),
+                .arg(clap::Arg::new("check_additional").short('c').long("check_additional").help("DEPRECATED: check additional data of filename").hide(true).action(clap::ArgAction::SetTrue)),
         )
         .subcommand(
             Command::new("list")
                 .about("Output the file list of a .it pack")
-                .arg(arg!(-i --input <PACK_NAME> "Set the input pack name to extract"))
-                .arg(arg!(-k --key <KEY_SALT> "Set the key for the .it file encryption"))
+                .arg(clap::Arg::new("input").short('i').long("input").value_name("PACK_NAME").help("Set the input pack name to extract").required(true).takes_value(true))
+                .arg(clap::Arg::new("key").short('k').long("key").value_name("KEY_SALT").help("Set the key for the .it file encryption").required(true).takes_value(true))
                 .arg(
-                    arg!(-o --output <LIST_FILE_NAME> "Set the list file name, output to stdout if not set")
+                    clap::Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .value_name("LIST_FILE_NAME")
+                        .help("Set the list file name, output to stdout if not set")
                         .required(false)
+                        .takes_value(true)
                 )
-                .arg(arg!(-c --check_additional "DEPRECATED: check additional data of filename").hide(true)),
+                .arg(clap::Arg::new("check_additional").short('c').long("check_additional").help("DEPRECATED: check additional data of filename").hide(true).action(clap::ArgAction::SetTrue)),
         )
         .get_matches();
 
-    let ret = match if let Some(matches) = args.subcommand_matches("list") {
-        if matches.is_present("check_additional") {
-            println!("WARNING: --check_additional has been deprecated");
-        }
+    let operation_result: Result<()> = if let Some(matches) = args.subcommand_matches("list") {
+        info!("Running list operation for input: '{}'", matches.value_of("input").unwrap_or("N/A"));
         list::run_list(
             matches.value_of("input").unwrap(),
             matches.value_of("key").unwrap(),
             matches.value_of("output"),
         )
     } else if let Some(matches) = args.subcommand_matches("extract") {
-        if matches.is_present("check_additional") {
-            println!("WARNING: --check_additional has been deprecated");
-        }
+        info!("Running extract operation for input: '{}' to output: '{}'",
+            matches.value_of("input").unwrap_or("N/A"),
+            matches.value_of("output").unwrap_or("N/A"));
         extract::run_extract(
             matches.value_of("input").unwrap(),
             matches.value_of("output").unwrap(),
             matches.value_of("key").unwrap(),
             matches
                 .values_of("filter")
-                .map(|e| e.collect())
-                .unwrap_or(vec![]),
+                .map_or(Vec::new(), |v| v.collect()),
         )
     } else if let Some(matches) = args.subcommand_matches("pack") {
         if matches.is_present("additional_data") {
-            println!("WARNING: --additional_data has been deprecated");
+            warn!("DEPRECATED: --additional_data argument is ignored.");
         }
+        info!("Running pack operation for input folder: '{}' to output file: '{}'",
+            matches.value_of("input").unwrap_or("N/A"),
+            matches.value_of("output").unwrap_or("N/A"));
         pack::run_pack(
             matches.value_of("input").unwrap(),
             matches.value_of("output").unwrap(),
             matches.value_of("key").unwrap(),
             matches
                 .values_of("compress-format")
-                .map(|e| e.collect())
-                .unwrap_or(vec![]),
+                .map_or(Vec::new(), |v| v.collect()),
         )
     } else {
-        println!("please select a subcommand (type --help to get details)");
+        info!("No subcommand provided. Use --help for usage information.");
         Ok(())
-    } {
-        Err(e) => {
-            println!("Err: {:?}", e);
-            1
-        }
-        _ => 0,
     };
-    std::process::exit(ret);
+
+    match operation_result {
+        Ok(()) => {
+            info!("Operation completed successfully.");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            error!("Operation failed: {}", e); // Log the main error message from anyhow
+            for cause in e.chain().skip(1) { // Iterate over the cause chain from anyhow
+                error!("  Caused by: {}", cause);
+            }
+            std::process::exit(1);
+        }
+    };
 }
