@@ -1,3 +1,5 @@
+// main.rs
+
 use clap::{Command, Arg, ArgAction};
 use anyhow::Result;
 use std::fs::File as StdFile;
@@ -74,18 +76,16 @@ fn load_salts() -> Vec<String> {
 
 
 fn main() {
-    // --- Argument Parsing ---
     let matches = Command::new("Mabinogi pack utilities 2")
-        .version("v1.3.5")
+        .version("v1.3.6")
         .author("regomne <fallingsunz@gmail.com>")
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .action(ArgAction::Count)
-                .help("Enables detailed file logging to log.txt (-v) and more verbose console output (-vv)."),
+                .help("Sets the verbosity level:\n-v: Shows INFO messages\n-vv: Shows DEBUG and INFO messages\n-vvv: Shows TRACE, DEBUG, and INFO messages"),
         )
-        // ... (rest of clap commands as before) ...
         .subcommand(
             Command::new("pack")
                 .about("Create a .it pack")
@@ -137,59 +137,47 @@ fn main() {
         )
         .get_matches();
 
-    // --- Logger Setup ---
     let verbose_level = matches.get_count("verbose");
     let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
 
-    // Console logger is always Info level unless -vv or more is passed.
-    // -v on its own will not make the console more verbose, but it will enable the log file.
-    let console_log_level = match verbose_level {
-        0 | 1 => LevelFilter::Info, // Default and -v are both INFO on console
-        2 => LevelFilter::Debug,    // -vv is DEBUG on console
-        _ => LevelFilter::Trace,    // -vvv or more is TRACE on console
+    let (console_log_level, file_log_level) = match verbose_level {
+        0 => (LevelFilter::Info, LevelFilter::Off),
+        1 => (LevelFilter::Info, LevelFilter::Info),
+        2 => (LevelFilter::Debug, LevelFilter::Debug),
+        _ => (LevelFilter::Trace, LevelFilter::Trace),
     };
-    
-    // Setup console logger with its determined level
+
     loggers.push(TermLogger::new(
         console_log_level,
         ConfigBuilder::new()
-            .set_location_level(LevelFilter::Error) // Only show file/line for errors on console
+            .set_location_level(LevelFilter::Error)
             .build(),
         TerminalMode::Mixed,
         ColorChoice::Auto,
     ));
 
-    // If any verbose flag is present (-v, -vv, etc.), enable file logging to log.txt at TRACE level.
-    if verbose_level > 0 {
-        // We use an initial info! call that will only be seen if the final `CombinedLogger::init`
-        // is set up with a level that permits it (which it will be).
-        // It's better to log *after* the logger is initialized.
-        let file_logger = WriteLogger::new(
-            LevelFilter::Trace, // Log EVERYTHING to the file
-            ConfigBuilder::new()
-                .set_time_format_rfc3339() // Consistent time format for file logs
-                .build(),
-            OpenOptions::new()
-                .append(true) // Keep appending to the same log file
-                .create(true) // Create if it doesn't exist
-                .open("log.txt")
-                .expect("Failed to open log.txt for appending"),
-        );
-        loggers.push(file_logger);
+    if file_log_level > LevelFilter::Off {
+        if let Ok(log_file) = OpenOptions::new().append(true).create(true).open("log.txt") {
+            loggers.push(WriteLogger::new(
+                file_log_level,
+                ConfigBuilder::new()
+                    .set_time_format_rfc3339()
+                    .build(),
+                log_file,
+            ));
+        } else {
+             eprintln!("Failed to open log.txt for writing.");
+        }
     }
-
+    
     if CombinedLogger::init(loggers).is_err() {
         eprintln!("Failed to initialize the logger!");
     }
     
-    // Log verbose status *after* logger is initialized.
     if verbose_level > 0 {
-        info!("Verbose logging to log.txt enabled. Console level is {:?}.", console_log_level);
+        //info!("Logging enabled. Level: {:?}.", verbose_level);
     }
-    // --- End Logger Setup ---
 
-    // --- Load Salts & Handle Commands (same as before) ---
-    // ... (rest of main function is identical to your last working version) ...
     let mut all_salts: Vec<String> = Vec::new();
     if matches.subcommand_matches("extract").is_some() || matches.subcommand_matches("list").is_some() {
         all_salts = load_salts();
@@ -209,16 +197,21 @@ fn main() {
         }
     } else if let Some(sub_matches) = matches.subcommand_matches("extract") {
         let cli_key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
-        info!("extract for: '{}' to output: '{}'",
+        debug!("extract for: '{}' to output: '{}'",
             sub_matches.get_one::<String>("input").map_or("N/A", |s| s.as_str()),
             sub_matches.get_one::<String>("output").map_or("N/A", |s| s.as_str()));
-        extract::run_extract_with_key_and_offset_search(
+        
+        // --- START OF MODIFICATION ---
+        // Updated the function call to the new name.
+        extract::run_extract_with_key_search(
             sub_matches.get_one::<String>("input").unwrap(),
             sub_matches.get_one::<String>("output").unwrap(),
             cli_key,
             &all_salts,
             sub_matches.get_many::<String>("filter").map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
         )
+        // --- END OF MODIFICATION ---
+
     } else if let Some(sub_matches) = matches.subcommand_matches("pack") {
         if sub_matches.get_flag("additional_data") {
             warn!("DEPRECATED: --additional_data argument is ignored.");
@@ -239,7 +232,7 @@ fn main() {
 
     match operation_result {
         Ok(()) => {
-            info!("completed successfully.");
+            debug!("completed successfully.");
             std::process::exit(0);
         }
         Err(e) => {

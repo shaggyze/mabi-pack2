@@ -1,3 +1,5 @@
+// extract.rs (with modifications)
+
 use crate::common::{self, FileEntry, FLAG_ALL_ENCRYPTED, FLAG_COMPRESSED, FLAG_HEAD_ENCRYPTED};
 use crate::encryption;
 use anyhow::{Context, Error};
@@ -6,10 +8,11 @@ use regex::Regex;
 use std::fs::{self, File as StdFile};
 use std::io::{BufReader as StdBufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path};
+use chrono::{DateTime, Local};
 
 use log::{debug, error, trace, info};
 
-// write_file, extract_file, make_regex functions remain unchanged...
+// write_file, extract_file, and make_regex functions remain unchanged.
 fn write_file(root_dir: &str, rel_path: &str, content: Vec<u8>) -> Result<(), Error> {
     trace!("[EXTRACT_WRITE] Preparing to write {} bytes to {}/{}", content.len(), root_dir, rel_path);
     let fname = Path::new(root_dir).join(rel_path.replace(['/', '\\'], &std::path::MAIN_SEPARATOR.to_string()));
@@ -72,7 +75,7 @@ fn extract_file<RMF: Read + Seek>(
     let final_content = if (ent.flags & FLAG_COMPRESSED) != 0 {
         if ent.raw_size == 0 {
             debug!("[EXTRACT_FILE] For '{}': File is flagged as compressed but raw_size is 0. Treating as an empty file.", ent.name);
-            Vec::new() // Return an empty vector, effectively creating an empty file.
+            Vec::new()
         } else {
             debug!("[EXTRACT_FILE] For '{}': File is compressed. Decompressing {} bytes to expected {} bytes...",
                 ent.name, content.len(), ent.original_size);
@@ -109,16 +112,20 @@ fn make_regex(strs: Vec<&str>) -> Result<Vec<Regex>, Error> {
         .collect()
 }
 
-
-// --- This is the corrected implementation ---
-pub fn run_extract_with_key_and_offset_search(
+// --- START OF MODIFICATION ---
+// Renamed function to reflect that offset search is removed.
+pub fn run_extract_with_key_search(
     fname_str: &str,
     output_folder_str: &str,
     cli_skey: Option<String>,
     loaded_salts: &[String],
     filters_cli: Vec<&str>,
 ) -> Result<(), Error> {
-    debug!("[EXTRACT_SEARCH] Starting search for keys and header offset for: '{}'", fname_str);
+    debug!("[EXTRACT_SEARCH] Starting key search for: '{}'", fname_str);
+
+    let metadata = fs::metadata(fname_str).context(format!("Failed to get metadata for '{}'", fname_str))?;
+    let modified_time: DateTime<Local> = DateTime::from(metadata.modified()?);
+    let date_str = modified_time.format("%Y-%m-%d %H:%M:%S").to_string();
 
     let mut keys_to_try: Vec<String> = Vec::new();
     if let Some(key) = cli_skey {
@@ -143,74 +150,49 @@ pub fn run_extract_with_key_and_offset_search(
 
     let filters = make_regex(filters_cli)?;
 
-    // Main Search Loop
+    // Calculate the single, formula-based offset.
+    let formula_offset = encryption::gen_header_offset(&fname_for_key_derivation) as u64;
+
     for header_skey_candidate in &keys_to_try {
         let mut rd = StdBufReader::new(StdFile::open(fname_str)?);
+        trace!("[EXTRACT_SEARCH] Trying HEADER skey '{}' at offset 0x{:X}", header_skey_candidate, formula_offset);
         
-        let formula_offset = encryption::gen_header_offset(&fname_for_key_derivation) as u64;
-        
-        // --- NEW STRATEGY ---
-        let mut candidate_offsets: Vec<u64> = vec![
-            // 1. Add a list of common, fixed offsets found in many file formats.
-            // These are just examples; you might find others through analysis.
-            0x20,  // 32
-            0x30,  // 48
-            0x40,  // 64
-            0x60,  // 96
-            0x80,  // 128
-            0x100, // 256
+        // Removed the offset loop. We now only try the calculated formula_offset.
+        if let Ok(Some((header, _))) = common::try_read_and_validate_header(&mut rd, &fname_for_key_derivation, header_skey_candidate, formula_offset) {
+            debug!("[EXTRACT_SEARCH] Header VALIDATED with skey='{}' at offset 0x{:X}. Now trying all skeys for ENTRIES...", header_skey_candidate, formula_offset);
+            
+            let mut entries_keys_to_try: Vec<&String> = Vec::new();
+            entries_keys_to_try.push(header_skey_candidate);
+            for salt in &keys_to_try { if salt != header_skey_candidate { entries_keys_to_try.push(salt); } }
 
-            // 2. Keep your original formula-based heuristic.
-            formula_offset,
-        ];
-        
-        // Add variations around the formula offset, just like before.
-        if formula_offset > 8 {
-            candidate_offsets.push(formula_offset - 8);
-            candidate_offsets.push(formula_offset - 4);
-        }
-        candidate_offsets.push(formula_offset + 4);
-        candidate_offsets.push(formula_offset + 8);
-        
-        // 3. Clean up the list to ensure we don't test the same offset twice.
-        candidate_offsets.sort_unstable();
-        candidate_offsets.dedup();
-        
-        trace!("[EXTRACT_SEARCH] Trying HEADER skey '{}' with candidate offsets: {:?}", header_skey_candidate, &candidate_offsets);
-
-        for offset in candidate_offsets {
-            rd.seek(SeekFrom::Start(0))?; // Reset reader for each offset test
-
-            if let Ok(Some((header, _))) = common::try_read_and_validate_header(&mut rd, &fname_for_key_derivation, header_skey_candidate, offset) {
-                debug!("[EXTRACT_SEARCH] Header VALIDATED with skey='{}' at custom offset 0x{:X}. Now trying all skeys for ENTRIES...", header_skey_candidate, offset);
+            for entries_skey_candidate in entries_keys_to_try {
+                debug!("[EXTRACT_SEARCH]   Trying ENTRIES skey: '{}'", entries_skey_candidate);
+                let mut rd_for_entries = StdBufReader::new(StdFile::open(fname_str)?);
                 
-                let mut entries_keys_to_try: Vec<&String> = Vec::new();
-                entries_keys_to_try.push(header_skey_candidate);
-                for salt in &keys_to_try { if salt != header_skey_candidate { entries_keys_to_try.push(salt); } }
+                if let Ok(entries) = common::read_entries(&fname_for_key_derivation, &header, entries_skey_candidate, &mut rd_for_entries, false) {
+                    if common::validate_entries(&entries).is_ok() {
+                        info!("SUCCESS! File '{}' Date '{}' Header key '{}' (at offset 0x{:X}) Entries key '{}'", 
+                              fname_for_key_derivation, 
+                              date_str, 
+                              header_skey_candidate, 
+                              formula_offset, 
+                              entries_skey_candidate);
 
-                for entries_skey_candidate in entries_keys_to_try {
-                    debug!("[EXTRACT_SEARCH]   Trying ENTRIES skey: '{}'", entries_skey_candidate);
-                    let mut rd_for_entries = StdBufReader::new(StdFile::open(fname_str)?);
-                    
-                    if let Ok(entries) = common::read_entries(&fname_for_key_derivation, &header, entries_skey_candidate, &mut rd_for_entries, false) {
-                        if common::validate_entries(&entries).is_ok() {
-                            info!("SUCCESS! File '{}' Header key '{}' (at offset 0x{:X}) Entries key '{}'", fname_for_key_derivation, header_skey_candidate, offset, entries_skey_candidate);
-
-                            let pos_after_meta = rd_for_entries.stream_position()?;
-                            let content_offset = (pos_after_meta + 1023) & !1023u64;
-                            for ent in &entries {
-                                if filters.is_empty() || filters.iter().any(|re| re.find(&ent.name).is_some()) {
-                                    extract_file(&mut rd_for_entries, content_offset, ent, output_folder_str)?;
-                                }
+                        let pos_after_meta = rd_for_entries.stream_position()?;
+                        let content_offset = (pos_after_meta + 1023) & !1023u64;
+                        for ent in &entries {
+                            if filters.is_empty() || filters.iter().any(|re| re.find(&ent.name).is_some()) {
+                                extract_file(&mut rd_for_entries, content_offset, ent, output_folder_str)?;
                             }
-                            return Ok(());
                         }
+                        return Ok(());
                     }
                 }
-                debug!("[EXTRACT_SEARCH] Found valid header for skey '{}' at offset 0x{:X}, but no working entries key/offset was found. Trying next HEADER skey.", header_skey_candidate, offset);
             }
-        } 
+            debug!("[EXTRACT_SEARCH] Found valid header for skey '{}' at offset 0x{:X}, but no working entries key was found. Trying next HEADER skey.", header_skey_candidate, formula_offset);
+        }
     } 
 
-    Err(Error::msg(format!("Exhausted all key and header offset combinations for '{}'. No working set of parameters found.", fname_str)))
+    Err(Error::msg(format!("Exhausted all key combinations for '{}'. No working set of parameters found.", fname_str)))
 }
+// --- END OF MODIFICATION ---
