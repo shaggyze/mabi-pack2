@@ -1,0 +1,46 @@
+[package]
+name = "mabi-pack2"
+version = "1.3.7"
+description = "Mabinogi Pack Utilities 2 GUI"
+authors = ["regomne <fallingsunz@gmail.com>"]
+edition = "2021"
+
+[lib]
+name = "mabi_pack2_gui_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mabi_pack2 = { package = "mabi-pack2-core", path = "../.." }
+anyhow = "1"
+log = "0.4"
+simplelog = "0.12"
+image = { version = "0.25", default-features = false, features = ["dds", "png"] }
+image_dds = "0.7"
+clap = "~3.2.25"
+walkdir = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+base64 = "0.22"
+directories = "5.0"
+sysinfo = "0.38.4"
+once_cell = "1.19"
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+winapi = { version = "0.3", features = ["shellapi", "winuser", "securitybaseapi", "processthreadsapi", "winnt", "shlobj", "std"] }
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = 'abort'
