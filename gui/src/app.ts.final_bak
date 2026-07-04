@@ -1,0 +1,507 @@
+import { invoke } from "@tauri-apps/api/core";
+import { open, save, ask } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import * as THREE from 'three';
+
+const DASH_POLL_INTERVAL = 2000;
+
+interface SystemStats {
+    cpu_usage: number;
+    memory_used_mb: number;
+    memory_total_mb: number;
+}
+
+interface AggregateEntry {
+    name: string;
+    source_archive: string;
+    salt_used: string;
+    size: number;
+    raw_size: number;
+    offset: number;
+    checksum: number;
+    flags: number;
+}
+
+interface PackListResponse {
+    entries: AggregateEntry[];
+    details: {
+        file_count: number;
+        salt: string;
+        iv0: number;
+        header_offset: number;
+    };
+}
+
+interface Config {
+    theme: string;
+    locale: string;
+    log_level: string;
+    associate_it: boolean;
+    associate_pack: boolean;
+    startup_auto_load: boolean;
+    startup_auto_extract: boolean;
+    startup_auto_switch: boolean;
+    salt_history: string[];
+    last_key: string;
+    suppress_admin_warning: boolean;
+}
+
+const TRANSLATIONS: Record<string, any> = {
+    "en": {
+        "title": "Mabiownit",
+        "tab_dashboard": "Dashboard",
+        "tab_extract": "Extract",
+        "tab_pack": "Pack",
+        "tab_list": "List",
+        "tab_differ": "Differ",
+        "tab_settings": "Settings",
+        "msg_ready": "Ready",
+        "msg_unlock": "Unlocked: {0}",
+        "msg_done": "Done"
+    },
+    "zh": {
+        "title": "Mabiownit",
+        "tab_extract": "解压",
+        "tab_pack": "封包",
+        "tab_list": "列表",
+        "tab_differ": "对比",
+        "tab_settings": "设置",
+        "msg_ready": "就绪",
+        "msg_unlock": "已解锁: {0}",
+        "msg_done": "完成"
+    }
+};
+
+class App {
+    private config: Config = {
+        theme: "neon-fog",
+        locale: "en",
+        log_level: "info",
+        associate_it: true,
+        associate_pack: false,
+        startup_auto_load: true,
+        startup_auto_extract: false,
+        startup_auto_switch: true,
+        salt_history: ["@6QeTuOaDgJlZcBm#9", "s_U[ht6c%!5gG4NZ|b", "F1#/e~MKiAP>|ksz/<", "})wWb4?-sVGHNoPKpc"],
+        last_key: "@6QeTuOaDgJlZcBm#9",
+        suppress_admin_warning: false
+    };
+
+    private selectedEntry: AggregateEntry | null = null;
+    private loadedEntries: AggregateEntry[] = [];
+    private currentLoadedArchive: string = "";
+
+    // Three.js
+    private scene: THREE.Scene | null = null;
+    private camera: THREE.PerspectiveCamera | null = null;
+    private renderer: THREE.WebGLRenderer | null = null;
+    private mesh: THREE.LineSegments | null = null;
+    private animationId: number | null = null;
+
+    constructor() {
+        this.init();
+    }
+
+    private async init() {
+        this.initThree();
+        await this.loadConfig();
+        this.initEventListeners();
+        this.startStatsPolling();
+        this.setupEventListen();
+        this.checkAdmin();
+        this.addActivity("Mabiownit initialized.");
+    }
+
+    private t(key: string, args: string[] = []): string {
+        let text = TRANSLATIONS[this.config.locale]?.[key] || TRANSLATIONS["en"Понятно][key] || key;
+        args.forEach((arg, i) => text = text.replace(`{${i}}`, arg));
+        return text;
+    }
+
+    private async checkAdmin() {
+        if (this.config.suppress_admin_warning) return;
+        const isAdmin = await invoke("is_admin");
+        if (!isAdmin) {
+            const confirmed = await ask("Mabiownit is not running as admin. Registry features may fail. Suppress warning?", { title: "Admin", kind: "warning" });
+            if (confirmed) {
+                this.config.suppress_admin_warning = true;
+                this.saveConfig();
+            }
+        }
+    }
+
+    private async loadConfig() {
+        try {
+            const saved = await invoke("get_config") as Config;
+            if (saved) {
+                this.config = { ...this.config, ...saved };
+                if (!this.config.salt_history) this.config.salt_history = [];
+            }
+            this.initThemes();
+            this.syncSettingsUI();
+        } catch (e) {}
+    }
+
+    private syncSettingsUI() {
+        const ids = ["theme", "lang", "log"];
+        ids.forEach(id => {
+            const el = document.getElementById(`settings-${id}`) as HTMLSelectElement;
+            if (el) el.value = (this.config as any)[id === "lang" ? "locale" : id];
+        });
+        
+        ["assoc-it", "assoc-pack", "startup-load", "startup-extract", "startup-switch"].forEach(id => {
+            const el = document.getElementById(`settings-${id}`) as HTMLInputElement;
+            if (el) el.checked = (this.config as any)[id.replace(/-/g, '_')];
+        });
+    }
+
+    private async saveConfig() {
+        await invoke("set_config", { config: this.config });
+    }
+
+    private initEventListeners() {
+        document.querySelectorAll(".nav-item").forEach(btn => {
+            btn.addEventListener("click", () => this.switchTab((btn as HTMLElement).dataset.tab!));
+        });
+
+        const themeSelect = document.getElementById("settings-theme") as HTMLSelectElement;
+        themeSelect?.addEventListener("change", () => {
+            this.config.theme = themeSelect.value;
+            this.initThemes();
+            this.saveConfig();
+        });
+
+        const langSelect = document.getElementById("settings-lang") as HTMLSelectElement;
+        langSelect?.addEventListener("change", () => {
+            this.config.locale = langSelect.value;
+            this.saveConfig();
+            this.translateUI();
+        });
+
+        this.setupSaltCombo("extract");
+        this.setupSaltCombo("pack");
+        this.setupSaltCombo("differ");
+
+        document.getElementById("extract-run")?.addEventListener("click", () => this.runExtract());
+        document.getElementById("pack-run")?.addEventListener("click", () => this.runPack());
+        document.getElementById("list-load-btn")?.addEventListener("click", () => this.loadArchive());
+        document.getElementById("patch-run")?.addEventListener("click", () => this.runPatch());
+
+        document.getElementById("extract-selected")?.addEventListener("click", () => this.extractSelected());
+        document.getElementById("extract-all-btn")?.addEventListener("click", () => this.extractAll());
+        document.getElementById("convert-to-it")?.addEventListener("click", () => this.convertTo("it"));
+        document.getElementById("convert-to-pack")?.addEventListener("click", () => this.convertTo("pack"));
+
+        document.getElementById("btn-browse-extract-in")?.addEventListener("click", () => this.browseFile("extract-input"));
+        document.getElementById("btn-browse-extract-out")?.addEventListener("click", () => this.browseDir("extract-output"));
+        document.getElementById("btn-browse-pack-in")?.addEventListener("click", () => this.browseDir("pack-input"));
+        document.getElementById("btn-browse-pack-out")?.addEventListener("click", () => this.browseFileSave("pack-output", "it"));
+        document.getElementById("btn-browse-list")?.addEventListener("click", () => this.browseFile("list-input"));
+        document.getElementById("btn-browse-patch-old")?.addEventListener("click", () => this.browseDir("patch-old"));
+        document.getElementById("btn-browse-patch-new")?.addEventListener("click", () => this.browseDir("patch-new"));
+        document.getElementById("btn-browse-patch-out")?.addEventListener("click", () => this.browseFileSave("patch-output", "it"));
+
+        document.getElementById("btn-request-admin")?.addEventListener("click", () => invoke("request_elevation"));
+        document.getElementById("btn-wipe-history")?.addEventListener("click", () => {
+            this.config.salt_history = [];
+            this.saveConfig();
+            this.renderSaltHistory();
+        });
+
+        document.getElementById("terminal-input")?.addEventListener("keydown", (e) => {
+            if ((e as KeyboardEvent).key === "Enter") {
+                this.handleTerminalCommand((e.target as HTMLInputElement).value);
+                (e.target as HTMLInputElement).value = "";
+            }
+        });
+    }
+
+    private setupSaltCombo(prefix: string) {
+        const btn = document.getElementById(`btn-salt-history-${prefix}`);
+        const list = document.getElementById(`salt-list-${prefix}`);
+        btn?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (list) {
+                list.style.display = list.style.display === "none" ? "block" : "none";
+                if (list.style.display === "block") this.renderSaltHistory();
+            }
+        });
+        document.addEventListener("click", () => { if (list) list.style.display = "none"; });
+    }
+
+    private renderSaltHistory() {
+        const wrappers = document.querySelectorAll(".salt-list-wrapper");
+        const salts = Array.from(new Set([...this.config.salt_history, "@6QeTuOaDgJlZcBm#9"]));
+        
+        wrappers.forEach(wrap => {
+            wrap.innerHTML = "";
+            salts.forEach(s => {
+                const item = document.createElement("div");
+                item.className = "salt-item";
+                const text = document.createElement("span");
+                text.className = "salt-text";
+                text.textContent = s;
+                text.onclick = () => {
+                    const inputId = wrap.id.replace("salt-list-", "") + "-key";
+                    (document.getElementById(inputId) as HTMLInputElement).value = s;
+                    (wrap as HTMLElement).style.display = "none";
+                };
+                const del = document.createElement("span");
+                del.className = "delete-btn";
+                del.textContent = "×";
+                del.onclick = (e) => {
+                    e.stopPropagation();
+                    this.config.salt_history = this.config.salt_history.filter(val => val !== s);
+                    this.saveConfig();
+                    this.renderSaltHistory();
+                };
+                item.appendChild(text); item.appendChild(del); wrap.appendChild(item);
+            });
+        });
+    }
+
+    private initThemes() {
+        document.body.className = `theme-${this.config.theme}`;
+    }
+
+    private translateUI() {
+        const title = document.getElementById("main-title");
+        if (title) title.textContent = this.t("title");
+    }
+
+    private switchTab(tabId: string) {
+        document.querySelectorAll(".tab-content").forEach(tab => tab.classList.remove("active"));
+        document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
+        document.getElementById(tabId)?.classList.add("active");
+        document.querySelector(`[data-tab="${tabId}"]`)?.classList.add("active");
+    }
+
+    private async setupEventListen() {
+        await listen("open-file", (event) => {
+            const path = event.payload as string;
+            if (this.config.startup_auto_switch) this.switchTab("list");
+            (document.getElementById("list-input") as HTMLInputElement).value = path;
+            if (this.config.startup_auto_load) this.loadArchive();
+        });
+        await listen("log-message", (event) => {
+            const data = event.payload as { message: string, level: string };
+            this.log(data.message, data.level as any);
+        });
+    }
+
+    private initThree() {
+        const cont = document.getElementById("three-viewport");
+        if (!cont) return;
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(75, cont.clientWidth/cont.clientHeight, 0.1, 1000);
+        this.renderer = new THREE.WebGLRenderer({ alpha: true });
+        this.renderer.setSize(cont.clientWidth, cont.clientHeight);
+        cont.appendChild(this.renderer.domElement);
+        this.camera.position.z = 5;
+    }
+
+    private renderPMG(data: Uint8Array) {
+        if (!this.scene) return;
+        if (this.mesh) this.scene.remove(this.mesh);
+        const verts: number[] = [];
+        for (let i = 0; i < data.length - 12; i += 12) {
+            const v = new DataView(data.buffer, data.byteOffset + i, 12);
+            const x = v.getFloat32(0, true), y = v.getFloat32(4, true), z = v.getFloat32(8, true);
+            if (Math.abs(x)<100 && Math.abs(y)<100 && Math.abs(z)<100 && (x||y||z)) verts.push(x, y, z);
+            if (verts.length > 5000) break;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+        this.mesh = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x00f2ff }));
+        this.scene.add(this.mesh);
+        const anim = () => {
+            this.animationId = requestAnimationFrame(anim);
+            if (this.mesh) this.mesh.rotation.y += 0.01;
+            if (this.renderer && this.scene && this.camera) this.renderer.render(this.scene, this.camera);
+        };
+        anim();
+    }
+
+    private startStatsPolling() {
+        setInterval(async () => {
+            try {
+                const stats: SystemStats = await invoke("get_system_info");
+                document.getElementById("cpu-val")!.textContent = `${stats.cpu_usage.toFixed(1)}%`;
+                document.getElementById("mem-val")!.textContent = `${stats.memory_used_mb} MB`;
+            } catch {}
+        }, DASH_POLL_INTERVAL);
+    }
+
+    private log(msg: string, type: "info" | "error" | "success" | "debug" | "trace" = "info") {
+        const logView = document.getElementById("log-view");
+        if (!logView) return;
+        const entry = document.createElement("div");
+        entry.className = `log-entry ${type}`;
+        entry.textContent = `[${new Date().toLocaleTimeString([], { hour12: false })}] ${msg}`;
+        logView.appendChild(entry);
+        logView.scrollTop = logView.scrollHeight;
+    }
+
+    private addActivity(msg: string) {
+        const list = document.getElementById("activity-list");
+        if (!list) return;
+        const empty = document.getElementById("dash-no-activity");
+        if (empty) empty.style.display = "none";
+        const item = document.createElement("div");
+        item.className = "activity-item info";
+        item.textContent = `${new Date().toLocaleTimeString([], { hour12: false })} - ${msg}`;
+        list.insertBefore(item, list.firstChild);
+    }
+
+    private async browseFile(id: string) {
+        const path = await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] });
+        if (path) (document.getElementById(id) as HTMLInputElement).value = Array.isArray(path) ? path[0] : path as string;
+    }
+
+    private async browseDir(id: string) {
+        const path = await open({ directory: true });
+        if (path) (document.getElementById(id) as HTMLInputElement).value = Array.isArray(path) ? path[0] : path as string;
+    }
+
+    private async browseFileSave(id: string, ext: string) {
+        const path = await save({ filters: [{ name: "Archive", extensions: [ext] }] });
+        if (path) (document.getElementById(id) as HTMLInputElement).value = path as string;
+    }
+
+    private async runExtract() {
+        const input = (document.getElementById("extract-input") as HTMLInputElement).value;
+        const output = (document.getElementById("extract-output") as HTMLInputElement).value;
+        const key = (document.getElementById("extract-key") as HTMLInputElement).value;
+        if (!input || !output) return;
+        try {
+            await invoke("extract_pack_to", { app: null, input, output, key: key || null, filters: [] });
+            this.log(this.t("extract_success", [input]), "success");
+            if (key && !this.config.salt_history.includes(key)) { this.config.salt_history.push(key); this.saveConfig(); }
+        } catch (e) { this.log(`Error: ${e}`, "error"); }
+    }
+
+    private async runPack() {
+        const input = (document.getElementById("pack-input") as HTMLInputElement).value;
+        const output = (document.getElementById("pack-output") as HTMLInputElement).value;
+        const key = (document.getElementById("pack-key") as HTMLInputElement).value;
+        if (!input || !output || !key) return;
+        try {
+            await invoke("create_archive", { app: null, input, output, key, formats: ["xml", "txt", "set", "raw"] });
+            this.log(this.t("pack_success", [output]), "success");
+            if (!this.config.salt_history.includes(key)) { this.config.salt_history.push(key); this.saveConfig(); }
+        } catch (e) { this.log(`Error: ${e}`, "error"); }
+    }
+
+    private async loadArchive() {
+        const input = (document.getElementById("list-input") as HTMLInputElement).value;
+        if (!input) return;
+        try {
+            const res = await invoke("list_pack_contents", { input, key: null }) as PackListResponse;
+            this.loadedEntries = res.entries;
+            this.currentLoadedArchive = input;
+            this.renderTree(res.entries);
+            this.log(this.t("unlock_success", [input]), "success");
+        } catch (e) { this.log(`Load fail: ${e}`, "error"); }
+    }
+
+    private renderTree(entries: AggregateEntry[]) {
+        const tree = document.getElementById("file-tree")!;
+        tree.innerHTML = "";
+        entries.forEach(e => {
+            const div = document.createElement("div");
+            div.className = "tree-item";
+            div.textContent = e.name;
+            div.onclick = () => this.selectFile(e, div);
+            tree.appendChild(div);
+        });
+    }
+
+    private async selectFile(e: AggregateEntry, el: HTMLElement) {
+        document.querySelectorAll(".tree-item").forEach(i => i.classList.remove("selected"));
+        el.classList.add("selected");
+        this.selectedEntry = e;
+        
+        const audioCont = document.getElementById("preview-audio")!;
+        const threeCont = document.getElementById("preview-3d")!;
+        const visualCont = document.getElementById("preview-visual")!;
+        audioCont.classList.remove("active");
+        threeCont.classList.remove("active");
+        visualCont.classList.remove("active");
+        
+        if (this.animationId) cancelAnimationFrame(this.animationId);
+
+        try {
+            const prev = await invoke("get_preview_ext", { archivePath: this.currentLoadedArchive, entryName: e.name, key: e.salt_used === "N/A" ? null : e.salt_used }) as any;
+            const ext = e.name.toLowerCase().split('.').pop();
+            
+            if (ext === "wav") {
+                audioCont.classList.add("active");
+                (document.getElementById("audio-filename")!).textContent = e.name;
+                (document.getElementById("audio-elem") as HTMLAudioElement).src = `data:audio/wav;base64,${btoa(String.fromCharCode(...prev.raw_bytes))}`;
+            } else if (ext === "pmg") {
+                threeCont.classList.add("active");
+                this.renderPMG(new Uint8Array(prev.raw_bytes));
+            } else if (prev.content_image) {
+                visualCont.classList.add("active");
+                visualCont.innerHTML = `<img src="data:image/png;base64,${prev.content_image}" style="max-width:100%">`;
+            } else {
+                visualCont.classList.add("active");
+                visualCont.textContent = prev.content_text || "(Binary)";
+            }
+            this.renderHex(prev.raw_bytes);
+        } catch (err) {}
+    }
+
+    private renderHex(bytes: number[]) {
+        let h = "";
+        for (let i = 0; i < Math.min(bytes.length, 1024); i++) {
+            h += bytes[i].toString(16).padStart(2, '0') + " ";
+            if ((i + 1) % 16 === 0) h += "\n";
+        }
+        document.getElementById("preview-hex")!.textContent = h;
+    }
+
+    private async extractSelected() {
+        if (!this.selectedEntry) return;
+        const dest = await save({ defaultPath: this.selectedEntry.name.split(/[/\]/).pop() });
+        if (dest) await invoke("extract_file_to", { archive: this.currentLoadedArchive, entry: this.selectedEntry.name, dest, key: this.selectedEntry.salt_used });
+    }
+
+    private async extractAll() {
+        if (!this.currentLoadedArchive) return;
+        const out = await open({ directory: true });
+        if (out) await invoke("extract_pack_to", { input: this.currentLoadedArchive, output: Array.isArray(out) ? out[0] : out as string, key: this.loadedEntries[0]?.salt_used, filters: [] });
+    }
+
+    private async convertTo(ext: string) {
+        if (!this.currentLoadedArchive) return;
+        const out = await save({ filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+        if (out) await invoke("run_convert", { input: this.currentLoadedArchive, output: out as string, key: this.loadedEntries[0]?.salt_used });
+    }
+
+    private async runPatch() {
+        const base = (document.getElementById("patch-old") as HTMLInputElement).value;
+        const mod = (document.getElementById("patch-new") as HTMLInputElement).value;
+        const out = (document.getElementById("patch-output") as HTMLInputElement).value;
+        const key = (document.getElementById("patch-key") as HTMLInputElement).value;
+        if (!base || !mod || !out || !key) return;
+        try {
+            await invoke("create_patch", { base, modified: mod, output: out, key });
+            this.log("Patch generated.", "success");
+        } catch (e) { this.log(`Error: ${e}`, "error"); }
+    }
+
+    private updateProgress(p: number, m: string) {
+        const c = document.getElementById("progress-container")!;
+        c.style.display = p > 0 && p < 100 ? "block" : "none";
+        document.getElementById("progress-bar")!.style.width = `${p}%`;
+        document.getElementById("eta-msg")!.textContent = m;
+    }
+
+    private async handleTerminalCommand(cmd: string) {
+        if (cmd === "clear") { document.getElementById("log-view")!.innerHTML = ""; return; }
+        try { const r = await invoke("execute_terminal_command", { command: cmd }) as string; this.log(r, "info"); } catch (e) { this.log(`${e}`, "error"); }
+    }
+}
+
+new App();
