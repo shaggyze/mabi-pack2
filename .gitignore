@@ -9,6 +9,7 @@
 
 # Logs
 *.log
+log.txt
 GEMINI.md
 CLAUDE.md
 
@@ -34,6 +35,8 @@ skills-lock.json
 # Generated / temp
 output.csv
 *.bak
+*_bak
+*.bak*
 
 # Binaries
 *.exe
