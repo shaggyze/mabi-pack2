@@ -1396,6 +1396,10 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
     let file_size = raw_bytes.len() as u64;
     let file_type_str = common_ext::get_preview_ext(&entry_name).unwrap_or("unknown").to_string();
 
+    const MAX_HEX_BYTES: usize = 32 * 1024;
+    const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_ADPCM_INPUT: usize = 2 * 1024 * 1024;
+
     let mut preview = PreviewData {
         name: entry_name.clone(),
         size: file_size,
@@ -1434,13 +1438,32 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
         raw_bytes = Vec::new();
     } else if preview.file_type == "audio" {
         if entry_name.to_lowercase().ends_with(".wav") {
-            if let Some(pcm_wav) = decode_ima_adpcm_wav(&raw_bytes) {
-                raw_bytes = pcm_wav;
+            if raw_bytes.len() <= MAX_ADPCM_INPUT {
+                if let Some(pcm_wav) = decode_ima_adpcm_wav(&raw_bytes) {
+                    raw_bytes = pcm_wav;
+                }
+            } else if is_adpcm_wav(&raw_bytes) {
+                let mb = raw_bytes.len() as f64 / 1_048_576.0;
+                preview.content_text = Some(format!(
+                    "ADPCM audio ({:.1} MB compressed) — too large for in-app preview. Extract and open externally.", mb
+                ));
+                raw_bytes = Vec::new();
             }
         }
     }
 
-    preview.raw_bytes = raw_bytes;
+    let limit = match preview.file_type.as_str() {
+        "audio" => MAX_AUDIO_BYTES,
+        "pmg"   => 0,
+        _       => MAX_HEX_BYTES,
+    };
+    if raw_bytes.len() > limit {
+        preview.truncated = true;
+        preview.raw_bytes = raw_bytes[..limit].to_vec();
+    } else {
+        preview.raw_bytes = raw_bytes;
+    }
+
     Ok(preview)
 }
 
