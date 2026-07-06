@@ -15,7 +15,7 @@
 
 use std::fs;
 use mabi_pack2::encryption::{self, Snow2Mode};
-use miniz_oxide::inflate::decompress_to_vec_zlib;
+use miniz_oxide::inflate::{decompress_to_vec_zlib, decompress_to_vec};
 
 const DEFAULT_PROPDB: &str =
     r"C:\Users\Shaggy\Documents\GitHub\uotiara\Tiara's Moonshine Mod\data\db\PropDB.xml";
@@ -48,10 +48,32 @@ fn b64_decode(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Scan the first 32 bytes for a zlib header (0x78 CMF, 0x01/0x9c/0xda FLG) at ANY offset.
 fn zlib_header_offset(b: &[u8]) -> Option<usize> {
-    for &off in &[0usize, 4, 8] {
-        if off + 2 <= b.len() && b[off] == 0x78 && matches!(b[off + 1], 0x01 | 0x9c | 0xda) {
+    let n = b.len().min(32);
+    for off in 0..n.saturating_sub(1) {
+        if b[off] == 0x78 && matches!(b[off + 1], 0x01 | 0x5e | 0x9c | 0xda) {
             return Some(off);
+        }
+    }
+    None
+}
+
+/// Try every inflate interpretation and report the first that yields UTF-16-looking XML.
+fn try_inflate(full: &[u8], off: usize) -> Option<(String, Vec<u8>)> {
+    let attempts: [(&str, Vec<u8>); 3] = [
+        ("zlib@off", full.get(off..).unwrap_or(&[]).to_vec()),
+        ("raw@off+2", full.get(off + 2..).unwrap_or(&[]).to_vec()),
+        ("raw@off", full.get(off..).unwrap_or(&[]).to_vec()),
+    ];
+    for (label, data) in attempts.iter() {
+        let res = if label.starts_with("zlib") {
+            decompress_to_vec_zlib(data)
+        } else {
+            decompress_to_vec(data)
+        };
+        if let Ok(x) = res {
+            if x.len() > 64 { return Some((label.to_string(), x)); }
         }
     }
     None
@@ -83,11 +105,12 @@ fn main() {
     ];
 
     let mut hits = 0u32;
+    let mut solved = 0u32;
     for salt in &salts {
         for name in &names {
             let key = encryption::gen_header_key(name, salt);
             for &mode in &modes {
-                for iv0 in [0u32, 1] {
+                for iv0 in 0u32..4 {
                     for start in 0..16usize {
                         if start + 64 > blob.len() { break; }
                         let mut prefix = blob[start..start + 64].to_vec();
@@ -95,25 +118,22 @@ fn main() {
                         if let Some(off) = zlib_header_offset(&prefix) {
                             hits += 1;
                             println!(
-                                "ZLIB HEADER: salt={:?} name={:?} mode={:?} iv0={} start={} zoff={} head={:02x?}",
-                                salt, name, mode, iv0, start, off, &prefix[..12]
+                                "ZLIB HDR: salt={:?} name={:?} mode={:?} iv0={} start={} zoff={}\n  dec[..32]={:02x?}",
+                                salt, name, mode, iv0, start, off, &prefix[..32]
                             );
-                            // confirm: full decrypt + inflate
+                            // confirm with a full decrypt + every inflate interpretation
                             let mut full = blob[start..].to_vec();
                             encryption::snow2_decrypt_mode(&key, iv0, mode, &mut full);
-                            match decompress_to_vec_zlib(&full[off..]) {
-                                Ok(xml) => {
+                            match try_inflate(&full, off) {
+                                Some((how, xml)) => {
                                     let bom = xml.get(0..2) == Some(&[0xff, 0xfe][..]);
-                                    println!(
-                                        "  *** INFLATE OK -> {} bytes, utf16_bom={}, head={:02x?}",
-                                        xml.len(), bom, &xml[..16.min(xml.len())]
-                                    );
-                                    if bom {
-                                        println!("  >>> SOLVED: salt={:?} name={:?} mode={:?} iv0={} start={} zoff={}",
-                                                 salt, name, mode, iv0, start, off);
-                                    }
+                                    println!("  *** INFLATE OK via {} -> {} bytes, utf16_bom={}, head={:02x?}",
+                                             how, xml.len(), bom, &xml[..24.min(xml.len())]);
+                                    println!("  >>> SOLVED: salt={:?} name={:?} mode={:?} iv0={} start={} zoff={} inflate={}",
+                                             salt, name, mode, iv0, start, off, how);
+                                    solved += 1;
                                 }
-                                Err(e) => println!("  inflate failed: {:?}", e),
+                                None => println!("  inflate failed (all interpretations) -- header likely coincidental or per-file IV"),
                             }
                         }
                     }
@@ -122,7 +142,7 @@ fn main() {
         }
     }
     println!(
-        "\nDone. {} zlib-header hit(s). salts={} names={} modes=6 iv=2 start=16",
-        hits, salts.len(), names.len()
+        "\nDone. {} zlib-header hit(s), {} SOLVED. salts={} names={} modes=6 iv=4 start=16",
+        hits, solved, salts.len(), names.len()
     );
 }

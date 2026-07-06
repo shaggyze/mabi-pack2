@@ -692,6 +692,92 @@ async fn extract_pack_to(app: tauri::AppHandle, input: String, output: String, k
     }
 }
 
+fn try_decode_xml_compiled(data: &[u8]) -> Option<String> {
+    fn r16(d: &[u8], p: usize) -> Option<u16> {
+        if p + 2 > d.len() { return None; }
+        Some(u16::from_le_bytes([d[p], d[p + 1]]))
+    }
+    fn r32(d: &[u8], p: usize) -> Option<u32> {
+        if p + 4 > d.len() { return None; }
+        Some(u32::from_le_bytes([d[p], d[p + 1], d[p + 2], d[p + 3]]))
+    }
+    fn xdec(d: &[u8], pos: usize, len: usize) -> Option<String> {
+        if pos + len > d.len() { return None; }
+        let ok = d[pos..pos + len].iter().all(|&b| {
+            let c = b ^ 0x80;
+            c >= 0x20 && c <= 0x7E
+        });
+        if len > 0 && !ok { return None; }
+        Some(d[pos..pos + len].iter().map(|&b| (b ^ 0x80) as char).collect())
+    }
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    let mut pos = 0usize;
+    let server_count = r16(data, pos)? as usize;
+    pos += 2;
+    if server_count == 0 || server_count > 200 { return None; }
+
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<features_compiled>\n");
+    xml.push_str(&format!("  <servers count=\"{}\">\n", server_count));
+
+    for _ in 0..server_count {
+        let nl = r16(data, pos)? as usize; pos += 2;
+        let name = xdec(data, pos, nl)?; pos += nl;
+        let rl = r16(data, pos)? as usize; pos += 2;
+        let region = xdec(data, pos, rl)?; pos += rl;
+        let sid = r16(data, pos)?; pos += 2;
+        if pos >= data.len() { return None; }
+        let ch = data[pos]; pos += 1;
+        xml.push_str(&format!(
+            "    <server name=\"{}\" region=\"{}\" server_id=\"{}\" channel=\"{}\"/>\n",
+            esc(&name), esc(&region), sid, ch
+        ));
+    }
+    xml.push_str("  </servers>\n");
+
+    let feature_count = r16(data, pos)? as usize;
+    pos += 2;
+    if feature_count > 100_000 { return None; }
+
+    xml.push_str(&format!("  <features count=\"{}\">\n", feature_count));
+
+    const LEN_THRESHOLD: usize = 500;
+    for _ in 0..feature_count {
+        let hash = r32(data, pos)?;
+        pos += 4;
+        let mut conds: Vec<String> = Vec::new();
+        loop {
+            if pos + 2 > data.len() { break; }
+            let clen = r16(data, pos)? as usize;
+            if clen > LEN_THRESHOLD { break; }
+            // Check printability BEFORE advancing pos (mirrors Python: break, not error)
+            if clen > 0 {
+                if pos + 2 + clen > data.len() { return None; }
+                let printable = data[pos + 2..pos + 2 + clen].iter().all(|&b| {
+                    let c = b ^ 0x80;
+                    c >= 0x20 && c <= 0x7E
+                });
+                if !printable { break; }
+            }
+            pos += 2;
+            let s: String = data[pos..pos + clen].iter().map(|&b| (b ^ 0x80) as char).collect();
+            pos += clen;
+            conds.push(s);
+        }
+        xml.push_str(&format!("    <feature hash=\"{:#010x}\">\n", hash));
+        for (i, c) in conds.iter().enumerate() {
+            if !c.is_empty() {
+                xml.push_str(&format!("      <cond index=\"{}\">{}</cond>\n", i, esc(c)));
+            }
+        }
+        xml.push_str("    </feature>\n");
+    }
+    xml.push_str("  </features>\n</features_compiled>\n");
+    Some(xml)
+}
+
 fn decode_text_bytes(bytes: &[u8]) -> String {
     // Try UTF-8 first (no replacement chars = clean decode)
     if let Ok(s) = std::str::from_utf8(bytes) {
@@ -827,6 +913,12 @@ async fn get_preview_ext(
                 raw_bytes = Vec::new();
             }
             // else: large PCM WAV — send first 8 MB, browser handles it natively
+        }
+    } else if preview.file_type == "binary" && entry_name.to_lowercase().ends_with(".compiled") {
+        if let Some(xml_text) = try_decode_xml_compiled(&raw_bytes) {
+            preview.file_type = "text".to_string();
+            preview.content_text = Some(xml_text);
+            raw_bytes = Vec::new();
         }
     }
 
@@ -1449,6 +1541,12 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
                 ));
                 raw_bytes = Vec::new();
             }
+        }
+    } else if preview.file_type == "binary" && entry_name.to_lowercase().ends_with(".compiled") {
+        if let Some(xml_text) = try_decode_xml_compiled(&raw_bytes) {
+            preview.file_type = "text".to_string();
+            preview.content_text = Some(xml_text);
+            raw_bytes = Vec::new();
         }
     }
 
