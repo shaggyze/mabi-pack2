@@ -1321,7 +1321,7 @@ class App {
                 activeContainer = "preview-hex";
             }
         } else if (prev.content_text) {
-            const isXml = ext === "xml" || ext === "set" || ext === "csh" || ext === "area" || ext === "rgn";
+            const isXml = ext === "xml" || ext === "set" || ext === "csh" || ext === "area" || ext === "rgn" || ext === "compiled";
             if (isXml) {
                 visual.className = "preview-tab-content active xml-view";
                 visual.innerHTML = this.xmlHighlight(prev.content_text);
