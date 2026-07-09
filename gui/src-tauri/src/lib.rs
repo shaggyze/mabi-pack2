@@ -918,7 +918,7 @@ async fn get_preview_ext(
         if let Some(xml_text) = try_decode_xml_compiled(&raw_bytes) {
             preview.file_type = "text".to_string();
             preview.content_text = Some(xml_text);
-            raw_bytes = Vec::new();
+            // keep raw_bytes so Hex View still shows the binary data
         }
     }
 
@@ -1546,7 +1546,7 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
         if let Some(xml_text) = try_decode_xml_compiled(&raw_bytes) {
             preview.file_type = "text".to_string();
             preview.content_text = Some(xml_text);
-            raw_bytes = Vec::new();
+            // keep raw_bytes so Hex View still shows the binary data
         }
     }
 
