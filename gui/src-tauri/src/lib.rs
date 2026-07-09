@@ -754,7 +754,7 @@ fn try_decode_xml_compiled(data: &[u8]) -> Option<String> {
             if clen > LEN_THRESHOLD { break; }
             // Check printability BEFORE advancing pos (mirrors Python: break, not error)
             if clen > 0 {
-                if pos + 2 + clen > data.len() { return None; }
+                if pos + 2 + clen > data.len() { break; }
                 let printable = data[pos + 2..pos + 2 + clen].iter().all(|&b| {
                     let c = b ^ 0x80;
                     c >= 0x20 && c <= 0x7E
