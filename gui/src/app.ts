@@ -1383,7 +1383,11 @@ class App {
         try {
             const prev = await this.fetchPreview(e);
             await this.applyPreviewToPanel(prev);
-        } catch (err) { this.log(`Preview error: ${err}`, "error"); }
+        } catch (err) {
+            this.log(`Preview error: ${err}`, "error");
+            visual.className = "preview-tab-content active";
+            visual.textContent = String(err);
+        }
     }
 
     private async openLooseFile(path: string): Promise<void> {

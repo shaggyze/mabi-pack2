@@ -838,7 +838,14 @@ async fn get_preview_ext(
 
     // Use provided metadata if available to bypass search
     let (mut raw_bytes, _discovered_iv0, _actual_mode, ent) = if let (Some(iv), Some(off), Some(m_str)) = (iv0, h_off, mode) {
-        let m = if m_str == "Xor" { encryption::Snow2Mode::Xor } else { encryption::Snow2Mode::Sub };
+        let m = match m_str.as_str() {
+            "Xor"      => encryption::Snow2Mode::Xor,
+            "ModernBE" => encryption::Snow2Mode::ModernBE,
+            "ModernLE" => encryption::Snow2Mode::ModernLE,
+            "LegacyBE" => encryption::Snow2Mode::LegacyBE,
+            "LegacyLE" => encryption::Snow2Mode::LegacyLE,
+            _          => encryption::Snow2Mode::Sub,
+        };
         common_ext::get_entry_data_exact(&archive_path, &entry_name, actual_key.clone(), actual_entries_key.clone(), iv, off, m).map_err(|e| e.to_string())?
     } else {
         common_ext::get_entry_data(&archive_path, &entry_name, actual_key.clone()).map_err(|e| e.to_string())?
