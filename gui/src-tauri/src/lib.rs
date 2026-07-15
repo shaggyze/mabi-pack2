@@ -526,9 +526,12 @@ async fn list_sequence_contents(app: tauri::AppHandle, folder: String, key: Opti
 
     // Deduplicate: archives were processed in ascending name order (data.it → data_001.it → data_002.it…)
     // so later entries overwrite earlier ones, meaning the highest-numbered archive's copy wins.
+    // Normalize backslashes → forward slashes so duplicate entries with mixed separators collapse.
     let mut deduped: std::collections::HashMap<String, AggregateEntry> = std::collections::HashMap::new();
-    for entry in all_entries {
-        deduped.insert(entry.name.clone(), entry);
+    for mut entry in all_entries {
+        if entry.name.contains('\\') { entry.name = entry.name.replace('\\', "/"); }
+        let key = entry.name.clone();
+        deduped.insert(key, entry);
     }
     let mut all_entries: Vec<AggregateEntry> = deduped.into_values().collect();
     all_entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -576,11 +579,14 @@ async fn list_pack_contents(app: tauri::AppHandle, input: String, key: Option<St
                 encryption::Snow2Mode::LegacyBE => "LegacyBE",
                 encryption::Snow2Mode::LegacyLE => "LegacyLE",
             };
-            let agg_entries: Vec<AggregateEntry> = entries.into_iter().map(|e| AggregateEntry {
-                name: e.name, source_archive: input.clone(), salt_used: salt.clone(), entries_salt_used: entries_salt.clone(),
-                size: e.original_size as u64, raw_size: e.raw_size,
-                offset: e.offset, checksum: e.checksum, flags: e.flags,
-                iv0, h_off, mode: mode_str.to_string(),
+            let agg_entries: Vec<AggregateEntry> = entries.into_iter().map(|e| {
+                let name = if e.name.contains('\\') { e.name.replace('\\', "/") } else { e.name };
+                AggregateEntry {
+                    name, source_archive: input.clone(), salt_used: salt.clone(), entries_salt_used: entries_salt.clone(),
+                    size: e.original_size as u64, raw_size: e.raw_size,
+                    offset: e.offset, checksum: e.checksum, flags: e.flags,
+                    iv0, h_off, mode: mode_str.to_string(),
+                }
             }).collect();
             let count = agg_entries.len() as u32;
             Ok(PackListResponse {

@@ -57,7 +57,8 @@ pub fn get_entry_data_exact(
 
     let (_header, entries, content_start) = common::read_meta_iv_mode_two_key(&name_variant, salt, entries_salt, &mut rd, h_off, iv0, mode)?;
 
-    if let Some(ent) = entries.iter().find(|e| e.name == entry_name) {
+    let norm = entry_name.replace('\\', "/");
+    if let Some(ent) = entries.iter().find(|e| e.name == entry_name || e.name.replace('\\', "/") == norm) {
         let data = extract::extract_single_file_to_memory(&mmap, content_start, ent, iv0, mode)?;
         return Ok((data, iv0, mode, ent.clone()));
     }
