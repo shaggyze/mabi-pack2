@@ -893,7 +893,13 @@ async fn get_preview_ext(
             }
         }
     } else if preview.file_type == "text" {
-        preview.content_text = Some(decode_text_bytes(&raw_bytes));
+        let text_slice = if raw_bytes.len() > MAX_HEX_BYTES {
+            preview.truncated = true;
+            &raw_bytes[..MAX_HEX_BYTES]
+        } else {
+            &raw_bytes[..]
+        };
+        preview.content_text = Some(decode_text_bytes(text_slice));
     } else if preview.file_type == "pmg" {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => {
@@ -1534,7 +1540,13 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
             }
         }
     } else if preview.file_type == "text" {
-        preview.content_text = Some(decode_text_bytes(&raw_bytes));
+        let text_slice = if raw_bytes.len() > MAX_HEX_BYTES {
+            preview.truncated = true;
+            &raw_bytes[..MAX_HEX_BYTES]
+        } else {
+            &raw_bytes[..]
+        };
+        preview.content_text = Some(decode_text_bytes(text_slice));
     } else if preview.file_type == "pmg" {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => { preview.pmg_geometry = Some(geo); },
