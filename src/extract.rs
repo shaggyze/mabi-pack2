@@ -28,12 +28,17 @@ pub fn extract_single_file_to_memory(
         return Err(Error::msg(format!("Raw size for '{}' extends beyond archive length.", ent.name)));
     }
 
-    let mut content = mmap[target_seek_pos_absolute as usize .. end_pos as usize].to_vec();
+    let original_content = mmap[target_seek_pos_absolute as usize .. end_pos as usize].to_vec();
+    let mut content = original_content.clone();
     let fkey = encryption::gen_file_key(&ent.name, &ent.key);
+
+    debug!("[EXTRACT_MEM] '{}' flags=0x{:02X} raw={} orig={} offset={} iv0={} mode={:?}",
+        ent.name, ent.flags, ent.raw_size, ent.original_size, ent.offset, iv0, mode);
 
     if (ent.flags & FLAG_ALL_ENCRYPTED) != 0 {
         encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut content);
-    } else if (ent.flags & FLAG_HEAD_ENCRYPTED) != 0 {
+    }
+    if (ent.flags & FLAG_HEAD_ENCRYPTED) != 0 {
         let len = std::cmp::min(content.len(), 1024);
         if len > 0 {
             encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut content[..len]);
@@ -41,12 +46,22 @@ pub fn extract_single_file_to_memory(
     }
 
     if (ent.flags & FLAG_COMPRESSED) != 0 {
+        if content.len() >= 2 {
+            debug!("[EXTRACT_MEM] '{}' post-decrypt first bytes: {:02X} {:02X}", ent.name, content[0], content[1]);
+        }
         let mut decoder = ZlibDecoder::new(&content[..]);
         let mut decompressed = Vec::with_capacity(ent.original_size as usize);
         if decoder.read_to_end(&mut decompressed).is_err() {
-            // Fallback for some regional variants
-            let mut fallback = content.clone();
-            encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut fallback);
+            // Primary failed: try fallback with the opposite encryption state.
+            // Mirrors extract_file's fallback: use original (pre-decryption) bytes if the
+            // file was marked encrypted, or try decrypting if marked unencrypted.
+            let mut fallback = original_content.clone();
+            if (ent.flags & FLAG_ALL_ENCRYPTED) == 0 {
+                encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut fallback);
+            }
+            if fallback.len() >= 2 {
+                debug!("[EXTRACT_MEM] '{}' fallback first bytes: {:02X} {:02X}", ent.name, fallback[0], fallback[1]);
+            }
             let mut dec2 = ZlibDecoder::new(&fallback[..]);
             let mut d2 = Vec::with_capacity(ent.original_size as usize);
             dec2.read_to_end(&mut d2).map_err(|_| Error::msg(format!("Zlib fail: {}", ent.name)))?;
@@ -79,7 +94,8 @@ fn extract_file<R: Read + Seek>(
 
     if (ent.flags & FLAG_ALL_ENCRYPTED) != 0 {
         encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut content);
-    } else if (ent.flags & FLAG_HEAD_ENCRYPTED) != 0 {
+    }
+    if (ent.flags & FLAG_HEAD_ENCRYPTED) != 0 {
         let len = std::cmp::min(content.len(), 1024);
         if len > 0 {
             encryption::snow2_decrypt_mode(&fkey, iv0, mode, &mut content[..len]);
