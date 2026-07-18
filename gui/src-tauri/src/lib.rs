@@ -128,6 +128,8 @@ struct Config {
     associate_xmlcompiled: bool,
     #[serde(default = "default_pack_v1_version")]
     pack_v1_version: u32,
+    #[serde(default)]
+    sequence_ignore_list: Vec<String>,
 }
 
 impl Default for Config {
@@ -160,6 +162,7 @@ impl Default for Config {
             associate_pmg: false,
             associate_xmlcompiled: false,
             pack_v1_version: 999,
+            sequence_ignore_list: Vec::new(),
         }
     }
 }
@@ -466,11 +469,16 @@ async fn list_sequence_contents(app: tauri::AppHandle, folder: String, key: Opti
     let salts = load_salts();
     let mut all_entries = Vec::new();
 
+    let ignore_set: std::collections::HashSet<String> = config.sequence_ignore_list.iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     if let Ok(paths) = fs::read_dir(&f_path) {
         let mut files: Vec<_> = paths.filter_map(|e| e.ok())
             .filter(|e| {
                 let n = e.file_name().to_string_lossy().to_lowercase();
-                n.ends_with(".it") || n.ends_with(".pack")
+                (n.ends_with(".it") || n.ends_with(".pack")) && !ignore_set.contains(&n)
             })
             .collect();
         files.sort_by_key(|e| e.file_name());
