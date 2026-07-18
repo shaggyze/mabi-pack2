@@ -63,6 +63,7 @@ interface Config {
     associate_pmg: boolean;
     associate_xmlcompiled: boolean;
     pack_v1_version: number;
+    sequence_ignore_list: string[];
 }
 
 interface PreviewData {
@@ -111,7 +112,8 @@ class App {
         associate_dds: false,
         associate_pmg: false,
         associate_xmlcompiled: false,
-        pack_v1_version: 999
+        pack_v1_version: 999,
+        sequence_ignore_list: []
     };
 
     private loadedEntries: AggregateEntry[] = [];
@@ -471,6 +473,10 @@ class App {
         const radio = document.querySelector(`input[name="list-auto-select"][value="${mode}"]`) as HTMLInputElement;
         if (radio) radio.checked = true;
 
+        // Sync sequence ignore list textarea
+        const sil = document.getElementById("settings-sequence-ignore") as HTMLTextAreaElement;
+        if (sil) sil.value = (this.config.sequence_ignore_list ?? []).join('\n');
+
         // Set tooltip on settings toggles from their label text
         const tooltipPairs: [string, string][] = [
             ["settings-startup-extract", "label_startup_extract"],
@@ -642,6 +648,12 @@ class App {
         document.getElementById("settings-pack-v1-version")?.addEventListener("change", (e) => {
             const v = parseInt((e.target as HTMLInputElement).value, 10);
             if (v > 0) { this.config.pack_v1_version = v; this.saveConfig(); }
+        });
+        document.getElementById("settings-sequence-ignore")?.addEventListener("input", (e) => {
+            const lines = (e.target as HTMLTextAreaElement).value
+                .split('\n').map(s => s.trim()).filter(s => s.length > 0);
+            this.config.sequence_ignore_list = lines;
+            this.saveConfig();
         });
 
         const toggleIds = [
