@@ -1,6 +1,6 @@
 export const locales: Record<string, any> = {
   en: {
-    title: "mabi-pack2 v1.3.7",
+    title: "mabi-pack2 v1.4.0",
     tab_dashboard: "Dashboard",
     tab_extract: "Extract",
     tab_pack: "Pack",
@@ -171,7 +171,7 @@ export const locales: Record<string, any> = {
     tree_empty: "Browse for a .it or .pack archive above to view its contents"
   },
   tw: {
-    title: "瑪奇打包工具 2 v1.3.7",
+    title: "瑪奇打包工具 2 v1.4.0",
     tab_dashboard: "控制面板",
     tab_extract: "解壓縮",
     tab_pack: "打包",
@@ -342,7 +342,7 @@ export const locales: Record<string, any> = {
     tree_empty: "在上方瀏覽 .it 或 .pack 檔案以查看內容"
   },
   ja: {
-    title: "マビノギパックユーティリティ 2 v1.3.7",
+    title: "マビノギパックユーティリティ 2 v1.4.0",
     tab_dashboard: "ダッシュボード",
     tab_extract: "展開",
     tab_pack: "パック",
@@ -513,7 +513,7 @@ export const locales: Record<string, any> = {
     tree_empty: "上のアーカイブを参照してファイルを表示してください"
   },
   ko: {
-    title: "마비노기 팩 유틸리티 2 v1.3.7",
+    title: "마비노기 팩 유틸리티 2 v1.4.0",
     tab_dashboard: "대시보드",
     tab_extract: "추출",
     tab_pack: "팩",
