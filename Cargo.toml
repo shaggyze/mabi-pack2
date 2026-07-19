@@ -1,9 +1,9 @@
 [package]
 name = "mabi-pack2-core"
-version = "1.4.0"
+version = "2.0.0"
 edition = "2021"
-authors = ["regomne <fallingsunz@gmail.com>"]
-description = "mabi-pack2: Advanced Mabinogi archive toolset."
+authors = ["ShaggyZE <shaggyze@gmail.com>"]
+description = "mabi-patcher: Advanced Mabinogi archive toolset."
 license = "MIT"
 autobins = false
 

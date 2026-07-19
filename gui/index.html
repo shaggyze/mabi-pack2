@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>mabi-pack2 v1.3.7</title>
+  <title>mabi-patcher v2.0.0</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
@@ -23,12 +23,16 @@
       <div class="sidebar-header">
         <div class="logo-wrap">
           <div class="logo">MP</div>
-          <span class="version-tag">v1.3.7</span>
+          <span class="version-tag">v2.0.0</span>
         </div>
         <button id="sidebar-toggle" class="sidebar-collapse-btn" data-tooltip="tooltip_sidebar_toggle">◀</button>
       </div>
       <nav class="nav-links">
-        <button class="nav-item active" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
+        <button class="nav-item active" data-tab="dashboard" id="tab-dashboard" data-tooltip="tab_dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-text" id="tab-dashboard-text">Dashboard</span>
+        </button>
+        <button class="nav-item" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
           <span class="nav-icon">🔓</span>
           <span class="nav-text" id="tab-extract-text">Extract</span>
         </button>
@@ -57,12 +61,44 @@
 
     <main class="container">
       <header class="top-header">
-        <h1 id="main-title">mabi-pack2</h1>
+        <h1 id="main-title">mabi-patcher</h1>
         <div id="progress-container">
           <div id="progress-bar"></div>
           <span id="eta-msg"></span>
         </div>
       </header>
+
+      <!-- Dashboard Tab -->
+      <div id="dashboard" class="tab-content active">
+        <div class="dashboard-grid">
+          <div class="dash-card">
+            <h3 id="dash-sys-title">System</h3>
+            <div class="sys-stat">
+              <span id="lbl_cpu">CPU</span>
+              <div class="dash-bar-bg"><div class="dash-bar" id="cpu-bar" style="width:0%"></div></div>
+              <span id="cpu-val">0%</span>
+            </div>
+            <div class="sys-stat">
+              <span id="lbl_mem">RAM</span>
+              <div class="dash-bar-bg"><div class="dash-bar" id="mem-bar" style="width:0%"></div></div>
+              <span id="mem-val">0 MB / 0 MB</span>
+            </div>
+          </div>
+          <div class="dash-card">
+            <h3 id="dash-pipe-title">Current Job</h3>
+            <div class="pipe-stat">
+              <div class="pipe-bar-bg"><div class="pipe-bar" id="dash-pipe-extract" style="width:0%"></div></div>
+              <span id="dash-pipe-label">Idle</span>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card recent-activity">
+          <h3 id="recentActivity">Recent Activity</h3>
+          <div id="activity-list" class="activity-list">
+            <div class="activity-item no-activity" id="noActivity">No recent activity</div>
+          </div>
+        </div>
+      </div>
 
       <!-- Extract Tab -->
       <div id="extract" class="tab-content active">
