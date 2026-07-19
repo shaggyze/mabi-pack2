@@ -5,4 +5,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/snow2.h");
     println!("cargo:rerun-if-changed=src/snow2tab.h");
     println!("cargo:rerun-if-changed=src/snow2_fast.c");
+    #[cfg(target_os = "linux")]
+    println!("cargo:rustc-link-lib=stdc++");
 }

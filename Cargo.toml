@@ -1,32 +1,133 @@
 [package]
-name = "mabi-pack2"
-version = "1.3.6"
+name = "mabi-pack2-core"
+version = "1.4.0"
 edition = "2021"
-authors = ["regomne <fallingsunz@gmail.com>", "ShaggyZE <shaggyze@gmail.com>"]
-description = "Utilities for .it archives with robust error handling and logging."
+authors = ["regomne <fallingsunz@gmail.com>"]
+description = "mabi-pack2: Advanced Mabinogi archive toolset."
 license = "MIT"
+autobins = false
+
+[lib]
+name = "mabi_pack2"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mabi-pack2"
+path = "src/bin/mabi-pack-cli.rs"
+
+[[bin]]
+name = "pmg_export"
+path = "src/bin/pmg_export.rs"
 
 [dependencies]
 aes = "0.8.4"
-block-modes = "0.9.1"
-cipher = { version = "0.4.4", features = ["block-padding", "alloc"] } # Pkcs7, UnpadError, KeyIvInit live here
+cbc = "0.1"
 md5 = "0.7.0"
-crc32fast = "1.4.0"
-rand = "0.8.5"
-walkdir = "2.3.3" # Original was 2.3.2, 2.3.3 is a patch
-regex = "1.5.6"   # Original was 1.5.4
+walkdir = "2.3.3"
+regex = "1.5.6"
 byteorder = "1.4.3"
-byte-slice-cast = "1.2.3" # As per your working version
-miniz_oxide = "0.7.1" # Original was 0.5.3, latest 0.7.x is fine
-anyhow = "1.0.86" # For error handling
-reqwest = { version = "0.11", features = ["blocking", "rustls-tls-native-roots"] } # Or "native-tls"
-clap = "~3.2.25" # For clap v3 builder syntax used in your main.rs
+byte-slice-cast = "1.2.3"
+miniz_oxide = "0.7.1"
+anyhow = "1.0.86"
+rayon = "1.10"
+flate2 = { version = "1.0", features = ["zlib-ng"] }
+memmap2 = "0.9"
+image = { version = "0.25", default-features = false, features = ["dds", "png"] }
+image_dds = "0.7"
+base64 = "0.22"
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls-native-roots"] }
+clap = "~3.2.25"
 chrono = "0.4"
-
-# Added for logging
 log = "0.4"
 simplelog = "0.12"
-env_logger = "0.9.3" # Or latest if your Rust is up-to-date
+env_logger = "0.9.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zerocopy = "0.7"
+lazy_static = "1.4"
+once_cell = "1.19"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
+
+[features]
+default = []
+debug = []
 
 [build-dependencies]
 cc = "1.0"
+
+# Debug/Research binaries
+[[bin]]
+name = "brute_footer"
+path = "src/bin/brute_footer.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "brute_force"
+path = "src/bin/brute_force.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "brute_iv"
+path = "src/bin/brute_iv.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "brute_salts"
+path = "src/bin/brute_salts.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "find_exact"
+path = "src/bin/find_exact.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "find_header"
+path = "src/bin/find_header.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "verify_tw"
+path = "src/bin/verify_tw.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "scan_0004"
+path = "src/bin/scan_0004.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "scan_mini"
+path = "src/bin/scan_mini.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "scan_archives"
+path = "src/bin/scan_archives.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "brute_force_kr"
+path = "src/bin/brute_force_kr.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "brute_force_lambda"
+path = "src/bin/brute_force_lambda.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "dump_strings"
+path = "src/bin/dump_strings.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "crack_propdb"
+path = "src/bin/crack_propdb.rs"
+required-features = ["debug"]

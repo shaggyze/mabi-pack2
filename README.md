@@ -1,59 +1,64 @@
-# Mabinogi Pack Utilities 2
+# mabi-pack2
 
-New pack utilities for Mabinogi.
+Utilities for Mabinogi `.it` and `.pack` archives with robust error handling and high-performance parallel processing.
 
-Works on *.it* packages.
+## Features
+- **Parallel Processing**: Multi-threaded extraction, packing, and key searching (powered by `rayon`).
+- **Memory Mapping**: High-speed I/O using `memmap2`.
+- **Legacy Support**: Full support for both modern `.it` and legacy `.pack` (V1) formats.
+- **Modern GUI**: Professional explorer interface with 3D mesh preview, hex viewer, and drag-and-drop support.
+- **Windows Integration**: Automatic file associations and context menu integration (fully localized).
+- **On-Demand Conversion**: Right-click to convert between `.dds` and `.png` in the explorer.
+- **Progress Tracking**: Real-time progress bars for extraction and packing operations.
+- **Deep Localization**: Multilingual interface supporting English, Chinese, Japanese, and Korean.
 
-Can run both in Windows and \*nix/MacOS.
+## Roadmap
+For advanced features like **Virtual Merging**, **Archive Drag-and-Drop Injection**, and **FileZilla-style Conflict Resolution**, please see the [TODO.md](./TODO.md) file.
 
-## Build
+## Installation
 
-Use rust 1.59 or above.
-
+### CLI
+Requires [Rust](https://rustup.rs/) 1.70+.
 ```bash
+git clone https://github.com/shaggyze/mabi-pack2.git
+cd mabi-pack2
 cargo build --release
+```
+
+### GUI
+Requires Node.js and Tauri prerequisites.
+```bash
+cd gui
+npm install
+npm run tauri build
 ```
 
 ## Usage
 
-```
-USAGE:
-    mabi-pack2 [SUBCOMMAND]
+### Extracting
+```bash
+# Basic extraction (tries hardcoded salts automatically)
+mabi-pack2 extract -i data_00.it -o ./output
 
-OPTIONS:
-    -h, --help       Print help information
-    -V, --version    Print version information
-    -v               Shows only INFO and ERROR messages.
-    -vv              Shows DEBUG, INFO, and ERROR messages.
-    -vvv             Shows everything (TRACE, DEBUG, INFO, ERROR).
-
-SUBCOMMANDS:
-    extract    Extract a .it pack (SaltKey Optional, uses salts.txt)
-    help       Print this message or the help of the given subcommand(s)
-    list       Output the file list of a .it pack (SaltKey Optional, uses salts.txt)
-    pack       Create a .it pack (SaltKey Required)
+# With specific key and regex filter
+mabi-pack2 extract -i data_00.it -o ./output -k "MySalt" -f "\.xml$"
 ```
 
-To extract all `.xml` and `.txt` files from a pack:
-
-```
-mabi-pack2 extract -i D:\Mabinogi\package\data_00788.it -o D:\data -k "SaltKey" --filter "\.xml" --filter "\.txt"
-```
-
-To list all files of a pack:
-
-```
-mabi-pack2 list -i D:\Mabinogi\package\data_00000.it -k "SaltKey"
+### Packing
+```bash
+mabi-pack2 pack -i ./input_folder -o new_pack.it -k "SecretKey"
 ```
 
-To pack files to a .it file:
-
+### Listing
+```bash
+mabi-pack2 list -i data_00.it
 ```
-mabi-pack2 pack -i D:\Mabinogi\pkg -o zz_00.it -k "SaltKey"
-```
 
-*Note:* Renaming of \*.it files is not allowed, or extracting and listing will fail.
+## Global Options
+- `-v`: Info logging
+- `-vv`: Debug logging
+- `-vvv`: Trace logging (Full details)
 
-## License
-
-This program is distributed under the MIT License.
+## Credits
+- Based on original utilities by regomne.
+- Enhanced and maintained by ShaggyZE.

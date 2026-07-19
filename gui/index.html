@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mabi-pack2 v1.3.7</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+  <style>html,body{background:#0a111a;color:#fff}</style>
+  <link rel="stylesheet" href="/src/styles.css" />
+  <script>
+    const savedTheme = localStorage.getItem("mabi_theme") || "sky-dark";
+    const themeClass = "theme-" + savedTheme;
+    document.documentElement.className = themeClass;
+    document.addEventListener("DOMContentLoaded", () => { document.body.className = themeClass; });
+  </script>
+  <script type="module" src="/src/app.ts" defer></script>
+  </head>
+  <body class="theme-sky-dark">
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo-wrap">
+          <div class="logo">MP</div>
+          <span class="version-tag">v1.3.7</span>
+        </div>
+        <button id="sidebar-toggle" class="sidebar-collapse-btn" data-tooltip="tooltip_sidebar_toggle">◀</button>
+      </div>
+      <nav class="nav-links">
+        <button class="nav-item active" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
+          <span class="nav-icon">🔓</span>
+          <span class="nav-text" id="tab-extract-text">Extract</span>
+        </button>
+        <button class="nav-item" data-tab="pack" id="tab-pack" data-tooltip="tab_pack">
+          <span class="nav-icon">📦</span>
+          <span class="nav-text" id="tab-pack-text">Pack</span>
+        </button>
+        <button class="nav-item" data-tab="list" id="tab-list" data-tooltip="tab_list">
+          <span class="nav-icon">🔍</span>
+          <span class="nav-text" id="tab-list-text">List</span>
+        </button>
+        <button class="nav-item" data-tab="differ" id="tab-differ" data-tooltip="tab_differ">
+          <span class="nav-icon">⚡</span>
+          <span class="nav-text" id="tab-differ-text">Differ</span>
+        </button>
+        <button class="nav-item" data-tab="settings" id="tab-settings" data-tooltip="tab_settings">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-text" id="tab-settings-text">Settings</span>
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="status-dot"></div>
+        <span id="ready">Ready</span>
+      </div>
+    </aside>
+
+    <main class="container">
+      <header class="top-header">
+        <h1 id="main-title">mabi-pack2</h1>
+        <div id="progress-container">
+          <div id="progress-bar"></div>
+          <span id="eta-msg"></span>
+        </div>
+      </header>
+
+      <!-- Extract Tab -->
+      <div id="extract" class="tab-content active">
+        <div class="form-group">
+          <label id="label_archive">Archive:</label>
+          <div class="input-row">
+            <input type="text" id="extract-input" />
+            <button class="tab-btn" id="btn-browse-extract-in" data-tooltip="tooltip_browse">BROWSE</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label id="label_target">Target Folder:</label>
+          <div class="input-row">
+            <input type="text" id="extract-output" />
+            <button class="tab-btn" id="btn-browse-extract-out" data-tooltip="tooltip_browse">BROWSE</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label id="label_salt">Decryption Salt:</label>
+          <div class="salt-combo-container">
+              <div class="input-row">
+                <input type="text" id="extract-key" placeholder="Auto-detecting..." autocomplete="off" />
+                <button id="btn-salt-history-extract" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+              </div>
+              <div id="salt-list-extract" class="salt-list-wrapper" style="display:none"></div>
+          </div>
+        </div>
+        <div class="form-group">
+            <label id="label_filters">File Filters (Optional):</label>
+            <input type="text" id="extract-filters" placeholder="e.g. data/db/*.xml" />
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label"><input type="checkbox" id="extract-auto-png"> <span id="label_settings_auto_png">Auto-convert .dds to .png on extract</span></label>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="extract-full-sequence"> <span>Full .it Sequence Set</span></label>
+        </div>
+        <button id="extract-run" class="run-btn" data-tooltip="tooltip_extract_run">UNPACK</button>
+      </div>
+
+      <!-- Pack Tab -->
+      <div id="pack" class="tab-content">
+        <div class="form-group">
+          <label id="label_source">Source Folder:</label>
+          <div class="input-row">
+            <input type="text" id="pack-input" />
+            <button class="tab-btn" id="btn-browse-pack-in" data-tooltip="tooltip_browse">BROWSE</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label id="label_output">Output Archive:</label>
+          <div class="input-row">
+            <input type="text" id="pack-output" />
+            <button class="tab-btn" id="btn-browse-pack-out" data-tooltip="tooltip_browse">BROWSE</button>
+          </div>
+        </div>
+        <div class="form-group">
+            <label id="label_pack_salt">Encryption Salt:</label>
+            <div class="salt-combo-container">
+                <div class="input-row">
+                  <input type="text" id="pack-key" value="})wWb4?-sVGHNoPKpc" autocomplete="off" />
+                  <button id="btn-salt-history-pack" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+                </div>
+                <div id="salt-list-pack" class="salt-list-wrapper" style="display:none"></div>
+            </div>
+        </div>
+
+        <div class="input-row" style="gap: 15px; margin-bottom: 15px;">
+            <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                <label id="label_compress_fmts">Compress Formats:</label>
+                <input type="text" id="pack-formats" value="xml,txt,set,raw" />
+            </div>
+            <div style="display:none;">
+                <input type="number" id="pack-iv" value="0" min="0" />
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label class="checkbox-label"><input type="checkbox" id="pack-auto-dds"> <span id="label_settings_auto_dds">Auto-convert .png to .dds on import</span></label>
+        </div>
+        <button id="pack-run" class="run-btn" data-tooltip="tooltip_pack_run">CREATE</button>
+
+      </div>
+
+      <!-- List Tab -->
+      <div id="list" class="tab-content">
+        <div class="form-group input-row">
+          <input type="text" id="list-input" placeholder="Archive path..." />
+          <button class="tab-btn" id="btn-browse-list" data-tooltip="tooltip_browse">BROWSE</button>
+        </div>
+
+        <div class="form-group">
+            <input type="text" id="file-search-filter" placeholder="Search files..." />
+        </div>
+
+        <div class="form-group">
+            <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="list-full-sequence"> <span id="label-list-full-sequence">Full .it Sequence Set</span></label>
+        </div>
+
+        <div class="explorer-container">
+          <div class="file-list-pane">
+            <div id="file-tree" class="results-box">
+              <div id="file-tree-empty" class="tree-empty-state" id="file-tree-empty">Browse for a .it or .pack archive above to view its contents</div>
+            </div>
+          </div>
+          <div class="preview-pane">
+            <div class="preview-header">
+                <div class="preview-tabs">
+                    <button class="preview-tab-btn active" data-ptab="visual" id="preview_tab_visual" data-tooltip="tooltip_preview_visual">Preview</button>
+                    <button class="preview-tab-btn" data-ptab="hex" id="preview_tab_hex" data-tooltip="tooltip_preview_hex">Hex View</button>
+                    <button class="preview-tab-btn" data-ptab="details" id="preview_tab_details" data-tooltip="tooltip_preview_details">Details</button>
+                </div>
+            </div>
+            <div id="preview-content" class="preview-box">
+                <div id="preview-visual" class="preview-tab-content active"></div>
+                <div id="preview-hex" class="preview-tab-content hex-view"></div>
+                <div id="preview-details" class="preview-tab-content"></div>
+                <div id="preview-audio" class="preview-tab-content audio-mode">
+                    <div class="audio-player">
+                        <div id="audio-filename">file.wav</div>
+                        <audio id="audio-elem" controls style="width:100%"></audio>
+                        <div id="audio-error-msg" style="color:var(--accent-warn,#f90);margin-top:8px;font-size:0.85em;"></div>
+                        <div style="display:flex;gap:16px;margin-top:8px;font-size:0.85em;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="audio-autoplay"> <span id="label_audio_autoplay_inline">Autoplay</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="audio-loop"> <span id="label_audio_loop">Loop</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative">
+                    <div id="three-viewport" style="width:100%; height:100%; min-height:400px"></div>
+                    <div id="pmg-info" style="position:absolute;top:6px;left:8px;font-size:0.75em;opacity:0.7;pointer-events:none;"></div>
+                </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="input-row" style="margin-top: 10px;">
+            <button id="extractSelected" class="run-btn" style="flex: 1" data-tooltip="tooltip_extract_sel">EXTRACT SELECTED</button>
+            <button id="extractAll" class="run-btn" style="flex: 1" data-tooltip="tooltip_extract_all">EXTRACT ALL</button>
+            <button id="ctxConvIt" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_it">TO .IT</button>
+            <button id="ctxConvPack" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_pack">TO .PACK</button>
+        </div>
+      </div>
+
+      <!-- Differ Tab -->
+      <div id="differ" class="tab-content">
+          <div class="form-group">
+              <label id="label_original">Original Directory:</label>
+              <div class="input-row">
+                  <input type="text" id="differ-old" />
+                  <button class="tab-btn" id="btn-browse-differ-old" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+          </div>
+          <div class="form-group">
+              <label id="label_modified">Modified Directory:</label>
+              <div class="input-row">
+                  <input type="text" id="differ-new" />
+                  <button class="tab-btn" id="btn-browse-differ-new" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+          </div>
+          <div class="form-group">
+              <label id="label_out_patch">Output Patch:</label>
+              <div class="input-row">
+                  <input type="text" id="differ-output" placeholder="Save patch as..." />
+                  <button class="tab-btn" id="btn-browse-differ-out" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+          </div>
+          <div class="form-group">
+              <label id="label_differ_salt">Encryption Salt:</label>
+              <div class="salt-combo-container">
+                  <div class="input-row">
+                    <input type="text" id="differ-key" value="@6QeTuOaDgJlZcBm#9" autocomplete="off" />
+                    <button id="btn-salt-history-differ" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+                  </div>
+                  <div id="salt-list-differ" class="salt-list-wrapper" style="display:none"></div>
+              </div>
+          </div>
+
+          <button id="differ-run" class="run-btn" data-tooltip="tooltip_differ_run">GENERATE DIFF</button>
+      </div>
+
+      <!-- Settings Tab -->
+      <div id="settings" class="tab-content">
+        <div class="settings-section">
+            <h3 id="set_visuals">Visuals</h3>
+            <div class="form-group">
+              <label id="label_lang">Language:</label>
+              <select id="settings-lang">
+                <option value="en">English</option>
+                <option value="tw">繁體中文 (TW)</option>
+                <option value="ja">日本語 (JP)</option>
+                <option value="ko">한국어 (KR)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label id="label_theme">Theme:</label>
+              <select id="settings-theme">
+                <option value="sky-dark">Sky (Dark)</option>
+                <option value="sky-light">Sky (Light)</option>
+                <option value="mint-dark">Mint (Dark)</option>
+                <option value="mint-light">Mint (Light)</option>
+                <option value="peach-dark">Peach (Dark)</option>
+                <option value="peach-light">Peach (Light)</option>
+                <option value="rose-dark">Rose (Dark)</option>
+                <option value="rose-light">Rose (Light)</option>
+                <option value="gold-dark">Gold (Dark)</option>
+                <option value="gold-light">Gold (Light)</option>
+                <option value="sunset-dark">Sunset (Dark)</option>
+                <option value="sunset-light">Sunset (Light)</option>
+                <option value="cream-dark">Cream (Dark)</option>
+                <option value="cream-light">Cream (Light)</option>
+              </select>
+            </div>
+            <div class="form-group">
+                <div style="display:flex; gap:12px;">
+                    <div style="flex:1">
+                        <label id="label_region_key_read">Region Key (Read):</label>
+                        <input type="text" id="settings-region-key" placeholder="@6QeTuOaDgJlZcBm#9" data-tooltip="tooltip_region_key_read" />
+                    </div>
+                    <div style="flex:1">
+                        <label id="label_region_key_write">Region Key (Write):</label>
+                        <input type="text" id="settings-write-salt" placeholder="})wWb4?-sVGHNoPKpc" data-tooltip="tooltip_region_key_write" />
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-section">
+            <h3 id="set_startup">Startup & Automation</h3>
+            <div class="sys-stat">
+                <span id="label_startup_extract">Auto extract</span>
+                <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_startup_switch">Switch to List tab on open</span>
+                <label class="switch"><input type="checkbox" id="settings-startup-switch"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_list_auto_expand">Auto-expand folders when filtering</span>
+                <label class="switch"><input type="checkbox" id="settings-list-auto-expand"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_audio_autoplay">Autoplay audio previews</span>
+                <label class="switch"><input type="checkbox" id="settings-audio-autoplay"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_audio_loop">Loop audio previews</span>
+                <label class="switch"><input type="checkbox" id="settings-audio-loop"><span class="slider"></span></label>
+            </div>
+            <div class="settings-radio-row">
+                <span id="label_list_auto_select">Auto-select on filter</span>
+                <div class="radio-group" id="list-auto-select-group">
+                    <label class="radio-label"><input type="radio" name="list-auto-select" value="none" id="select-none"> <span id="label_select_none">None</span></label>
+                    <label class="radio-label"><input type="radio" name="list-auto-select" value="first" id="select-first"> <span id="label_select_first">First</span></label>
+                    <label class="radio-label"><input type="radio" name="list-auto-select" value="all" id="select-all"> <span id="label_select_all">All</span></label>
+                </div>
+            </div>
+            <div class="form-group" style="margin-top:12px;">
+                <label id="label_sequence_ignore_list" data-tooltip="tooltip_sequence_ignore_list">Sequence Ignore List (one filename per line):</label>
+                <textarea id="settings-sequence-ignore" rows="3" style="width:100%;resize:vertical;font-family:monospace;font-size:12px;" placeholder="uotiara_00001.it"></textarea>
+            </div>
+        </div>
+
+        <div class="settings-section">
+            <h3 id="set_shell">Shell & Registry</h3>
+            <div class="sys-stat">
+                <span id="label_assoc_it">Associate .it files</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-it"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_assoc_pack">Associate .pack files</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-pack"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_settings_assoc_it_full">Add 'Full Sequence' to Explorer context menu</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-it-full"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_assoc_dds">Associate .dds files</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_assoc_pmg">Associate .pmg files</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-pmg"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_assoc_xmlcompiled">Associate .xml.compiled files</span>
+                <label class="switch"><input type="checkbox" id="settings-assoc-xmlcompiled"><span class="slider"></span></label>
+            </div>
+
+            <h4 id="set_conversion" style="margin: 15px 0 10px 0; border-bottom: 1px solid var(--border-glass); padding-bottom: 5px;">Conversion Defaults</h4>
+            <div class="sys-stat">
+                <span id="label_settings_auto_png">Auto-convert .dds to .png on extract</span>
+                <label class="switch"><input type="checkbox" id="settings-auto-png"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span id="label_settings_auto_dds">Auto-convert .png to .dds on import</span>
+                <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
+            </div>
+
+            <h4 id="set_pack_opts" style="margin: 15px 0 10px 0; border-bottom: 1px solid var(--border-glass); padding-bottom: 5px;">Pack Options</h4>
+            <div class="form-group">
+                <label id="label_pack_v1_version">Legacy .pack format version:</label>
+                <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
+            </div>
+
+            <button id="btn_admin" class="tab-btn" style="margin-top:10px" data-tooltip="tooltip_admin">Apply Registry Changes (Requires Admin)</button>
+        </div>
+
+        <div class="settings-section">
+            <h3 id="set_engine">Engine</h3>
+            <div class="form-group">
+              <label id="label_log">Log Level:</label>
+              <select id="settings-log">
+                <option value="info">Info</option>
+                <option value="warn">Warning</option>
+                <option value="error">Error</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </div>
+            <button id="btn_wipe" class="tab-btn" data-tooltip="tooltip_wipe">Wipe Salt History</button>
+        </div>
+      </div>
+
+      <div class="log-container">
+        <h3 id="logs">LOGS:</h3>
+        <div id="log-view" class="log-box"></div>
+        <div class="terminal-input-wrapper">
+          <span class="terminal-prompt">></span>
+          <input type="text" id="terminal-input" placeholder="Type a command (e.g. help, clear, extract)..." />
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Context Menu -->
+  <div id="custom-menu" class="context-menu" style="display:none">
+    <div class="menu-item" id="menu-extract"><span id="ctx_extract">Extract</span></div>
+    <div class="menu-item" id="menu-copy-name"><span id="ctx_copy_name">Copy Name</span></div>
+    <div class="menu-item" id="menu-copy-key"><span id="ctx_copy_key">Copy Key</span></div>
+    <div class="menu-divider"></div>
+    <div class="menu-item" id="menu-conv-png"><span id="ctx_conv_png">Convert to PNG</span></div>
+    <div class="menu-item" id="menu-conv-dds"><span id="ctx_conv_dds">Convert to DDS</span></div>
+  </div>
+</body>
+</html>
+>
+>
+>

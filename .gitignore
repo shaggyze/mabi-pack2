@@ -1,3 +1,49 @@
+# Rust
 /target
-/.idea
-copy.bat
+
+# Tauri
+/gui/src-tauri/target
+/gui/src-tauri/gen
+/gui/dist
+/gui/node_modules
+
+# Logs
+*.log
+log.txt
+GEMINI.md
+CLAUDE.md
+
+# OS / IDE
+.idea
+.vscode
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Agent / Temp
+.gemini
+.claude
+.agents
+.clinerules
+.cursor
+.windsurf
+skills-lock.json
+
+# Generated / temp
+output.csv
+*.bak
+*_bak
+*.bak*
+build_log.txt
+*.zip
+
+# Scratch / diagnostics
+examples/
+
+# Binaries
+*.exe
+*.pdb
+*.msi

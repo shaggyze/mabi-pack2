@@ -1,0 +1,21 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background Shield/Hexagon -->
+  <path d="M256 20L480 128V384L256 492L32 384V128L256 20Z" fill="#050508" stroke="#00F2FF" stroke-width="12"/>
+  
+  <!-- Inner Detail Lines -->
+  <path d="M256 60L440 148V364L256 452L72 364V148L256 60Z" stroke="#00F2FF" stroke-width="4" stroke-opacity="0.3"/>
+  
+  <!-- The "MP" Letters -->
+  <g fill="#00F2FF" style="filter: drop-shadow(0 0 15px #00F2FF)">
+    <!-- M -->
+    <path d="M120 180H160V332H120V180Z"/>
+    <path d="M160 180L210 280L260 180H300V332H260V230L210 332L160 230V180Z"/>
+    <!-- P -->
+    <path d="M320 180H400C420 180 435 195 435 215V250C435 270 420 285 400 285H360V332H320V180ZM360 220V245H395V220H360Z"/>
+  </g>
+  
+  <!-- Technical Accents -->
+  <circle cx="256" cy="256" r="230" stroke="#00F2FF" stroke-width="2" stroke-dasharray="20 10" stroke-opacity="0.2"/>
+  <rect x="240" y="460" width="32" height="6" fill="#00F2FF"/>
+  <rect x="240" y="46" width="32" height="6" fill="#00F2FF"/>
+</svg>
