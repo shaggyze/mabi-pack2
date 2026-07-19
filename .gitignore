@@ -37,6 +37,11 @@ output.csv
 *.bak
 *_bak
 *.bak*
+build_log.txt
+*.zip
+
+# Scratch / diagnostics
+examples/
 
 # Binaries
 *.exe
