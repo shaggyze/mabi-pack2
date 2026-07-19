@@ -1,302 +1,282 @@
 // common.rs
 
 use crate::encryption;
-use anyhow::{Context as AnyhowContext, Error};
+use anyhow::Error;
 use byte_slice_cast::AsSliceOf;
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Read, Seek, SeekFrom, ErrorKind as IoErrorKind};
+use std::io::{Cursor, Read, Seek, SeekFrom, ErrorKind as IoErrorKind};
 use std::path::Path;
 
-use log::{debug, error, trace};
+use log::{debug, trace};
 
 #[derive(Debug, Clone)]
-pub struct FileHeader {
-    pub checksum: u32,
-    pub version: u8,
-    pub file_cnt: u32,
-}
+pub struct FileHeader { pub checksum: u32, pub version: u8, pub file_cnt: u32 }
 
 impl FileHeader {
     pub fn new<R: Read>(reader: &mut R) -> Result<Self, std::io::Error> {
         trace!("[HEADER] Attempting to read checksum (u32)...");
         let checksum = reader.read_u32::<LittleEndian>()?;
-        trace!("[HEADER] Read checksum_raw: 0x{:X} ({})", checksum, checksum);
+        trace!("[HEADER] Read checksum: 0x{:08X}", checksum);
         trace!("[HEADER] Attempting to read version (u8)...");
         let version = reader.read_u8()?;
-        trace!("[HEADER] Read version_raw: {}", version);
+        trace!("[HEADER] Read version: {}", version);
         trace!("[HEADER] Attempting to read file_cnt (u32)...");
         let file_cnt = reader.read_u32::<LittleEndian>()?;
-        trace!("[HEADER] Read file_cnt_raw: 0x{:X} ({})", file_cnt, file_cnt);
+        trace!("[HEADER] Read file_cnt: 0x{:08X}", file_cnt);
         Ok(FileHeader { checksum, version, file_cnt })
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FileEntry {
-    pub name: String,
-    pub checksum: u32,
-    pub flags: u32,
-    pub offset: u32,
-    pub original_size: u32,
-    pub raw_size: u32,
-    pub key: [u8; 16],
+pub fn validate_header(hdr: &FileHeader) -> Result<(), Error> {
+    let calculated = (hdr.version as u32).wrapping_add(hdr.file_cnt);
+    if calculated == hdr.checksum {
+        trace!("[HEADER_VALIDATE] SUCCESS: Calculated sum matched 0x{:08X}", calculated);
+        Ok(())
+    } else {
+        debug!("[HEADER_VALIDATE] FAIL: Calculated 0x{:08X} != Header 0x{:08X}", calculated, hdr.checksum);
+        Err(Error::msg(format!("Checksum mismatch: calculated 0x{:08X}, header has 0x{:08X}", calculated, hdr.checksum)))
+    }
 }
+
+#[derive(Debug, Clone)]
+pub struct FileEntry { pub name: String, pub checksum: u32, pub flags: u32, pub offset: u32, pub original_size: u32, pub raw_size: u32, pub key: [u8; 16] }
 
 pub const FLAG_COMPRESSED: u32 = 1;
 pub const FLAG_ALL_ENCRYPTED: u32 = 2;
 pub const FLAG_HEAD_ENCRYPTED: u32 = 4;
 
-pub trait StreamPositionProvider {
-    fn current_stream_position(&self) -> u64;
-}
-
-impl<'a, R: Read> StreamPositionProvider for encryption::Snow2Decoder<'a, R> {
-    fn current_stream_position(&self) -> u64 {
-        self.stream_position()
-    }
-}
-impl<T: StreamPositionProvider + ?Sized> StreamPositionProvider for &mut T {
-    fn current_stream_position(&self) -> u64 {
-        (**self).current_stream_position()
-    }
-}
-
+pub trait StreamPositionProvider { fn current_stream_position(&self) -> u64; }
+impl<'a, R: Read> StreamPositionProvider for encryption::Snow2Decoder<'a, R> { fn current_stream_position(&self) -> u64 { self.current_stream_position() } }
+impl<T: StreamPositionProvider + ?Sized> StreamPositionProvider for &mut T { fn current_stream_position(&self) -> u64 { (**self).current_stream_position() } }
 
 impl FileEntry {
-    pub fn new<R>(reader: &mut R) -> Result<Self, std::io::Error>
-    where
-        R: Read + StreamPositionProvider + ?Sized,
-    {
-        let log_read_attempt = |field_name: &str, expected_bytes: usize, r: &R| -> u64 {
-            let pos = r.current_stream_position();
-            trace!("[ENTRY @ 0x{:X}] Reading {}: {} bytes expected.", pos, field_name, expected_bytes);
-            pos
-        };
-
-        let log_read_failure = |field_name: &str, pos: u64, expected_bytes: usize, e: &std::io::Error| {
-            error!("[ENTRY @ 0x{:X}] FAILED to read {} ({} bytes expected): {}. Kind: {:?}",
-                   pos, field_name, expected_bytes, e, e.kind());
-        };
-        
-        let pos_len = log_read_attempt("filename length (num_chars)", 4, reader);
-        let str_len_u32 = reader.read_u32::<LittleEndian>().map_err(|e| { log_read_failure("filename length (num_chars)", pos_len, 4, &e); e })?;
-        trace!("[ENTRY] Read filename length (num_chars): {} (0x{:X})", str_len_u32, str_len_u32);
-
-        if str_len_u32 == 0 || str_len_u32 > 4096 { 
-            debug!("[ENTRY] Suspicious filename length (num_chars): {}. Potential corruption or incorrect decryption key for entries.", str_len_u32);
-            return Err(std::io::Error::new(IoErrorKind::InvalidData, format!("Suspicious filename length: {}", str_len_u32)));
-        }
-
-        let fname_bytes_len = str_len_u32 as usize * 2;
-        let pos_fname = log_read_attempt("filename UTF-16 bytes", fname_bytes_len, reader);
-        let mut fname_bytes = vec![0u8; fname_bytes_len];
-        reader.read_exact(&mut fname_bytes).map_err(|e| { log_read_failure("filename UTF-16 bytes", pos_fname, fname_bytes_len, &e); e })?;
-        trace!("[ENTRY] Read filename_bytes (first 64 hex if long, else full): {:?}", 
-            &fname_bytes[..std::cmp::min(fname_bytes.len(), 64)].iter().map(|b| format!("{:02X}",b)).collect::<String>());
-
-        let fname_string = String::from_utf16(fname_bytes.as_slice_of::<u16>().map_err(|e| {
-            error!("[ENTRY] Failed to cast filename bytes (len {}) to u16 slice: {:?}", fname_bytes.len(), e);
-            std::io::Error::new(IoErrorKind::InvalidData, "filename bytes not aligned for u16 or wrong length")
-        })?)
-        .map_err(|e| {
-            error!("[ENTRY] String::from_utf16 failed for filename: {}", e);
-            std::io::Error::new(IoErrorKind::InvalidData, format!("UTF-16 conversion error: {}", e))
-        })?;
-        trace!("[ENTRY] Decoded filename: '{}'", fname_string);
-        
-        let read_u32_field = |name: &str, r: &mut R| -> Result<u32, std::io::Error> {
-            let pos = log_read_attempt(name, 4, r);
-            let val = r.read_u32::<LittleEndian>().map_err(|e| { log_read_failure(name, pos, 4, &e); e })?;
-            trace!("[ENTRY for '{}'] Read {}: 0x{:X} ({})", fname_string, name, val, val);
-            Ok(val)
-        };
-        
-        let checksum = read_u32_field("entry checksum", reader)?;
-        let flags = read_u32_field("entry flags", reader)?;
-        let offset = read_u32_field("entry data offset (blocks)", reader)?;
-        let original_size = read_u32_field("entry original_size", reader)?;
-        let raw_size = read_u32_field("entry raw_size", reader)?;
-
-        let mut key_bytes = [0u8; 16];
-        let pos_key = log_read_attempt("entry key", 16, reader);
-        reader.read_exact(&mut key_bytes).map_err(|e| { log_read_failure("entry key", pos_key, 16, &e); e })?;
-        trace!("[ENTRY for '{}'] Read entry key: {:?}", fname_string, key_bytes);
-
-        Ok(FileEntry { name: fname_string, checksum, flags, offset, original_size, raw_size, key: key_bytes })
+    pub fn new<R>(reader: &mut R) -> Result<Self, std::io::Error> where R: Read + StreamPositionProvider + ?Sized, {
+        let str_len_u32 = reader.read_u32::<LittleEndian>()?;
+        if str_len_u32 == 0 || str_len_u32 > 4096 { return Err(std::io::Error::new(IoErrorKind::InvalidData, format!("Suspicious filename length: {}", str_len_u32))); }
+        let mut fname_bytes = vec![0u8; str_len_u32 as usize * 2];
+        reader.read_exact(&mut fname_bytes)?;
+        let fname_string = String::from_utf16(fname_bytes.as_slice_of::<u16>().map_err(|_| std::io::Error::new(IoErrorKind::InvalidData, "filename bytes not aligned"))?).map_err(|e| std::io::Error::new(IoErrorKind::InvalidData, e))?;
+        let checksum = reader.read_u32::<LittleEndian>()?;
+        let flags = reader.read_u32::<LittleEndian>()?;
+        let offset = reader.read_u32::<LittleEndian>()?;
+        let original_size = reader.read_u32::<LittleEndian>()?;
+        let raw_size = reader.read_u32::<LittleEndian>()?;
+        let mut key = [0u8; 16];
+        reader.read_exact(&mut key)?;
+        Ok(FileEntry { name: fname_string, checksum, flags, offset, original_size, raw_size, key })
     }
 }
-
 
 pub fn get_final_file_name(fname: &str) -> Result<String, Error> {
-    Path::new(fname)
-        .file_name()
-        .ok_or_else(|| Error::msg(format!("not a valid file path: {}", fname)))
-        .map(|s| s.to_str().unwrap_or("").to_owned())
+    Path::new(fname).file_name().ok_or_else(|| Error::msg("not a valid file path")).map(|s| s.to_str().unwrap_or("").to_owned())
 }
 
-// --- START OF FIX ---
-// Changed function signature to accept `header_offset`
-pub fn read_header<RUND: Read + Seek>(
-    fname_for_key: &str,
-    skey: &str,
-    underlying_rd: &mut RUND,
-    header_offset: u64,
-) -> Result<FileHeader, Error> {
-    trace!("[HEADER] read_header: Using fname_for_key='{}', skey='{}', testing at offset 0x{:X}", fname_for_key, skey, header_offset);
-    let key = encryption::gen_header_key(fname_for_key, skey);
-    trace!("[HEADER] read_header: Generated header key (first 4 bytes): {:?}", &key[..std::cmp::min(key.len(), 4)]);
-    
-    // No longer calculating offset here, using the one passed in.
-    let current_pos_before_seek = underlying_rd.stream_position().context("Failed to get stream position before header seek")?;
-    trace!("[HEADER] read_header: Underlying stream position before seek: 0x{:X}", current_pos_before_seek);
-    
-    // Using the passed-in `header_offset` instead of a locally calculated one.
-    underlying_rd.seek(SeekFrom::Start(header_offset)).context(format!("Failed to seek to header offset 0x{:X}", header_offset))?;
-    trace!("[HEADER] read_header: Seeked underlying stream to 0x{:X} for header data.", header_offset);
-    
-    let mut dec_stream = encryption::Snow2Decoder::new(&key, underlying_rd);
-    trace!("[HEADER] read_header: Initialized Snow2Decoder for header.");
-    
-    let header_result = FileHeader::new(&mut dec_stream);
-    match &header_result {
-        Ok(h) => trace!("[HEADER] read_header: FileHeader::new successfully returned: {:?}", h),
-        Err(e) => {
-            let dec_stream_pos = dec_stream.current_stream_position();
-            error!("[HEADER] read_header: FileHeader::new failed: {}. Decrypting stream pos (approx): 0x{:X}. Error suggests key/offset wrong or data corrupt.", e, dec_stream_pos);
+pub fn validate_entries(entries: &[FileEntry]) -> Result<(), Error> {
+    for (idx, ent) in entries.iter().enumerate() {
+        let key_sum = ent.key.iter().fold(0u32, |s, v| s.wrapping_add(*v as u32));
+        let calculated_sum = ent.flags.wrapping_add(ent.offset).wrapping_add(ent.original_size).wrapping_add(ent.raw_size).wrapping_add(key_sum);
+        if calculated_sum != ent.checksum {
+            trace!("[ENTRIES] Entry {} checksum wrong. Name='{}'. Calc: 0x{:X}, Entry: 0x{:X}.", idx, ent.name, calculated_sum, ent.checksum);
+            return Err(Error::msg(format!("entry checksum wrong, file name: {}", ent.name)));
         }
     }
-    header_result.map_err(Error::new)
-}
-// --- END OF FIX ---
-
-
-pub fn validate_header(hdr: &FileHeader) -> Result<(), Error> {
-    trace!("[HEADER] validate_header: Validating header: {:?}", hdr);
-    let calculated_value_for_checksum = (hdr.version as u32).wrapping_add(hdr.file_cnt);
-    trace!("[HEADER] validate_header: version_u32 ({}) + file_cnt ({}) = calculated_value ({}) vs hdr.checksum ({})",
-        hdr.version as u32, hdr.file_cnt, calculated_value_for_checksum, hdr.checksum);
-    if calculated_value_for_checksum != hdr.checksum {
-        debug!("[HEADER] validate_header: Header checksum mismatch! Calculated: {} (0x{:X}), Expected in header: {} (0x{:X}). Header: {:?}",
-            calculated_value_for_checksum, calculated_value_for_checksum, hdr.checksum, hdr.checksum, hdr);
-        Err(Error::msg("header checksum wrong"))
-    } else {
-        debug!("[HEADER] validate_header: Header checksum OK.");
-        Ok(())
-    }
+    Ok(())
 }
 
-pub fn read_entries<RUND: Read + Seek>(
-    fname_for_key: &str,
-    header: &FileHeader,
-    skey: &str,
-    underlying_rd: &mut RUND,
-    use_formula_only: bool,
-) -> Result<Vec<FileEntry>, Error> {
-    debug!("[ENTRIES] read_entries: Reading {} file entries for '{}'. Heuristic Mode: {}", header.file_cnt, fname_for_key, !use_formula_only);
-
-    let entries_key = encryption::gen_entries_key(fname_for_key, skey);
-    let formula_calculated_entries_offset = (encryption::gen_header_offset(fname_for_key) + encryption::gen_entries_offset(fname_for_key)) as u64;
-    
-    let mut candidate_offsets = vec![formula_calculated_entries_offset];
-    
-    if !use_formula_only {
-        debug!("[ENTRIES] Formula failed, trying internal offset heuristics...");
-        let offset_header_block_abs = encryption::gen_header_offset(fname_for_key) as u64;
-        let offset_entry_sub_block_abs = encryption::gen_entries_offset(fname_for_key) as u64;
-        
-        candidate_offsets.push(offset_entry_sub_block_abs);
-        candidate_offsets.push(offset_header_block_abs + 9);
-        if formula_calculated_entries_offset > 8 {
-            candidate_offsets.push(formula_calculated_entries_offset - 8);
-            candidate_offsets.push(formula_calculated_entries_offset - 4);
-        }
-        candidate_offsets.push(formula_calculated_entries_offset + 4);
-        candidate_offsets.push(formula_calculated_entries_offset + 8);
-        candidate_offsets.sort_unstable();
-        candidate_offsets.dedup();
+pub fn try_read_and_validate_header_iv<RUND: Read + Seek>(rd: &mut RUND, fname: &str, skey: &str, offset: u64, iv0: u32, mode: encryption::Snow2Mode) -> Result<Option<(FileHeader, u64)>, Error> {
+    rd.seek(SeekFrom::Start(offset))?;
+    let key = encryption::gen_header_key(fname, skey);
+    let mut dec_stream = encryption::Snow2Decoder::new_iv_mode(&key, iv0, mode, rd);
+    if let Ok(header) = FileHeader::new(&mut dec_stream) {
+        if validate_header(&header).is_ok() { return Ok(Some((header, offset + 9))); }
     }
+    Ok(None)
+}
+
+pub fn find_header_unified<RUND: Read + Seek>(rd: &mut RUND, fname: &str, skey: &str) -> Result<Option<(FileHeader, u64, u32, encryption::Snow2Mode)>, Error> {
+    let size = rd.seek(SeekFrom::End(0))?;
+    let modes = [encryption::Snow2Mode::Sub, encryption::Snow2Mode::Xor, encryption::Snow2Mode::ModernBE, encryption::Snow2Mode::ModernLE, encryption::Snow2Mode::LegacyBE, encryption::Snow2Mode::LegacyLE];
     
-    let original_rd_pos = underlying_rd.stream_position()?;
-
-    for offset in candidate_offsets {
-        trace!("[ENTRIES] Attempting to read entries list from offset 0x{:X}", offset);
-        if underlying_rd.seek(SeekFrom::Start(offset)).is_err() {
-            trace!("[ENTRIES] Seek to offset 0x{:X} failed, skipping.", offset);
-            continue;
-        }
-
-        let mut dec_stream = encryption::Snow2Decoder::new(&entries_key, underlying_rd);
-        
-        let entries_result: Result<Vec<FileEntry>, _> = (0..header.file_cnt)
-            .map(|_| FileEntry::new(&mut dec_stream))
-            .collect();
-
-        if let Ok(entries) = entries_result {
-            debug!("[ENTRIES] Successfully read all {} declared entries from offset 0x{:X}", entries.len(), offset);
-            return Ok(entries);
-        } else {
-            trace!("[ENTRIES] Reading entries from offset 0x{:X} failed.", offset);
+    for iv0 in &[1, 0] {
+        for mode in &modes {
+            // Priority 1: Footer pointer
+            if size > 8 {
+                rd.seek(SeekFrom::End(-4))?;
+                let mut f_bytes = [0u8; 4];
+                if rd.read_exact(&mut f_bytes).is_ok() {
+                    let key = encryption::gen_header_key(fname, skey);
+                    let mut cur = Cursor::new(f_bytes);
+                    let mut dec = encryption::Snow2Decoder::new_iv_mode(&key, *iv0, *mode, &mut cur);
+                    if let Ok(off) = dec.read_u32::<LittleEndian>() {
+                        if (off as u64) < size - 9 {
+                            if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, off as u64, *iv0, *mode) { 
+                                // Deep validation: verify entries before accepting
+                                if let Ok((_, entries, _)) = read_meta_iv_mode(fname, skey, rd, off as u64, *iv0, *mode) {
+                                    if validate_entries(&entries).is_ok() {
+                                        return Ok(Some((header, off as u64, *iv0, *mode)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Priority 2: Generated offset
+            let f_off = encryption::gen_header_offset(fname) as u64;
+            if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, f_off, *iv0, *mode) { 
+                if let Ok((_, entries, _)) = read_meta_iv_mode(fname, skey, rd, f_off, *iv0, *mode) {
+                    if validate_entries(&entries).is_ok() {
+                        return Ok(Some((header, f_off, *iv0, *mode))); 
+                    }
+                }
+            }
+            // Priority 3: Shifts
+            for shift in &[0, 108, 109] {
+                if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, *shift, *iv0, *mode) { 
+                    if let Ok((_, entries, _)) = read_meta_iv_mode(fname, skey, rd, *shift, *iv0, *mode) {
+                        if validate_entries(&entries).is_ok() {
+                            return Ok(Some((header, *shift, *iv0, *mode)));
+                        }
+                    }
+                }
+            }
         }
     }
-    
-    underlying_rd.seek(SeekFrom::Start(original_rd_pos))?;
+    Ok(None)
+}
+
+pub fn read_meta_iv_mode<RUND: Read + Seek>(fname: &str, skey: &str, rd: &mut RUND, header_offset: u64, iv0: u32, mode: encryption::Snow2Mode) -> Result<(FileHeader, Vec<FileEntry>, u64), Error> {
+    let header = try_read_and_validate_header_iv(rd, fname, skey, header_offset, iv0, mode)?.map(|(h, _)| h).ok_or_else(|| Error::msg("Header validation failed"))?;
+    let e_key = encryption::gen_entries_key(fname, skey);
+    let e_off_gen = encryption::gen_entries_offset(fname) as u64;
+    let mut candidate_e_offs = vec![header_offset + 9, header_offset + e_off_gen, encryption::gen_header_offset(fname) as u64 + e_off_gen];
+    candidate_e_offs.sort_unstable(); candidate_e_offs.dedup();
+    for off in candidate_e_offs {
+        if rd.seek(SeekFrom::Start(off)).is_err() { continue; }
+        let mut e_dec = encryption::Snow2Decoder::new_iv_mode(&e_key, iv0, mode, rd);
+        let mut entries = Vec::with_capacity(header.file_cnt as usize);
+        let mut success = true;
+        for _ in 0..header.file_cnt {
+            match FileEntry::new(&mut e_dec) { 
+                Ok(ent) => {
+                    // Stricter validation: entry name must be plausible
+                    if ent.name.is_empty() || ent.name.len() > 1024 || ent.original_size > 500_000_000 {
+                        success = false;
+                        break;
+                    }
+                    entries.push(ent);
+                }, 
+                Err(_) => { success = false; break; } 
+            }
+        }
+        if success && !entries.is_empty() && validate_entries(&entries).is_ok() { 
+            let pos = rd.stream_position().unwrap_or(0);
+            let content_offset = (pos + 1023) & !1023u64;
+            return Ok((header, entries, content_offset)); 
+        }
+    }
+    Err(Error::msg("Failed entries"))
+}
+
+/// Like `find_header_unified` but skips deep entries validation.
+/// Used as Phase 1 of the two-phase salt search: validates the header checksum only.
+pub fn find_header_only<RUND: Read + Seek>(rd: &mut RUND, fname: &str, skey: &str) -> Result<Option<(FileHeader, u64, u32, encryption::Snow2Mode)>, Error> {
+    let size = rd.seek(SeekFrom::End(0))?;
+
+    // Fast path: NA common case — Sub mode, iv0=0, formula offset.
+    // Hits on the very first try for all known NA archives.
+    let f_off = encryption::gen_header_offset(fname) as u64;
+    if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, f_off, 0, encryption::Snow2Mode::Sub) {
+        return Ok(Some((header, f_off, 0, encryption::Snow2Mode::Sub)));
+    }
+
+    // Full fallback for other regions/formats (KR, TW, footer-pointer archives, etc.)
+    // iv0=0 first since NA is confirmed; iv0=1 kept for unknown KR/other behaviour.
+    let modes = [encryption::Snow2Mode::Sub, encryption::Snow2Mode::Xor, encryption::Snow2Mode::ModernBE, encryption::Snow2Mode::ModernLE, encryption::Snow2Mode::LegacyBE, encryption::Snow2Mode::LegacyLE];
+    for iv0 in &[0u32, 1] {
+        for mode in &modes {
+            if size > 8 {
+                rd.seek(SeekFrom::End(-4))?;
+                let mut f_bytes = [0u8; 4];
+                if rd.read_exact(&mut f_bytes).is_ok() {
+                    let key = encryption::gen_header_key(fname, skey);
+                    let mut cur = Cursor::new(f_bytes);
+                    let mut dec = encryption::Snow2Decoder::new_iv_mode(&key, *iv0, *mode, &mut cur);
+                    if let Ok(off) = dec.read_u32::<LittleEndian>() {
+                        if (off as u64) < size - 9 {
+                            if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, off as u64, *iv0, *mode) {
+                                return Ok(Some((header, off as u64, *iv0, *mode)));
+                            }
+                        }
+                    }
+                }
+            }
+            // Skip Sub+iv0=0+formula — already tried in fast path above
+            if !(*iv0 == 0 && matches!(mode, encryption::Snow2Mode::Sub)) {
+                if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, f_off, *iv0, *mode) {
+                    return Ok(Some((header, f_off, *iv0, *mode)));
+                }
+            }
+            for shift in &[0u64, 108, 109] {
+                if let Ok(Some((header, _))) = try_read_and_validate_header_iv(rd, fname, skey, *shift, *iv0, *mode) {
+                    return Ok(Some((header, *shift, *iv0, *mode)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Like `read_meta_iv_mode` but decrypts the entries table with a separate salt.
+/// Supports archives where the header salt and entries salt differ.
+pub fn read_meta_iv_mode_two_key<RUND: Read + Seek>(fname: &str, header_skey: &str, entries_skey: &str, rd: &mut RUND, header_offset: u64, iv0: u32, mode: encryption::Snow2Mode) -> Result<(FileHeader, Vec<FileEntry>, u64), Error> {
+    let header = try_read_and_validate_header_iv(rd, fname, header_skey, header_offset, iv0, mode)?.map(|(h, _)| h).ok_or_else(|| Error::msg("Header validation failed"))?;
+    let e_key = encryption::gen_entries_key(fname, entries_skey);
+    let e_off_gen = encryption::gen_entries_offset(fname) as u64;
+    let mut candidate_e_offs = vec![header_offset + 9, header_offset + e_off_gen, encryption::gen_header_offset(fname) as u64 + e_off_gen];
+    candidate_e_offs.sort_unstable(); candidate_e_offs.dedup();
+    for off in candidate_e_offs {
+        if rd.seek(SeekFrom::Start(off)).is_err() { continue; }
+        let mut e_dec = encryption::Snow2Decoder::new_iv_mode(&e_key, iv0, mode, rd);
+        let mut entries = Vec::with_capacity(header.file_cnt as usize);
+        let mut success = true;
+        for _ in 0..header.file_cnt {
+            match FileEntry::new(&mut e_dec) {
+                Ok(ent) => {
+                    if ent.name.is_empty() || ent.name.len() > 1024 || ent.original_size > 500_000_000 {
+                        success = false; break;
+                    }
+                    entries.push(ent);
+                },
+                Err(_) => { success = false; break; }
+            }
+        }
+        if success && !entries.is_empty() && validate_entries(&entries).is_ok() {
+            let pos = rd.stream_position().unwrap_or(0);
+            return Ok((header, entries, (pos + 1023) & !1023u64));
+        }
+    }
+    Err(Error::msg("Failed entries"))
+}
+
+pub fn read_meta<RUND: Read + Seek>(fname: &str, skey: &str, rd: &mut RUND, h_off: u64) -> Result<(FileHeader, Vec<FileEntry>, u32, encryption::Snow2Mode, u64), Error> {
+    let modes = [encryption::Snow2Mode::Sub, encryption::Snow2Mode::Xor, encryption::Snow2Mode::ModernBE, encryption::Snow2Mode::ModernLE, encryption::Snow2Mode::LegacyBE, encryption::Snow2Mode::LegacyLE];
+    for iv in &[1, 0] { 
+        for mode in &modes {
+            if let Ok(res) = read_meta_iv_mode(fname, skey, rd, h_off, *iv, *mode) {
+                return Ok((res.0, res.1, *iv, *mode, res.2));
+            }
+        }
+    }
     Err(Error::msg("All candidate entry offsets failed for the given key."))
 }
 
 
-pub fn validate_entries(entries: &[FileEntry]) -> Result<(), Error> {
-    for (idx, ent) in entries.iter().enumerate() {
-        trace!("[ENTRIES] validate_entries: Validating entry {}/{}: Name: '{}', Details: {:?}", idx + 1, entries.len(), ent.name, ent);
-        let key_sum = ent.key.iter().fold(0u32, |s, v| s.wrapping_add(*v as u32));
-        let calculated_sum = ent.flags.wrapping_add(ent.offset)
-            .wrapping_add(ent.original_size)
-            .wrapping_add(ent.raw_size)
-            .wrapping_add(key_sum);
 
-        trace!("[ENTRIES] validate_entries: For '{}': flags(0x{:X}) + offset_blocks(0x{:X}) + orig_size({}) + raw_size({}) + key_sum(0x{:X}) = calc_sum(0x{:X}) vs entry_checksum(0x{:X})",
-            ent.name, ent.flags, ent.offset, ent.original_size, ent.raw_size, key_sum, calculated_sum, ent.checksum);
-
-        if calculated_sum != ent.checksum {
-            error!("[ENTRIES] validate_entries: Entry checksum wrong for file '{}'. Calculated: {} (0x{:X}), Expected: {} (0x{:X}). Entry: {:?}",
-                ent.name, calculated_sum, calculated_sum, ent.checksum, ent.checksum, ent);
-            return Err(Error::msg(format!("entry checksum wrong, file name: {}",ent.name)));
-        }
+pub fn write_file_to_disk(root_dir: &str, rel_path: &str, content: &[u8]) -> Result<(), Error> {
+    let full_path = Path::new(root_dir).join(rel_path.replace(['/', '\\'], &std::path::MAIN_SEPARATOR.to_string()));
+    if let Some(parent) = full_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    debug!("[ENTRIES] validate_entries: All {} entries validated successfully.", entries.len());
-    Ok(())
-}
-
-
-pub fn try_read_and_validate_header<RUND: Read + Seek>(
-    underlying_rd: &mut RUND,
-    fname_for_key: &str,
-    skey: &str,
-    candidate_offset: u64,
-) -> Result<Option<(FileHeader, u64)>, Error> {
-    trace!("[HEADER_HEURISTIC] Testing offset 0x{:X} with skey '{}'", candidate_offset, skey);
-    
-    underlying_rd.seek(SeekFrom::Start(candidate_offset))
-        .with_context(|| format!("Heuristic seek to offset 0x{:X} failed", candidate_offset))?;
-    
-    // --- START OF FIX ---
-    // The call to `read_header` now passes the `candidate_offset` it's supposed to be testing.
-    let header = match read_header(fname_for_key, skey, underlying_rd, candidate_offset) {
-        Ok(h) => h,
-        Err(_) => return Ok(None),
-    };
-    // --- END OF FIX ---
-    
-    if header.version >= 10 || header.file_cnt >= 50000 {
-        trace!("[HEADER_HEURISTIC]   Offset 0x{:X} -> Insane header data: {:?}", candidate_offset, header);
-        return Ok(None);
-    }
-    
-    if validate_header(&header).is_ok() {
-        let pos_after_header = underlying_rd.stream_position()?;
-        debug!("[HEADER_HEURISTIC]   SUCCESS! Found valid header at offset 0x{:X} with skey '{}'. Reader now at 0x{:X}", 
-              candidate_offset, skey, pos_after_header);
-        return Ok(Some((header, pos_after_header)));
-    }
-
-    Ok(None)
+    std::fs::write(&full_path, content).map_err(Error::new)
 }

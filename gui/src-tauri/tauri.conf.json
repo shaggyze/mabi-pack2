@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "mabi-pack2",
+  "version": "1.4.0",
+  "identifier": "com.shaggyze.mabi-pack2",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "mabi-pack2",
+        "width": 1100,
+        "height": 850
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.svg"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "languages": ["English", "Japanese", "Korean", "TradChinese"]
+      }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["it"],
+        "name": "mabi-pack2.archive",
+        "description": "Mabinogi IT Archive",
+        "mimeType": "application/octet-stream"
+      },
+      {
+        "ext": ["pack"],
+        "name": "mabi-pack2.archive.v1",
+        "description": "Mabinogi PACK Archive",
+        "mimeType": "application/octet-stream"
+      }
+    ]
+  }
+}
