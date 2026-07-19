@@ -261,6 +261,7 @@ class App {
         this.syncSettingsUI();
         this.initTooltip();
         this.setupNavigation();
+        this.setupDashboard();
         this.setupForms();
         this.setupEventListen();
 
@@ -524,6 +525,35 @@ class App {
         document.documentElement.className = cls;
         document.body.className = cls;
         localStorage.setItem("mabi_theme", this.config.theme);
+    }
+
+    private setupDashboard() {
+        const pollStats = async () => {
+            try {
+                const info = await invoke("get_system_info") as { cpu_usage: number, memory_used_mb: number, memory_total_mb: number };
+                const cpuBar = document.getElementById("cpu-bar") as HTMLElement;
+                const cpuVal = document.getElementById("cpu-val");
+                const memBar = document.getElementById("mem-bar") as HTMLElement;
+                const memVal = document.getElementById("mem-val");
+                if (cpuBar) cpuBar.style.width = `${info.cpu_usage}%`;
+                if (cpuVal) cpuVal.textContent = `${info.cpu_usage.toFixed(1)}%`;
+                if (memBar) memBar.style.width = `${(info.memory_used_mb / info.memory_total_mb) * 100}%`;
+                if (memVal) memVal.textContent = `${info.memory_used_mb} MB / ${info.memory_total_mb} MB`;
+            } catch (_) {}
+        };
+        setTimeout(() => { pollStats(); setInterval(pollStats, 2000); }, 1800);
+    }
+
+    private addActivity(message: string) {
+        const list = document.getElementById("activity-list");
+        if (!list) return;
+        list.querySelector(".no-activity")?.remove();
+        const item = document.createElement("div");
+        item.className = "activity-item";
+        const time = new Date().toLocaleTimeString();
+        item.innerHTML = `<span class="activity-time">${time}</span> <span class="activity-text">${message}</span>`;
+        list.prepend(item);
+        if (list.children.length > 10) list.lastElementChild?.remove();
     }
 
     private setupNavigation() {
@@ -821,6 +851,7 @@ class App {
         try {
             await invoke("extract_pack_to", { input, output, key, filters });
             this.log(this.t("extract_success", [input]), "success");
+            this.addActivity(this.t("extract_success", [input]));
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
@@ -869,6 +900,7 @@ class App {
                 pathPrefix
             });
             this.log(this.t("pack_success", [output]), "success");
+            this.addActivity(this.t("pack_success", [output]));
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
@@ -1591,6 +1623,11 @@ class App {
     }
 
     private updateProgress(percent: number, msg: string, indeterminate = false) {
+        const dashBar = document.getElementById("dash-pipe-extract") as HTMLElement | null;
+        const dashLabel = document.getElementById("dash-pipe-label");
+        if (dashBar) dashBar.style.width = indeterminate ? "100%" : `${percent}%`;
+        if (dashLabel) dashLabel.textContent = msg || (percent === 0 ? "Idle" : "");
+
         const bar = document.getElementById("progress-bar");
         if (bar) {
             if (indeterminate) {

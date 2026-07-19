@@ -1,8 +1,8 @@
 [package]
-name = "mabi-pack2"
-version = "1.4.0"
-description = "Mabinogi Pack Utilities 2 GUI"
-authors = ["regomne <fallingsunz@gmail.com>"]
+name = "mabi-patcher"
+version = "2.0.0"
+description = "mabi-patcher: Mabinogi Archive & Patcher Suite"
+authors = ["ShaggyZE <shaggyze@gmail.com>"]
 edition = "2021"
 
 [lib]
