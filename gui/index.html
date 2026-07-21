@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>mabi-pack2 v1.3.7</title>
+  <title>mabi-pack2 v1.4.1</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
@@ -23,7 +23,7 @@
       <div class="sidebar-header">
         <div class="logo-wrap">
           <div class="logo">MP</div>
-          <span class="version-tag">v1.3.7</span>
+          <span class="version-tag">v1.4.1</span>
         </div>
         <button id="sidebar-toggle" class="sidebar-collapse-btn" data-tooltip="tooltip_sidebar_toggle">◀</button>
       </div>
@@ -98,7 +98,7 @@
             <label class="checkbox-label"><input type="checkbox" id="extract-auto-png"> <span id="label_settings_auto_png">Auto-convert .dds to .png on extract</span></label>
         </div>
         <div class="form-group">
-            <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="extract-full-sequence"> <span>Full .it Sequence Set</span></label>
+            <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="extract-full-sequence"> <span id="label-list-full-sequence">Full .it Sequence Set</span></label>
         </div>
         <button id="extract-run" class="run-btn" data-tooltip="tooltip_extract_run">UNPACK</button>
       </div>
@@ -374,7 +374,10 @@
                 <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
             </div>
 
-            <button id="btn_admin" class="tab-btn" style="margin-top:10px" data-tooltip="tooltip_admin">Apply Registry Changes (Requires Admin)</button>
+            <div style="display:flex;gap:8px;margin-top:10px;">
+                <button id="btn_admin" class="tab-btn" style="flex:1" data-tooltip="tooltip_admin">Apply Registry (Admin)</button>
+                <button id="btn_wipe_assoc" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_wipe_assoc">Wipe Registry Associations</button>
+            </div>
         </div>
 
         <div class="settings-section">
@@ -390,6 +393,22 @@
               </select>
             </div>
             <button id="btn_wipe" class="tab-btn" data-tooltip="tooltip_wipe">Wipe Salt History</button>
+            <div class="form-group" style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px;">
+                <div class="sys-stat">
+                    <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
+                    <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
+                </div>
+                <div style="margin-top:8px;">
+                    <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
+                    <div style="display:flex;gap:6px;align-items:center;margin-top:3px;">
+                        <input type="text" id="config-path-display" readonly style="flex:1;font-size:0.75em;opacity:0.8;cursor:default;" />
+                        <button id="btn_open_config_dir" class="tab-btn" style="white-space:nowrap;padding:4px 8px;font-size:0.75em;" data-tooltip="tooltip_open_config_dir">Open Folder</button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:8px;">
+                    <button id="btn_reset_config" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_reset_config">Reset Settings</button>
+                </div>
+            </div>
         </div>
       </div>
 
