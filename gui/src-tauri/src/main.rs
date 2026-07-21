@@ -18,27 +18,115 @@ extern "C" {
     fn FreeConsole() -> i32;
 }
 
+#[cfg(target_os = "windows")]
+fn is_webview2_installed() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::*;
+    let guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    let checks: &[(_, &str)] = &[
+        (HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients"),
+        (HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients"),
+        (HKEY_CURRENT_USER,  "Software\\Microsoft\\EdgeUpdate\\Clients"),
+    ];
+    for (hive, base) in checks {
+        if RegKey::predef(*hive).open_subkey(format!("{}\\{}", base, guid)).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn show_webview2_missing_dialog() -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+        fn ShellExecuteW(hwnd: *mut std::ffi::c_void, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> isize;
+    }
+    fn wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(Some(0)).collect() }
+
+    let caption = wide("mabi-pack2 \u{2014} WebView2 Required");
+    let text = wide(
+        "Microsoft WebView2 Runtime is not installed.\n\
+         mabi-pack2 requires WebView2 to display its GUI.\n\n\
+         [Yes]    Auto-install (downloads ~1 MB bootstrapper and installs silently)\n\
+         [No]     Open download page (install manually, then restart)\n\
+         [Cancel] Exit"
+    );
+    let choice = unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 3 /* MB_YESNOCANCEL */)
+    };
+
+    match choice {
+        6 /* IDYES */ => {
+            // Download bootstrapper to temp, run /silent /install, wait
+            let tmp = std::env::temp_dir().join("webview2setup.exe");
+            let dl = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile", "-NonInteractive", "-Command",
+                    &format!(
+                        "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
+                        tmp.display()
+                    ),
+                ])
+                .status();
+            if dl.map(|s| s.success()).unwrap_or(false) {
+                let installed = std::process::Command::new(&tmp)
+                    .args(["/silent", "/install"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let _ = std::fs::remove_file(&tmp);
+                if installed {
+                    return true; // caller should re-check and launch GUI
+                }
+            }
+            // Install failed — tell user to try manually
+            let err = wide("WebView2 installation failed.\nPlease download and install it manually from:\nhttps://developer.microsoft.com/microsoft-edge/webview2/");
+            unsafe { MessageBoxW(std::ptr::null_mut(), err.as_ptr(), caption.as_ptr(), 0 /* MB_OK */); }
+            false
+        }
+        7 /* IDNO */ => {
+            let url  = wide("https://developer.microsoft.com/microsoft-edge/webview2/");
+            let open = wide("open");
+            unsafe { ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), url.as_ptr(), std::ptr::null(), std::ptr::null(), 1); }
+            false
+        }
+        _ /* IDCANCEL / closed */ => false,
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() > 1 {
         let first_arg = &args[1];
         let known_cmds = ["extract", "pack", "list", "batch", "--convert", "--extract-all", "--extract-all-near", "--extract-here"];
-        
+
         let is_explicit_cli = known_cmds.contains(&first_arg.as_str()) || (first_arg.starts_with('-') && !Path::new(first_arg).exists() && first_arg != "--gui" && first_arg != "--full");
 
         if is_explicit_cli {
             #[cfg(target_os = "windows")]
             unsafe { AttachConsole(0xFFFFFFFF); }
-            
+
             println!("[mabi-pack2] Starting CLI mode...");
             let res = run_cli_logic();
-            
+
             #[cfg(target_os = "windows")]
             unsafe { FreeConsole(); }
-            
+
             return res;
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    if !is_webview2_installed() {
+        let installed = show_webview2_missing_dialog();
+        if !installed {
+            return Ok(());
+        }
+        // Fall through — auto-install succeeded, launch GUI below
     }
 
     mabi_pack2_gui_lib::run();
@@ -72,7 +160,7 @@ fn run_cli_logic() -> Result<()> {
     }
 
     let matches = Command::new("mabi-pack2")
-        .version("1.3.7")
+        .version("1.4.1")
         .author("regomne <fallingsunz@gmail.com>")
         .arg(Arg::new("verbose").short('v').long("verbose").action(ArgAction::Count))
         .subcommand(
