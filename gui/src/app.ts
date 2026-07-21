@@ -334,7 +334,8 @@ class App {
             "preview_tab_visual", "preview_tab_hex", "preview_tab_details",
             "label_settings_auto_png", "label_settings_auto_dds",
             "label_audio_autoplay", "label_audio_autoplay_inline", "label_audio_loop",
-            "ctx_extract", "ctx_copy_name", "ctx_copy_key", "ctx_conv_png", "ctx_conv_dds"
+            "ctx_extract", "ctx_copy_name", "ctx_copy_key", "ctx_conv_png", "ctx_conv_dds",
+            "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config"
         ];
         ids.forEach(id => {
             document.querySelectorAll<HTMLElement>(`[id="${id}"]`).forEach(el => {
@@ -494,6 +495,9 @@ class App {
             ["settings-log",             "tooltip_log_level"],
             ["btn_admin",                "tooltip_admin"],
             ["btn_wipe",                 "tooltip_wipe"],
+            ["btn_open_config_dir",      "tooltip_open_config_dir"],
+            ["btn_reset_config",         "tooltip_reset_config"],
+            ["btn_wipe_assoc",           "tooltip_wipe_assoc"],
         ];
         tooltipPairs.forEach(([id, key]) => {
             const el = document.getElementById(id);
@@ -719,6 +723,46 @@ class App {
         });
 
         document.getElementById("btn_wipe")?.addEventListener("click", () => this.wipeHistory());
+
+        // Config path / portable mode controls
+        const refreshConfigPath = async () => {
+            const p = await invoke<string>("get_config_path_str");
+            const el = document.getElementById("config-path-display") as HTMLInputElement | null;
+            if (el) el.value = p;
+        };
+        const refreshPortableToggle = async () => {
+            const portable = await invoke<boolean>("is_portable_mode");
+            const el = document.getElementById("settings-portable-mode") as HTMLInputElement | null;
+            if (el) el.checked = portable;
+        };
+        refreshConfigPath();
+        refreshPortableToggle();
+
+        document.getElementById("settings-portable-mode")?.addEventListener("change", async (e) => {
+            const enable = (e.target as HTMLInputElement).checked;
+            try {
+                await invoke("set_portable_mode", { enable });
+                await refreshConfigPath();
+            } catch (err) {
+                alert("Failed to switch config location: " + err);
+                await refreshPortableToggle(); // revert toggle
+            }
+        });
+        document.getElementById("btn_open_config_dir")?.addEventListener("click", async () => {
+            const p = await invoke<string>("get_config_path_str");
+            // Use /select to highlight the file in Explorer; works on both / and \ paths
+            await invoke("execute_terminal_command", { command: `explorer /select,"${p}"` });
+        });
+        document.getElementById("btn_reset_config")?.addEventListener("click", async () => {
+            if (!confirm(this.t("confirm_reset_config"))) return;
+            await invoke("reset_config");
+            location.reload();
+        });
+        document.getElementById("btn_wipe_assoc")?.addEventListener("click", async () => {
+            if (!confirm(this.t("confirm_wipe_assoc"))) return;
+            await invoke("wipe_registry_associations");
+            alert(this.t("msg_wipe_assoc_done"));
+        });
 
         // List tab additional actions
         document.getElementById("ctxConvIt")?.addEventListener("click", () => this.convertTo("it"));
@@ -1708,5 +1752,14 @@ class App {
         });
     }
 }
+
+// Disable WebView2 native right-click context menu everywhere except text inputs.
+// Without this, right-clicking shows an "Import passwords / Send tab to your devices"
+// browser menu which blocks window minimize/maximize and is never useful here.
+document.addEventListener("contextmenu", (e) => {
+    const t = e.target as HTMLElement;
+    const editable = t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t as HTMLElement).isContentEditable;
+    if (!editable) e.preventDefault();
+});
 
 new App();

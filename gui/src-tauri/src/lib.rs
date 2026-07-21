@@ -242,21 +242,93 @@ fn init_logging(app: &tauri::AppHandle, level: &str) {
 }
 
 fn get_config_path(app: &tauri::AppHandle) -> PathBuf {
+    // Portable mode: if config.json exists next to the exe, use it.
+    if let Ok(exe) = std::env::current_exe() {
+        let portable = exe.with_file_name("config.json");
+        if portable.exists() {
+            return portable;
+        }
+    }
+    // AppData default
     let mut path = app.path().app_config_dir().unwrap_or_else(|_| {
-        // Fallback to home dir .mabi-pack2
         #[cfg(target_os = "windows")]
-        {
-            PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into())).join("mabi-pack2")
-        }
+        { PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into())).join("mabi-pack2") }
         #[cfg(not(target_os = "windows"))]
-        {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".mabi-pack2")
-        }
+        { PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".mabi-pack2") }
     });
-    
     let _ = fs::create_dir_all(&path);
     path.push("config.json");
     path
+}
+
+#[tauri::command]
+fn get_config_path_str(app: tauri::AppHandle) -> String {
+    get_config_path(&app).to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn get_appdata_config_path(app: tauri::AppHandle) -> String {
+    let mut path = app.path().app_config_dir().unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into())).join("mabi-pack2")
+    });
+    let _ = fs::create_dir_all(&path);
+    path.push("config.json");
+    path.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn get_portable_config_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.with_file_name("config.json").to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn is_portable_mode() -> bool {
+    std::env::current_exe()
+        .map(|p| p.with_file_name("config.json").exists())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_portable_mode(app: tauri::AppHandle, enable: bool) -> Result<(), String> {
+    let appdata_path = {
+        let mut p = app.path().app_config_dir().unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into())).join("mabi-pack2")
+        });
+        let _ = fs::create_dir_all(&p);
+        p.push("config.json");
+        p
+    };
+    let portable_path = std::env::current_exe()
+        .map(|p| p.with_file_name("config.json"))
+        .map_err(|e| e.to_string())?;
+
+    if enable {
+        // Move config to exe dir (portable)
+        if appdata_path.exists() && !portable_path.exists() {
+            fs::copy(&appdata_path, &portable_path).map_err(|e| e.to_string())?;
+        } else if !portable_path.exists() {
+            // Write defaults to portable path
+            let content = serde_json::to_string_pretty(&Config::default()).map_err(|e| e.to_string())?;
+            fs::write(&portable_path, content).map_err(|e| e.to_string())?;
+        }
+    } else {
+        // Move config back to AppData
+        if portable_path.exists() {
+            fs::copy(&portable_path, &appdata_path).map_err(|e| e.to_string())?;
+            fs::remove_file(&portable_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_config(app: tauri::AppHandle) {
+    let path = get_config_path(&app);
+    if let Ok(content) = serde_json::to_string_pretty(&Config::default()) {
+        let _ = fs::write(path, content);
+    }
 }
 
 #[tauri::command]
@@ -324,6 +396,26 @@ fn is_ran_as_admin() -> bool {
         }
     }
     false
+}
+
+#[tauri::command]
+fn wipe_registry_associations() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::RegKey;
+        use winreg::enums::*;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = "Software\\Classes";
+        for key in [".it", ".pack", ".dds", ".pmg", ".compiled",
+                    "mabi-pack2.archive", "mabi-pack2.archive.v1",
+                    "mabi-pack2.dds", "mabi-pack2.pmg", "mabi-pack2.compiled"] {
+            let _ = hkcu.delete_subkey_all(format!("{}\\{}", base, key));
+        }
+        #[link(name = "shell32")]
+        extern "system" { fn SHChangeNotify(wEventId: i32, uFlags: u32, dwItem1: *const std::ffi::c_void, dwItem2: *const std::ffi::c_void); }
+        unsafe { SHChangeNotify(0x08000000i32, 0x0000u32, std::ptr::null(), std::ptr::null()); }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1413,18 +1505,19 @@ fn auto_register_associations_silent(config: &Config) {
         let current_ver = env!("CARGO_PKG_VERSION");
         let current_ver_num = version_to_u64(current_ver);
 
-        // Skip if a newer version is already registered (prefer newer release)
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(key) = hkcu.open_subkey("Software\\Classes\\mabi-pack2.archive") {
-            if let Ok(reg_ver) = key.get_value::<String, _>("AppVersion") {
-                if version_to_u64(&reg_ver) > current_ver_num {
-                    return;
-                }
-            }
-        }
-
         let exe_path = match std::env::current_exe() { Ok(p) => p, Err(_) => return };
         let exe_str = exe_path.to_string_lossy();
+
+        // Skip if same-or-newer version is already registered at this exact exe path.
+        // Re-register only when the exe moved or a new version is being applied.
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) = hkcu.open_subkey("Software\\Classes\\mabi-pack2.archive") {
+            let reg_ver = key.get_value::<String, _>("AppVersion").unwrap_or_default();
+            let reg_exe = key.get_value::<String, _>("RegisteredExe").unwrap_or_default();
+            if version_to_u64(&reg_ver) >= current_ver_num && reg_exe == exe_str.as_ref() {
+                return;
+            }
+        }
         let icon_val = format!("\"{}\",0", exe_str);
         let base = "Software\\Classes";
 
@@ -1436,6 +1529,7 @@ fn auto_register_associations_silent(config: &Config) {
                 let _ = pk.set_value("", &"Mabinogi Archive (.it)");
                 let _ = pk.set_value("DefaultIcon", &icon_val);
                 let _ = pk.set_value("AppVersion", &current_ver.to_string());
+                let _ = pk.set_value("RegisteredExe", &exe_str.as_ref());
                 if let Ok((ov, _)) = pk.create_subkey("shell\\open") {
                     let _ = ov.set_value("", &"Open with mabi-pack2");
                     let _ = ov.set_value("Icon", &icon_val);
@@ -1629,6 +1723,8 @@ pub fn run() {
             list_pack_contents, create_archive, extract_pack_to,
             extract_file_to, create_patch, list_sequence_contents,
             get_preview_ext, parse_pmg_geometry, get_config, set_config,
+            get_config_path_str, get_appdata_config_path, get_portable_config_path,
+            is_portable_mode, set_portable_mode, reset_config, wipe_registry_associations,
             get_system_info, run_convert, get_app_exe_dir, open_log_file,
             get_all_salts, is_ran_as_admin, register_associations, request_elevation,
             execute_terminal_command, get_initial_file, check_data_folder, detect_data_prefix, log_to_file, drain_log_buffer,
