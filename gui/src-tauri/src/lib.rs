@@ -1,4 +1,4 @@
-use mabi_pack2::{load_salts, extract, pack_v1, common_ext, pack, patch, encryption};
+use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption};
 use encoding_rs::{WINDOWS_1252, SHIFT_JIS, EUC_KR, BIG5};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -1698,6 +1698,91 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
     Ok(preview)
 }
 
+// ---- Mod file commands -------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+pub struct ModInfo {
+    pub file: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub file_count: usize,
+    pub is_public: bool,
+    pub error: Option<String>,
+}
+
+/// Return the path to the mods/ directory next to the exe.
+#[tauri::command]
+pub fn get_mods_dir() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mods").to_string_lossy().to_string()))
+        .unwrap_or_else(|| "mods".to_string())
+}
+
+/// Scan the mods/ directory for .mod files and return metadata.
+#[tauri::command]
+pub fn list_mod_files() -> Vec<ModInfo> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mods")))
+        .unwrap_or_else(|| std::path::Path::new("mods").to_path_buf());
+
+    mod_file::scan_mods(&dir)
+        .into_iter()
+        .map(|(path, result)| {
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            match result {
+                Ok(pkg) => ModInfo {
+                    file: fname,
+                    name: pkg.meta.name.clone(),
+                    version: pkg.meta.version.clone(),
+                    author: pkg.meta.author.clone(),
+                    description: pkg.meta.description.clone(),
+                    tags: pkg.meta.tags.clone(),
+                    file_count: pkg.file_count(),
+                    is_public: pkg.is_api_public(),
+                    error: None,
+                },
+                Err(e) => ModInfo {
+                    file: fname,
+                    name: String::new(),
+                    version: None,
+                    author: None,
+                    description: None,
+                    tags: None,
+                    file_count: 0,
+                    is_public: false,
+                    error: Some(e.to_string()),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Parse and return a single .mod file's metadata + content.
+#[tauri::command]
+pub fn load_mod_file(path: String) -> Result<String, String> {
+    match mod_file::ModPackage::load(std::path::Path::new(&path)) {
+        Ok(pkg) => serde_json::to_string(&pkg).map_err(|e| e.to_string()),
+        Err(e)  => Err(e.to_string()),
+    }
+}
+
+/// Return the blank .mod template string.
+#[tauri::command]
+pub fn get_mod_template() -> String {
+    mod_file::template().to_string()
+}
+
+/// Return the current API server port.
+#[tauri::command]
+pub fn get_api_port() -> u16 {
+    api::DEFAULT_PORT
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1711,6 +1796,10 @@ pub fn run() {
             warn!("[GUI] mabi-pack2 started, log_level={}", config.log_level);
             start_stats_refresher();
             auto_register_associations_silent(&config);
+
+            // Auto-start the local REST API server for WebUI integration
+            let _api_stop = api::spawn(api::DEFAULT_PORT);
+            info!("[GUI] API server started on http://127.0.0.1:{}", api::DEFAULT_PORT);
 
             // Handle CLI arguments (e.g. drag and drop onto EXE)
             let args: Vec<String> = std::env::args().collect();
@@ -1734,7 +1823,8 @@ pub fn run() {
             get_system_info, run_convert, get_app_exe_dir, open_log_file,
             get_all_salts, is_ran_as_admin, register_associations, request_elevation,
             execute_terminal_command, get_initial_file, check_data_folder, detect_data_prefix, log_to_file, drain_log_buffer,
-            preview_loose_file
+            preview_loose_file,
+            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port
         ])
 
         .run(tauri::generate_context!())

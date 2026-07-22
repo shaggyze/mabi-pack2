@@ -51,6 +51,12 @@
         "name": "mabi-patcher.archive.v1",
         "description": "Mabinogi PACK Archive",
         "mimeType": "application/octet-stream"
+      },
+      {
+        "ext": ["mod"],
+        "name": "mabi-patcher.mod",
+        "description": "mabi-patcher Mod Instruction File",
+        "mimeType": "text/plain"
       }
     ]
   }

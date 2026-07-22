@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { listen } from "@tauri-apps/api/event";
 import { locales as TRANSLATIONS } from "./locales";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
@@ -340,7 +341,8 @@ class App {
             "label_settings_auto_png", "label_settings_auto_dds",
             "label_audio_autoplay", "label_audio_autoplay_inline", "label_audio_loop",
             "ctx_extract", "ctx_copy_name", "ctx_copy_key", "ctx_conv_png", "ctx_conv_dds",
-            "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config"
+            "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config",
+            "dash_roadmap_title", "dash_mods_title"
         ];
         ids.forEach(id => {
             document.querySelectorAll<HTMLElement>(`[id="${id}"]`).forEach(el => {
@@ -507,6 +509,8 @@ class App {
             ["btn_open_config_dir",      "tooltip_open_config_dir"],
             ["btn_reset_config",         "tooltip_reset_config"],
             ["btn_wipe_assoc",           "tooltip_wipe_assoc"],
+            ["btn-open-mods-dir",        "tooltip_open_mods_dir"],
+            ["btn-new-mod-template",     "tooltip_new_mod_template"],
         ];
         tooltipPairs.forEach(([id, key]) => {
             const el = document.getElementById(id);
@@ -565,6 +569,134 @@ class App {
             } catch (_) {}
         };
         setTimeout(() => { pollStats(); setInterval(pollStats, 2000); }, 1800);
+        this.renderRoadmap();
+        this.refreshModsList();
+        this.setupModsActions();
+    }
+
+    private renderRoadmap(openCats?: Set<string>) {
+        import("./plans.js").then(({ PLANS }) => {
+            const container = document.getElementById("roadmap-list");
+            const pctEl    = document.getElementById("dash-roadmap-progress");
+            if (!container) return;
+
+            // Preserve which categories are currently open across re-renders
+            const currentOpen = openCats ?? new Set(
+                [...container.querySelectorAll<HTMLElement>(".roadmap-category.open")]
+                    .map(el => el.dataset["id"] ?? "")
+            );
+
+            const DONE_KEY = "mabi_roadmap_done";
+            const saved: Record<string, boolean> = JSON.parse(localStorage.getItem(DONE_KEY) || "{}");
+
+            let totalAll = 0, doneAll = 0;
+            container.innerHTML = "";
+
+            for (const cat of PLANS) {
+                const total = cat.tasks.length;
+                const done  = cat.tasks.filter(t => saved[t.id] ?? t.done).length;
+                totalAll += total; doneAll += done;
+                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+                const catEl = document.createElement("div");
+                catEl.className = "roadmap-category" + (currentOpen.has(cat.id) ? " open" : "");
+                catEl.dataset["id"] = cat.id;
+
+                const headerEl = document.createElement("div");
+                headerEl.className = "roadmap-cat-header";
+                headerEl.innerHTML = `
+                    <span class="roadmap-cat-icon">${cat.icon}</span>
+                    <span class="roadmap-cat-name">${cat.title}</span>
+                    <div class="roadmap-cat-bar"><div class="roadmap-cat-fill" style="width:${pct}%"></div></div>
+                    <span class="roadmap-cat-pct">${pct}%</span>
+                    <span class="roadmap-cat-chevron">▶</span>`;
+                headerEl.addEventListener("click", () => catEl.classList.toggle("open"));
+
+                const tasksEl = document.createElement("div");
+                tasksEl.className = "roadmap-tasks";
+                for (const task of cat.tasks) {
+                    const isDone = saved[task.id] ?? task.done;
+                    const taskEl = document.createElement("div");
+                    taskEl.className = `roadmap-task${isDone ? " done" : ""}`;
+                    const prioClass = `prio-${task.priority}`;
+                    taskEl.innerHTML = `
+                        <input type="checkbox" id="rt-${task.id}" ${isDone ? "checked" : ""}>
+                        <label for="rt-${task.id}">${task.title}</label>
+                        <span class="${prioClass}">${task.priority.toUpperCase()}</span>`;
+                    const cb = taskEl.querySelector("input") as HTMLInputElement;
+                    cb.addEventListener("change", () => {
+                        saved[task.id] = cb.checked;
+                        localStorage.setItem(DONE_KEY, JSON.stringify(saved));
+                        const open = new Set(
+                            [...container.querySelectorAll<HTMLElement>(".roadmap-category.open")]
+                                .map(el => el.dataset["id"] ?? "")
+                        );
+                        this.renderRoadmap(open);
+                    });
+                    tasksEl.appendChild(taskEl);
+                }
+
+                catEl.appendChild(headerEl);
+                catEl.appendChild(tasksEl);
+                container.appendChild(catEl);
+            }
+
+            const overall = totalAll > 0 ? Math.round((doneAll / totalAll) * 100) : 0;
+            if (pctEl) pctEl.textContent = `${doneAll}/${totalAll} (${overall}%)`;
+        }).catch(() => {});
+    }
+
+    private async refreshModsList() {
+        const list  = document.getElementById("dash-mods-list");
+        const empty = document.getElementById("dash-mods-empty");
+        const path  = document.getElementById("dash-mods-path");
+        if (!list) return;
+        try {
+            const dir  = await invoke("get_mods_dir") as string;
+            const mods = await invoke("list_mod_files") as Array<{
+                file: string; name: string; version?: string; author?: string;
+                tags?: string[]; file_count: number; is_public: boolean; error?: string;
+            }>;
+            if (path) path.textContent = dir;
+            list.querySelectorAll(".mod-item").forEach(el => el.remove());
+            if (mods.length === 0) {
+                if (empty) empty.style.display = "";
+            } else {
+                if (empty) empty.style.display = "none";
+                for (const m of mods) {
+                    const el = document.createElement("div");
+                    el.className = "mod-item";
+                    if (m.error) {
+                        el.innerHTML = `<span class="mod-item-name">${m.file}</span><span class="mod-item-err">${m.error}</span>`;
+                    } else {
+                        const pub = m.is_public ? `<span class="mod-item-badge-pub">PUBLIC</span>` : "";
+                        el.innerHTML = `
+                            <span class="mod-item-name">${m.name}</span>
+                            <span class="mod-item-meta">${m.version || ""} · ${m.file_count} files</span>
+                            ${pub}`;
+                    }
+                    list.insertBefore(el, empty!);
+                }
+            }
+        } catch (_) {}
+    }
+
+    private setupModsActions() {
+        document.getElementById("btn-open-mods-dir")?.addEventListener("click", async () => {
+            try {
+                const dir = await invoke("get_mods_dir") as string;
+                await invoke("execute_terminal_command", { command: `explorer "${dir}"` });
+            } catch (_) {}
+        });
+        document.getElementById("btn-new-mod-template")?.addEventListener("click", async () => {
+            try {
+                const tmpl = await invoke("get_mod_template") as string;
+                const dir  = await invoke("get_mods_dir") as string;
+                const dest = dir + "\\new_mod.mod";
+                await writeTextFile(dest, tmpl);
+                await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
+            } catch (_) {}
+        });
     }
 
     private addActivity(message: string) {

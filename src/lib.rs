@@ -1,8 +1,10 @@
+pub mod api;
 pub mod common;
 pub mod common_ext;
 pub mod encryption;
 pub mod extract;
 pub mod list;
+pub mod mod_file;
 pub mod pack;
 pub mod pack_v1;
 pub mod patch;

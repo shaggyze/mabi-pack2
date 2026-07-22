@@ -13,7 +13,7 @@ use simplelog::{CombinedLogger, WriteLogger, TermLogger, LevelFilter, ConfigBuil
 use log::{debug, info};
 
 // Correct library name from Cargo.toml
-use mabi_pack2::{load_salts, extract, list, pack};
+use mabi_pack2::{api, load_salts, extract, list, mod_file, pack};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -135,6 +135,36 @@ fn main() -> Result<()> {
                 .arg(Arg::new("input").short('i').long("input").value_name("FOLDER").help("Folder containing multiple archives").required(true))
                 .arg(Arg::new("output").short('o').long("output").value_name("ALL_DATA.IT").help("Output single archive path").required(true))
                 .arg(Arg::new("key").short('k').long("key").value_name("KEY").help("Specific salt for the final .it").required(false))
+        )
+        .subcommand(
+            Command::new("serve")
+                .about("Run mabi-patcher as a local HTTP API server (for UOTiara WebUI integration)")
+                .arg(
+                    Arg::new("port")
+                        .short('p')
+                        .long("port")
+                        .value_name("PORT")
+                        .help("Port to listen on (default: 7331)")
+                        .default_value("7331")
+                )
+        )
+        .subcommand(
+            Command::new("mod")
+                .about("Work with .mod instruction files")
+                .subcommand(
+                    Command::new("inspect")
+                        .about("Parse and display a .mod file")
+                        .arg(Arg::new("file").short('f').long("file").value_name("MOD_FILE").help(".mod file to inspect").required(true))
+                )
+                .subcommand(
+                    Command::new("template")
+                        .about("Print a blank .mod template to stdout")
+                )
+                .subcommand(
+                    Command::new("list")
+                        .about("List .mod files in a directory")
+                        .arg(Arg::new("dir").short('d').long("dir").value_name("DIR").help("Directory to scan (default: mods/)").default_value("mods"))
+                )
         )
         .subcommand(
             Command::new("batch")
@@ -394,10 +424,51 @@ fn main() -> Result<()> {
         }
 
         info!("Batch complete: {} archives -> '{}'", total, output);
+    } else if let Some(sub) = matches.subcommand_matches("serve") {
+        let port: u16 = sub.get_one::<String>("port")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(api::DEFAULT_PORT);
+        info!("[SERVE] Starting mabi-patcher API server on http://127.0.0.1:{}", port);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop2 = stop.clone();
+            ctrlc_handler(move || { stop2.store(true, std::sync::atomic::Ordering::Relaxed); });
+        }
+        api::run_server(port, stop)?;
+    } else if let Some(sub) = matches.subcommand_matches("mod") {
+        if let Some(ins) = sub.subcommand_matches("inspect") {
+            let path = std::path::Path::new(ins.get_one::<String>("file").unwrap());
+            match mod_file::ModPackage::load(path) {
+                Ok(pkg) => println!("{}", serde_json::to_string_pretty(&pkg).unwrap_or_default()),
+                Err(e)  => { eprintln!("Error: {}", e); std::process::exit(1); }
+            }
+        } else if sub.subcommand_matches("template").is_some() {
+            print!("{}", mod_file::template());
+        } else if let Some(ls) = sub.subcommand_matches("list") {
+            let dir = std::path::Path::new(ls.get_one::<String>("dir").unwrap());
+            let mods = mod_file::scan_mods(dir);
+            if mods.is_empty() {
+                println!("No .mod files found in {}", dir.display());
+            } else {
+                for (path, result) in mods {
+                    match result {
+                        Ok(p)  => println!("[OK]  {}  — {} v{}", path.display(), p.meta.name, p.meta.version.as_deref().unwrap_or("?")),
+                        Err(e) => println!("[ERR] {} — {}", path.display(), e),
+                    }
+                }
+            }
+        }
     } else {
         info!("No subcommand provided. Use --help for usage information.");
     }
 
     debug!("completed successfully.");
     Ok(())
+}
+
+fn ctrlc_handler(f: impl Fn() + Send + 'static) {
+    std::thread::spawn(move || {
+        let _ = std::io::stdin().read_line(&mut String::new());
+        f();
+    });
 }
