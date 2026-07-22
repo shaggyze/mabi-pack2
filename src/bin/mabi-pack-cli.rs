@@ -228,6 +228,8 @@ fn main() -> Result<()> {
             filters,
             None,
             false,
+            false,
+            false,
             None
         )?;
     } else if let Some(sub_matches) = matches.subcommand_matches("pack") {
@@ -330,6 +332,8 @@ fn main() -> Result<()> {
                     filters.clone(),
                     None,
                     false,
+                    false,
+                    false,
                     Some(progress_cb),
                 ) {
                     Ok(found_salt) => {
@@ -374,6 +378,8 @@ fn main() -> Result<()> {
                             salts_ref,
                             filters_ref.clone(),
                             None,
+                            false,
+                            false,
                             false,
                             None, // no per-file progress in parallel mode
                         );

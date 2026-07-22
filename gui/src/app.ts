@@ -50,6 +50,8 @@ interface Config {
     suppress_admin_warning: boolean;
     auto_convert_png: boolean;
     auto_convert_dds: boolean;
+    auto_convert_features: boolean;
+    auto_convert_pmg: boolean;
     list_full_sequence: boolean;
     list_auto_expand: boolean;
     list_auto_select: "none" | "first" | "all";
@@ -100,6 +102,8 @@ class App {
         suppress_admin_warning: false,
         auto_convert_png: false,
         auto_convert_dds: false,
+        auto_convert_features: false,
+        auto_convert_pmg: false,
         list_full_sequence: false,
         list_auto_expand: true,
         list_auto_select: "none",
@@ -447,6 +451,8 @@ class App {
             { id: "settings-assoc-xmlcompiled", prop: "associate_xmlcompiled" },
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
+            { id: "settings-auto-features", prop: "auto_convert_features" },
+            { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
             { id: "pack-auto-dds", prop: "auto_convert_dds" },
             { id: "pack-wrap-data", prop: "pack_wrap_data" },
@@ -490,6 +496,8 @@ class App {
             ["settings-assoc-it-full",   "label_settings_assoc_it_full"],
             ["settings-auto-png",        "label_settings_auto_png"],
             ["settings-auto-dds",        "label_settings_auto_dds"],
+            ["settings-auto-features",   "label_settings_auto_features"],
+            ["settings-auto-pmg",        "label_settings_auto_pmg"],
             ["settings-lang",            "tooltip_lang"],
             ["settings-theme",           "tooltip_theme"],
             ["settings-log",             "tooltip_log_level"],
@@ -527,17 +535,28 @@ class App {
         localStorage.setItem("mabi_theme", this.config.theme);
     }
 
+    private setGauge(arcId: string, pct: number) {
+        const arc = document.getElementById(arcId) as SVGPathElement | null;
+        if (!arc) return;
+        // Half-circle arc from (10,65) to (110,65) via top — circumference ≈ 157px
+        const CIRC = 157;
+        const fill = Math.max(0, Math.min(1, pct / 100)) * CIRC;
+        arc.setAttribute("stroke-dasharray", `${fill.toFixed(1)} ${CIRC}`);
+        // Color shift: green → yellow → red
+        const hue = Math.round(120 - pct * 1.2);
+        arc.style.stroke = `hsl(${hue},80%,55%)`;
+    }
+
     private setupDashboard() {
         const pollStats = async () => {
             try {
                 const info = await invoke("get_system_info") as { cpu_usage: number, memory_used_mb: number, memory_total_mb: number };
-                const cpuBar = document.getElementById("cpu-bar") as HTMLElement;
                 const cpuVal = document.getElementById("cpu-val");
-                const memBar = document.getElementById("mem-bar") as HTMLElement;
                 const memVal = document.getElementById("mem-val");
-                if (cpuBar) cpuBar.style.width = `${info.cpu_usage}%`;
+                this.setGauge("cpu-arc", info.cpu_usage);
                 if (cpuVal) cpuVal.textContent = `${info.cpu_usage.toFixed(1)}%`;
-                if (memBar) memBar.style.width = `${(info.memory_used_mb / info.memory_total_mb) * 100}%`;
+                const memPct = info.memory_total_mb > 0 ? (info.memory_used_mb / info.memory_total_mb) * 100 : 0;
+                this.setGauge("mem-arc", memPct);
                 if (memVal) memVal.textContent = `${info.memory_used_mb} MB / ${info.memory_total_mb} MB`;
             } catch (_) {}
         };
@@ -695,6 +714,8 @@ class App {
             { id: "settings-assoc-xmlcompiled", prop: "associate_xmlcompiled" },
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
+            { id: "settings-auto-features", prop: "auto_convert_features" },
+            { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
             { id: "pack-auto-dds", prop: "auto_convert_dds" },
             { id: "pack-wrap-data", prop: "pack_wrap_data" },

@@ -130,6 +130,10 @@ struct Config {
     pack_v1_version: u32,
     #[serde(default)]
     sequence_ignore_list: Vec<String>,
+    #[serde(default)]
+    auto_convert_features: bool,
+    #[serde(default)]
+    auto_convert_pmg: bool,
 }
 
 impl Default for Config {
@@ -163,6 +167,8 @@ impl Default for Config {
             associate_xmlcompiled: false,
             pack_v1_version: 999,
             sequence_ignore_list: Vec::new(),
+            auto_convert_features: false,
+            auto_convert_pmg: false,
         }
     }
 }
@@ -702,7 +708,7 @@ async fn extract_pack_to(app: tauri::AppHandle, input: String, output: String, k
     if input.to_lowercase().ends_with(".pack") {
         pack_v1::run_extract_v1(&input, &output).map_err(|e| format!("Legacy .pack extraction failed: {}", e))
     } else {
-        extract::run_extract_with_key_search(&input, &output, key, &salts, filters, Some(config.region_key), config.auto_convert_png, Some(&cb)).map(|_| ()).map_err(|e| format!("Extraction failed: {}", e))
+        extract::run_extract_with_key_search(&input, &output, key, &salts, filters, Some(config.region_key), config.auto_convert_png, config.auto_convert_features, config.auto_convert_pmg, Some(&cb)).map(|_| ()).map_err(|e| format!("Extraction failed: {}", e))
     }
 }
 
@@ -1413,18 +1419,19 @@ fn auto_register_associations_silent(config: &Config) {
         let current_ver = env!("CARGO_PKG_VERSION");
         let current_ver_num = version_to_u64(current_ver);
 
-        // Skip if a newer version is already registered (prefer newer release)
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(key) = hkcu.open_subkey("Software\\Classes\\mabi-pack2.archive") {
-            if let Ok(reg_ver) = key.get_value::<String, _>("AppVersion") {
-                if version_to_u64(&reg_ver) > current_ver_num {
-                    return;
-                }
-            }
-        }
-
         let exe_path = match std::env::current_exe() { Ok(p) => p, Err(_) => return };
         let exe_str = exe_path.to_string_lossy();
+
+        // Skip if same-or-newer version is already registered at this exact exe path.
+        // Re-register only when the exe moved or a new version is being applied.
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) = hkcu.open_subkey("Software\\Classes\\mabi-pack2.archive") {
+            let reg_ver = key.get_value::<String, _>("AppVersion").unwrap_or_default();
+            let reg_exe = key.get_value::<String, _>("RegisteredExe").unwrap_or_default();
+            if version_to_u64(&reg_ver) >= current_ver_num && reg_exe == exe_str.as_ref() {
+                return;
+            }
+        }
         let icon_val = format!("\"{}\",0", exe_str);
         let base = "Software\\Classes";
 
@@ -1436,6 +1443,7 @@ fn auto_register_associations_silent(config: &Config) {
                 let _ = pk.set_value("", &"Mabinogi Archive (.it)");
                 let _ = pk.set_value("DefaultIcon", &icon_val);
                 let _ = pk.set_value("AppVersion", &current_ver.to_string());
+                let _ = pk.set_value("RegisteredExe", &exe_str.as_ref());
                 if let Ok((ov, _)) = pk.create_subkey("shell\\open") {
                     let _ = ov.set_value("", &"Open with mabi-pack2");
                     let _ = ov.set_value("Icon", &icon_val);

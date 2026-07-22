@@ -616,8 +616,17 @@ input:checked + .slider:before { transform: translateX(20px); }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .dash-card { background: var(--card-bg, rgba(255,255,255,.04)); border: 1px solid var(--border, rgba(255,255,255,.08)); border-radius: 6px; padding: 14px 16px; }
 .dash-card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
-.dash-bar-bg { flex: 1; height: 6px; background: rgba(255,255,255,.08); border-radius: 3px; overflow: hidden; }
-.dash-bar { height: 100%; background: var(--accent, #38bdf8); border-radius: 3px; transition: width .4s ease; }
+/* Gauge */
+.dash-card-gauge { }
+.gauges-row { display: flex; gap: 12px; justify-content: space-around; }
+.gauge-wrap { display: flex; flex-direction: column; align-items: center; flex: 1; }
+.gauge-svg { width: 100%; max-width: 120px; overflow: visible; }
+.gauge-track { fill: none; stroke: rgba(255,255,255,.08); stroke-width: 10; stroke-linecap: round; }
+.gauge-fill { fill: none; stroke: var(--accent-blue, #38bdf8); stroke-width: 10; stroke-linecap: round; transition: stroke-dasharray .5s cubic-bezier(.4,0,.2,1); }
+.gauge-label-wrap { display: flex; flex-direction: column; align-items: center; margin-top: 2px; }
+.gauge-name { font-size: 10px; opacity: .5; text-transform: uppercase; letter-spacing: .08em; }
+.gauge-val { font-size: 13px; font-weight: 600; margin-top: 1px; }
+/* Pipe */
 .pipe-bar-bg { width: 100%; height: 8px; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
 .pipe-bar { height: 100%; background: var(--accent, #38bdf8); border-radius: 4px; transition: width .3s ease; }
 .pipe-stat #dash-pipe-label { font-size: 11px; opacity: .6; }

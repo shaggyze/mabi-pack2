@@ -71,17 +71,29 @@
       <!-- Dashboard Tab -->
       <div id="dashboard" class="tab-content active">
         <div class="dashboard-grid">
-          <div class="dash-card">
+          <div class="dash-card dash-card-gauge">
             <h3 id="dash-sys-title">System</h3>
-            <div class="sys-stat">
-              <span id="lbl_cpu">CPU</span>
-              <div class="dash-bar-bg"><div class="dash-bar" id="cpu-bar" style="width:0%"></div></div>
-              <span id="cpu-val">0%</span>
-            </div>
-            <div class="sys-stat">
-              <span id="lbl_mem">RAM</span>
-              <div class="dash-bar-bg"><div class="dash-bar" id="mem-bar" style="width:0%"></div></div>
-              <span id="mem-val">0 MB / 0 MB</span>
+            <div class="gauges-row">
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="cpu-arc" d="M10,65 A50,50 0 0,1 10,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span id="lbl_cpu" class="gauge-name">CPU</span>
+                  <span id="cpu-val" class="gauge-val">0%</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="mem-arc" d="M10,65 A50,50 0 0,1 10,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span id="lbl_mem" class="gauge-name">RAM</span>
+                  <span id="mem-val" class="gauge-val">0 MB</span>
+                </div>
+              </div>
             </div>
           </div>
           <div class="dash-card">
@@ -402,6 +414,14 @@
             <div class="sys-stat">
                 <span id="label_settings_auto_dds">Auto-convert .png to .dds on import</span>
                 <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span data-i18n="label_settings_auto_features">Auto-convert features.xml.compiled to .xml on extract</span>
+                <label class="switch"><input type="checkbox" id="settings-auto-features"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+                <span data-i18n="label_settings_auto_pmg">Auto-convert .pmg to .obj on extract</span>
+                <label class="switch"><input type="checkbox" id="settings-auto-pmg"><span class="slider"></span></label>
             </div>
 
             <h4 id="set_pack_opts" style="margin: 15px 0 10px 0; border-bottom: 1px solid var(--border-glass); padding-bottom: 5px;">Pack Options</h4>

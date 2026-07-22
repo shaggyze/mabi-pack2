@@ -2369,37 +2369,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "mabi-pack2"
-version = "1.4.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "directories",
- "encoding_rs",
- "image",
- "image_dds",
- "log",
- "mabi-pack2-core",
- "once_cell",
- "serde",
- "serde_json",
- "simplelog",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "walkdir",
- "winapi",
- "winreg 0.52.0",
-]
-
-[[package]]
 name = "mabi-pack2-core"
-version = "1.4.0"
+version = "2.0.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -2428,6 +2399,35 @@ dependencies = [
  "simplelog",
  "walkdir",
  "zerocopy 0.7.35",
+]
+
+[[package]]
+name = "mabi-patcher"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "directories",
+ "encoding_rs",
+ "image",
+ "image_dds",
+ "log",
+ "mabi-pack2-core",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "simplelog",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "walkdir",
+ "winapi",
+ "winreg 0.52.0",
 ]
 
 [[package]]
