@@ -63,7 +63,7 @@ fn run_cli_logic() -> Result<()> {
                 let out_str = out.to_str().unwrap();
                 let salts = load_salts();
                 if file.to_lowercase().ends_with(".it") {
-                    return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+                    return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, false, false, None).map(|_| ());
                 } else {
                     return pack_v1::run_extract_v1(file, out_str);
                 }
@@ -171,7 +171,7 @@ fn run_cli_logic() -> Result<()> {
         let out_str = out.to_str().unwrap();
         if file.to_lowercase().ends_with(".it") {
             debug!("[CLI] Running .it search-extraction to: {}", out_str);
-            return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+            return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, false, false, None).map(|_| ());
         } else {
             debug!("[CLI] Running legacy .pack extraction to: {}", out_str);
             return pack_v1::run_extract_v1(file, out_str);
@@ -195,7 +195,7 @@ fn run_cli_logic() -> Result<()> {
                             let path_str = path.to_str().unwrap();
                             trace!("[CLI] Auto-extracting neighbor: {}", path_str);
                             if ext == "it" {
-                                let _ = extract::run_extract_with_key_search(path_str, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+                                let _ = extract::run_extract_with_key_search(path_str, out_str, None, &salts, vec![], None, false, false, false, None);
                             } else {
                                 let _ = pack_v1::run_extract_v1(path_str, out_str);
                             }
@@ -218,7 +218,7 @@ fn run_cli_logic() -> Result<()> {
         } else {
             let filters: Vec<String> = sub_matches.get_many::<String>("filter").map_or(Vec::new(), |v| v.map(|s| s.clone()).collect());
             debug!("[CLI] Handling .it input with {} regex filters.", filters.len());
-            return extract::run_extract_with_key_search(input, output, key, &salts, filters, None, false, None).map(|_| ());
+            return extract::run_extract_with_key_search(input, output, key, &salts, filters, None, false, false, false, None).map(|_| ());
         }
     }
 

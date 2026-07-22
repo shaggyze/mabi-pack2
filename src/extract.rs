@@ -82,6 +82,8 @@ fn extract_file<R: Read + Seek>(
     iv0: u32,
     mode: encryption::Snow2Mode,
     auto_convert_png: bool,
+    auto_convert_features: bool,
+    auto_convert_pmg: bool,
 ) -> Result<(), Error> {
     let entry_abs_offset = content_data_start_offset + (ent.offset as u64 * 1024);
     main_file_reader.seek(SeekFrom::Start(entry_abs_offset))?;
@@ -135,6 +137,18 @@ fn extract_file<R: Read + Seek>(
             }
         }
     }
+    if auto_convert_features && final_name.to_lowercase().ends_with("features.xml.compiled") {
+        if let Some(xml) = crate::common_ext::decode_features_compiled(&final_content) {
+            final_content = xml.into_bytes();
+            final_name = final_name[..final_name.len() - ".compiled".len()].to_string();
+        }
+    }
+    if auto_convert_pmg && final_name.to_lowercase().ends_with(".pmg") {
+        if let Ok(pmg) = crate::pmg::PmgFile::parse(&final_content) {
+            final_content = pmg.to_obj().into_bytes();
+            final_name = format!("{}.obj", &final_name[..final_name.len() - 4]);
+        }
+    }
 
     common::write_file_to_disk(root_dir, &final_name, &final_content)
 }
@@ -151,6 +165,8 @@ pub fn run_extract_with_key_search(
     filters_cli: Vec<String>,
     region_key_override: Option<String>,
     auto_convert_png: bool,
+    auto_convert_features: bool,
+    auto_convert_pmg: bool,
     progress_cb: Option<&ProgressFn>,
 ) -> Result<String, Error> {
     debug!("[EXTRACT_SEARCH] Sequence: User Key -> Regional Filename -> Hardcoded Salts -> Salts.txt");
@@ -242,7 +258,7 @@ pub fn run_extract_with_key_search(
                 if filters.is_empty() || filters.iter().any(|re| re.find(&ent.name).is_some()) {
                     if let Some(cb) = progress_cb { cb(i, total, ""); }
                     let mut rd_for_content = StdBufReader::new(StdFile::open(fname_str)?);
-                    if let Err(e) = extract_file(&mut rd_for_content, content_offset, ent, output_folder_str, final_iv0, mode, auto_convert_png) {
+                    if let Err(e) = extract_file(&mut rd_for_content, content_offset, ent, output_folder_str, final_iv0, mode, auto_convert_png, auto_convert_features, auto_convert_pmg) {
                         warn!("[EXTRACT] Failed to extract {}: {}", ent.name, e);
                     }
                 }
@@ -276,7 +292,7 @@ pub fn run_extract_with_key_search(
             if filters.is_empty() || filters.iter().any(|re| re.find(&ent.name).is_some()) {
                 if let Some(cb) = progress_cb { cb(i, total, ""); }
                 let mut rd_for_content = StdBufReader::new(StdFile::open(fname_str)?);
-                if let Err(e) = extract_file(&mut rd_for_content, content_offset, ent, output_folder_str, final_iv0, mode, auto_convert_png) {
+                if let Err(e) = extract_file(&mut rd_for_content, content_offset, ent, output_folder_str, final_iv0, mode, auto_convert_png, auto_convert_features, auto_convert_pmg) {
                     warn!("[EXTRACT] Failed to extract {}: {}", ent.name, e);
                 }
             }

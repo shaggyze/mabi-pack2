@@ -200,7 +200,7 @@ pub fn convert(input: &str, output: &str, key: Option<String>, wrap_data: bool) 
     } else {
         debug!("[CONVERT] Extracting source .it");
         let salts = crate::load_salts();
-        discovered_salt = extract::run_extract_with_key_search(input, &tmp_path, key.clone(), &salts, vec![], None, false, None)?;    }
+        discovered_salt = extract::run_extract_with_key_search(input, &tmp_path, key.clone(), &salts, vec![], None, false, false, false, None)?;    }
 
     // Only wrap if the extracted tree doesn't already have a data/ subfolder
     let already_wrapped = std::fs::read_dir(&tmp)
@@ -257,7 +257,7 @@ pub fn run_full_sequence(folder: &str, output: &str, key: Option<String>) -> Res
             pack_v1::run_extract_v1(path_str, &tmp_path)?;
         } else {
             // Force using provided key if possible, then search with DEEP validation
-            extract::run_extract_with_key_search(path_str, &tmp_path, key.clone(), &salts, vec![], None, false, None)?;
+            extract::run_extract_with_key_search(path_str, &tmp_path, key.clone(), &salts, vec![], None, false, false, false, None)?;
         }
     }
 
@@ -319,7 +319,7 @@ pub fn run_batch_extract(
             if fname.to_lowercase().ends_with(".pack") {
                 let _ = pack_v1::run_extract_v1(fname, &out_dir);
             } else {
-                match extract::run_extract_with_key_search(fname, &out_dir, key_to_use, &salts, filters.clone(), None, false, None) {
+                match extract::run_extract_with_key_search(fname, &out_dir, key_to_use, &salts, filters.clone(), None, false, false, false, None) {
                     Ok(salt) => { cached_salt = Some(salt); }
                     Err(e) => warn!("[BATCH] Failed {}: {}", archive_name, e),
                 }
@@ -349,7 +349,7 @@ pub fn run_batch_extract(
                         let _ = pack_v1::run_extract_v1(fname, &out_dir);
                     } else {
                         let key = cli_key.clone();
-                        match extract::run_extract_with_key_search(fname, &out_dir, key, &salts, filters.clone(), None, false, None) {
+                        match extract::run_extract_with_key_search(fname, &out_dir, key, &salts, filters.clone(), None, false, false, false, None) {
                             Ok(_) => {}
                             Err(e) => warn!("[BATCH] Failed {}: {}", archive_name, e),
                         }
@@ -362,4 +362,78 @@ pub fn run_batch_extract(
 
     info!("[BATCH] All {} archives processed.", total);
     Ok(())
+}
+
+/// Decode a features.xml.compiled binary blob to XML text.
+/// Returns None if the data doesn't match the expected format.
+pub fn decode_features_compiled(data: &[u8]) -> Option<String> {
+    fn r16(d: &[u8], p: usize) -> Option<u16> {
+        if p + 2 > d.len() { return None; }
+        Some(u16::from_le_bytes([d[p], d[p + 1]]))
+    }
+    fn r32(d: &[u8], p: usize) -> Option<u32> {
+        if p + 4 > d.len() { return None; }
+        Some(u32::from_le_bytes([d[p], d[p + 1], d[p + 2], d[p + 3]]))
+    }
+    fn xdec(d: &[u8], pos: usize, len: usize) -> Option<String> {
+        if pos + len > d.len() { return None; }
+        if len > 0 && !d[pos..pos + len].iter().all(|&b| { let c = b ^ 0x80; c >= 0x20 && c <= 0x7E }) { return None; }
+        Some(d[pos..pos + len].iter().map(|&b| (b ^ 0x80) as char).collect())
+    }
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    let mut pos = 0usize;
+    let server_count = r16(data, pos)? as usize;
+    pos += 2;
+    if server_count == 0 || server_count > 200 { return None; }
+
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<features_compiled>\n");
+    xml.push_str(&format!("  <servers count=\"{}\">\n", server_count));
+    for _ in 0..server_count {
+        let nl = r16(data, pos)? as usize; pos += 2;
+        let name = xdec(data, pos, nl)?; pos += nl;
+        let rl = r16(data, pos)? as usize; pos += 2;
+        let region = xdec(data, pos, rl)?; pos += rl;
+        let sid = r16(data, pos)?; pos += 2;
+        if pos >= data.len() { return None; }
+        let ch = data[pos]; pos += 1;
+        xml.push_str(&format!("    <server name=\"{}\" region=\"{}\" server_id=\"{}\" channel=\"{}\"/>\n",
+            esc(&name), esc(&region), sid, ch));
+    }
+    xml.push_str("  </servers>\n");
+
+    let feature_count = r16(data, pos)? as usize;
+    pos += 2;
+    if feature_count > 100_000 { return None; }
+    xml.push_str(&format!("  <features count=\"{}\">\n", feature_count));
+
+    for _ in 0..feature_count {
+        let hash = r32(data, pos)?;
+        pos += 4;
+        let mut conds: Vec<String> = Vec::new();
+        loop {
+            if pos + 2 > data.len() { break; }
+            let clen = r16(data, pos)? as usize;
+            if clen > 500 { break; }
+            if clen > 0 {
+                if pos + 2 + clen > data.len() { break; }
+                if !data[pos + 2..pos + 2 + clen].iter().all(|&b| { let c = b ^ 0x80; c >= 0x20 && c <= 0x7E }) { break; }
+            }
+            pos += 2;
+            let s: String = data[pos..pos + clen].iter().map(|&b| (b ^ 0x80) as char).collect();
+            pos += clen;
+            conds.push(s);
+        }
+        xml.push_str(&format!("    <feature hash=\"{:#010x}\">\n", hash));
+        for (i, c) in conds.iter().enumerate() {
+            if !c.is_empty() {
+                xml.push_str(&format!("      <cond index=\"{}\">{}</cond>\n", i, esc(c)));
+            }
+        }
+        xml.push_str("    </feature>\n");
+    }
+    xml.push_str("  </features>\n</features_compiled>\n");
+    Some(xml)
 }
