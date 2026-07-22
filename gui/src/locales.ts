@@ -181,7 +181,11 @@ export const locales: Record<string, any> = {
     tree_empty: "Browse for a .it or .pack archive above to view its contents",
     btn_wipe_assoc: "Wipe Registry Associations",
     btn_open_config_dir: "Open Folder",
-    btn_reset_config: "Reset Settings"
+    btn_reset_config: "Reset Settings",
+    dash_roadmap_title: "Roadmap",
+    dash_mods_title: "Mod Loader",
+    tooltip_open_mods_dir: "Open the mods/ folder",
+    tooltip_new_mod_template: "Create a blank .mod template in mods/"
   },
   tw: {
     title: "瑪奇打包工具 2 v2.0.0",
@@ -365,7 +369,11 @@ export const locales: Record<string, any> = {
     tree_empty: "在上方瀏覽 .it 或 .pack 檔案以查看內容",
     btn_wipe_assoc: "清除登錄檔關聯",
     btn_open_config_dir: "開啟資料夾",
-    btn_reset_config: "重設設定"
+    btn_reset_config: "重設設定",
+    dash_roadmap_title: "開發路線圖",
+    dash_mods_title: "模組載入器",
+    tooltip_open_mods_dir: "開啟 mods/ 資料夾",
+    tooltip_new_mod_template: "在 mods/ 建立空白 .mod 範本"
   },
   ja: {
     title: "マビノギパックユーティリティ 2 v2.0.0",
@@ -549,7 +557,11 @@ export const locales: Record<string, any> = {
     tree_empty: "上のアーカイブを参照してファイルを表示してください",
     btn_wipe_assoc: "レジストリ関連付けを削除",
     btn_open_config_dir: "フォルダを開く",
-    btn_reset_config: "設定をリセット"
+    btn_reset_config: "設定をリセット",
+    dash_roadmap_title: "ロードマップ",
+    dash_mods_title: "Modローダー",
+    tooltip_open_mods_dir: "mods/ フォルダを開く",
+    tooltip_new_mod_template: "mods/ に空の .mod テンプレートを作成"
   },
   ko: {
     title: "마비노기 팩 유틸리티 2 v2.0.0",
@@ -733,6 +745,10 @@ export const locales: Record<string, any> = {
     tree_empty: "위에서 .it 또는 .pack 아카이브를 찾아보세요",
     btn_wipe_assoc: "레지스트리 연결 삭제",
     btn_open_config_dir: "폴더 열기",
-    btn_reset_config: "설정 초기화"
+    btn_reset_config: "설정 초기화",
+    dash_roadmap_title: "개발 로드맵",
+    dash_mods_title: "모드 로더",
+    tooltip_open_mods_dir: "mods/ 폴더 열기",
+    tooltip_new_mod_template: "mods/ 에 빈 .mod 템플릿 만들기"
   }
 };

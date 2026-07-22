@@ -110,6 +110,29 @@
             <div class="activity-item no-activity" id="noActivity">No recent activity</div>
           </div>
         </div>
+
+        <div class="dash-card dash-card-roadmap">
+          <div class="roadmap-header">
+            <h3 id="dash_roadmap_title">Roadmap</h3>
+            <span id="dash-roadmap-progress" class="roadmap-overall-pct"></span>
+          </div>
+          <div id="roadmap-list" class="roadmap-list"></div>
+        </div>
+
+        <div class="dash-card dash-card-mods">
+          <div class="roadmap-header">
+            <h3 id="dash_mods_title">Mod Loader</h3>
+            <span id="dash-api-badge" class="api-badge" title="REST API active">API :7331</span>
+          </div>
+          <div id="dash-mods-path" class="mods-path"></div>
+          <div id="dash-mods-list" class="mods-list">
+            <div class="mods-empty" id="dash-mods-empty">No .mod files found in mods/</div>
+          </div>
+          <div class="mods-actions">
+            <button class="tab-btn" id="btn-open-mods-dir" data-tooltip="tooltip_open_mods_dir">Open Folder</button>
+            <button class="tab-btn" id="btn-new-mod-template" data-tooltip="tooltip_new_mod_template">New .mod Template</button>
+          </div>
+        </div>
       </div>
 
       <!-- Extract Tab -->

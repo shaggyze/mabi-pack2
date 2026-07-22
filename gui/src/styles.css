@@ -636,6 +636,44 @@ input:checked + .slider:before { transform: translateX(20px); }
 .activity-item .activity-time { opacity: .45; margin-right: 8px; font-size: 11px; }
 .no-activity { opacity: .4; font-style: italic; }
 
+/* Roadmap card */
+.dash-card-roadmap, .dash-card-mods { grid-column: 1 / -1; }
+.roadmap-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.roadmap-header h3 { margin: 0; }
+.roadmap-overall-pct { font-size: 11px; opacity: .55; margin-left: auto; }
+.roadmap-list { display: flex; flex-direction: column; gap: 6px; }
+.roadmap-category { border: 1px solid var(--border, rgba(255,255,255,.06)); border-radius: 5px; overflow: hidden; }
+.roadmap-cat-header { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; user-select: none; background: rgba(255,255,255,.03); }
+.roadmap-cat-header:hover { background: rgba(255,255,255,.06); }
+.roadmap-cat-icon { font-size: 14px; }
+.roadmap-cat-name { font-size: 12px; font-weight: 600; letter-spacing: .04em; flex: 1; }
+.roadmap-cat-bar { width: 80px; height: 4px; background: rgba(255,255,255,.08); border-radius: 2px; overflow: hidden; }
+.roadmap-cat-fill { height: 100%; background: var(--accent, #38bdf8); border-radius: 2px; transition: width .3s; }
+.roadmap-cat-pct { font-size: 10px; opacity: .5; min-width: 28px; text-align: right; }
+.roadmap-cat-chevron { opacity: .4; font-size: 10px; transition: transform .2s; }
+.roadmap-category.open .roadmap-cat-chevron { transform: rotate(90deg); }
+.roadmap-tasks { display: none; flex-direction: column; padding: 4px 10px 8px; gap: 3px; }
+.roadmap-category.open .roadmap-tasks { display: flex; }
+.roadmap-task { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 2px 0; }
+.roadmap-task input[type=checkbox] { accent-color: var(--accent, #38bdf8); cursor: pointer; flex-shrink: 0; }
+.roadmap-task label { cursor: pointer; opacity: .8; }
+.roadmap-task.done label { text-decoration: line-through; opacity: .4; }
+.roadmap-task .prio-high   { color: #f87171; font-size: 9px; opacity: .7; }
+.roadmap-task .prio-medium { color: #fbbf24; font-size: 9px; opacity: .7; }
+.roadmap-task .prio-low    { color: #6b7280; font-size: 9px; opacity: .6; }
+
+/* Mods card */
+.api-badge { font-size: 9px; background: rgba(56,189,248,.15); color: var(--accent, #38bdf8); border: 1px solid rgba(56,189,248,.3); border-radius: 3px; padding: 2px 6px; font-family: monospace; }
+.mods-path { font-size: 10px; opacity: .4; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
+.mods-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; margin-bottom: 8px; }
+.mods-empty { font-size: 11px; opacity: .4; font-style: italic; }
+.mod-item { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 5px 8px; background: rgba(255,255,255,.03); border-radius: 4px; border: 1px solid var(--border, rgba(255,255,255,.06)); }
+.mod-item-name { font-weight: 600; flex: 1; }
+.mod-item-meta { opacity: .45; font-size: 10px; }
+.mod-item-err { color: #f87171; font-size: 10px; }
+.mod-item-badge-pub { font-size: 9px; background: rgba(34,197,94,.15); color: #4ade80; border: 1px solid rgba(34,197,94,.3); border-radius: 3px; padding: 1px 5px; }
+.mods-actions { display: flex; gap: 8px; }
+
 .context-menu {
   position: absolute;
   display: none;

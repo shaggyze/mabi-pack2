@@ -34,6 +34,8 @@ directories = "5.0"
 sysinfo = "0.38.4"
 once_cell = "1.19"
 encoding_rs = "0.8"
+toml = { version = "0.8", features = ["parse"] }
+tiny_http = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
