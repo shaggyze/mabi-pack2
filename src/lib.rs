@@ -1,5 +1,7 @@
 pub mod api;
 pub mod common;
+#[cfg(target_os = "windows")]
+pub mod launcher;
 pub mod common_ext;
 pub mod encryption;
 pub mod extract;

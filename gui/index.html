@@ -48,6 +48,10 @@
           <span class="nav-icon">⚡</span>
           <span class="nav-text" id="tab-differ-text">Differ</span>
         </button>
+        <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
+          <span class="nav-icon">🚀</span>
+          <span class="nav-label" id="tab-launcher-text">Launcher</span>
+        </button>
         <button class="nav-item" data-tab="settings" id="tab-settings" data-tooltip="tab_settings">
           <span class="nav-icon">⚙️</span>
           <span class="nav-text" id="tab-settings-text">Settings</span>
@@ -131,6 +135,85 @@
           <div class="mods-actions">
             <button class="tab-btn" id="btn-open-mods-dir" data-tooltip="tooltip_open_mods_dir">Open Folder</button>
             <button class="tab-btn" id="btn-new-mod-template" data-tooltip="tooltip_new_mod_template">New .mod Template</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Launcher Tab -->
+      <div id="launcher" class="tab-content">
+        <div class="launcher-panel">
+          <div class="card">
+            <div class="card-header">
+              <span id="launcher-title-text">Nexon NA Launcher</span>
+            </div>
+            <div class="launcher-status-bar">
+              <span id="launcher-status-dot" class="status-dot"></span>
+              <span id="launcher-status-text">Not logged in</span>
+            </div>
+          </div>
+
+          <!-- Login form -->
+          <div class="card" id="launcher-login-card">
+            <div class="card-header" id="launcher-login-header-text">Login</div>
+            <div class="form-group">
+              <label id="launcher-email-label-text">Nexon Email</label>
+              <input type="email" id="launcher-email" class="form-input" placeholder="you@example.com" autocomplete="username" />
+            </div>
+            <div class="form-group">
+              <label id="launcher-password-label-text">Password</label>
+              <input type="password" id="launcher-password" class="form-input" placeholder="••••••••" autocomplete="current-password" />
+            </div>
+            <div class="form-group form-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="launcher-remember" />
+                <span id="launcher-remember-text">Remember me</span>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-launcher-login">
+                <span id="btn-launcher-login-text">Login</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Session info (shown after login) -->
+          <div class="card hidden" id="launcher-session-card">
+            <div class="card-header" id="launcher-session-header-text">Session</div>
+            <div class="launcher-session-row">
+              <span id="launcher-session-label-text">Session token:</span>
+              <span id="launcher-session-preview" class="launcher-token-preview">—</span>
+            </div>
+            <div class="launcher-session-row">
+              <span id="launcher-version-label-text">Game version:</span>
+              <span id="launcher-version-value">—</span>
+            </div>
+            <div class="launcher-session-row">
+              <span id="launcher-maintenance-label-text">Maintenance:</span>
+              <span id="launcher-maintenance-value">—</span>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn" id="btn-launcher-logout">
+                <span id="btn-launcher-logout-text">Log out</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Launch section (shown after login) -->
+          <div class="card hidden" id="launcher-launch-card">
+            <div class="card-header" id="launcher-launch-header-text">Launch Game</div>
+            <div class="form-group">
+              <label id="launcher-client-label-text">Mabinogi Folder</label>
+              <div class="input-row">
+                <input type="text" id="launcher-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
+                <button class="tab-btn" id="btn-launcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-launcher-launch">
+                <span id="btn-launcher-launch-text">Launch Mabinogi</span>
+              </button>
+            </div>
+            <div id="launcher-launch-result" class="hidden"></div>
           </div>
         </div>
       </div>
