@@ -267,6 +267,7 @@ class App {
         this.initTooltip();
         this.setupNavigation();
         this.setupDashboard();
+        this.setupLauncher();
         this.setupForms();
         this.setupEventListen();
 
@@ -697,6 +698,133 @@ class App {
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
             } catch (_) {}
         });
+    }
+
+    // ── Launcher tab ────────────────────────────────────────────────────────────
+
+    private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string } | null = null;
+    private readonly LAUNCHER_SESSION_KEY = "nexon_session";
+
+    private setupLauncher() {
+        // Restore session from localStorage
+        const saved = localStorage.getItem(this.LAUNCHER_SESSION_KEY);
+        if (saved) {
+            try {
+                this.launcherSession = JSON.parse(saved);
+                this.updateLauncherUI(true);
+                this.fetchLauncherVersion();
+            } catch { localStorage.removeItem(this.LAUNCHER_SESSION_KEY); }
+        }
+
+        document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
+        document.getElementById("btn-launcher-logout")?.addEventListener("click", () => this.launcherDoLogout());
+        document.getElementById("btn-launcher-launch")?.addEventListener("click", () => this.launcherDoLaunch());
+
+        document.getElementById("btn-launcher-browse")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const dir = await open({ directory: true });
+            if (dir && !Array.isArray(dir)) {
+                (document.getElementById("launcher-client-dir") as HTMLInputElement).value = dir;
+            }
+        });
+    }
+
+    private async launcherDoLogin() {
+        const emailEl = document.getElementById("launcher-email") as HTMLInputElement;
+        const pwEl = document.getElementById("launcher-password") as HTMLInputElement;
+        const rememberEl = document.getElementById("launcher-remember") as HTMLInputElement;
+        const email = emailEl.value.trim();
+        const password = pwEl.value;
+        if (!email || !password) { this.setLauncherStatus("Email and password required", "error"); return; }
+
+        const btn = document.getElementById("btn-launcher-login") as HTMLButtonElement;
+        btn.disabled = true;
+        this.setLauncherStatus("Logging in…", "busy");
+
+        try {
+            const result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked }) as any;
+            this.launcherSession = result.session;
+            if (rememberEl.checked) {
+                localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
+            }
+            pwEl.value = "";
+            this.updateLauncherUI(true);
+            this.setLauncherStatus("Logged in", "ok");
+            this.fetchLauncherVersion();
+        } catch (e: any) {
+            this.setLauncherStatus(`Login failed: ${e}`, "error");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    private launcherDoLogout() {
+        this.launcherSession = null;
+        localStorage.removeItem(this.LAUNCHER_SESSION_KEY);
+        this.updateLauncherUI(false);
+        this.setLauncherStatus("Not logged in", "idle");
+        (document.getElementById("launcher-version-value") as HTMLElement).textContent = "—";
+        (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = "—";
+    }
+
+    private async launcherDoLaunch() {
+        if (!this.launcherSession) { this.setLauncherStatus("Please log in first", "error"); return; }
+        const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
+        if (!clientDir) { this.setLauncherStatus("Mabinogi folder is required", "error"); return; }
+
+        const btn = document.getElementById("btn-launcher-launch") as HTMLButtonElement;
+        btn.disabled = true;
+        this.setLauncherStatus("Launching…", "busy");
+
+        try {
+            const r = await invoke("launcher_launch", { session: this.launcherSession, clientDir }) as any;
+            const result = document.getElementById("launcher-launch-result")!;
+            result.textContent = `Launched ${r.executable} (${r.argumentCount} args)${r.patchAvailable ? " — update available" : ""}`;
+            result.className = "launcher-launch-result success";
+            result.classList.remove("hidden");
+            this.setLauncherStatus("Mabinogi launched!", "ok");
+        } catch (e: any) {
+            const result = document.getElementById("launcher-launch-result")!;
+            result.textContent = `Launch failed: ${e}`;
+            result.className = "launcher-launch-result error";
+            result.classList.remove("hidden");
+            this.setLauncherStatus(`Launch error: ${e}`, "error");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    private async fetchLauncherVersion() {
+        if (!this.launcherSession) return;
+        try {
+            const ver = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
+            (document.getElementById("launcher-version-value") as HTMLElement).textContent = String(ver);
+            const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
+            (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
+        } catch { /* version fetch is non-critical */ }
+    }
+
+    private updateLauncherUI(loggedIn: boolean) {
+        document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
+        document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
+        document.getElementById("launcher-launch-card")?.classList.toggle("hidden", !loggedIn);
+        if (loggedIn && this.launcherSession) {
+            const token = this.launcherSession.session_token;
+            const preview = token ? token.substring(0, 12) + "…" : "—";
+            (document.getElementById("launcher-session-preview") as HTMLElement).textContent = preview;
+        }
+        const dot = document.getElementById("launcher-status-dot");
+        if (dot) dot.style.background = loggedIn ? "var(--green, #4ade80)" : "var(--yellow, #facc15)";
+    }
+
+    private setLauncherStatus(msg: string, type: "ok" | "error" | "busy" | "idle") {
+        const el = document.getElementById("launcher-status-text");
+        if (el) el.textContent = msg;
+        const dot = document.getElementById("launcher-status-dot");
+        if (dot) {
+            const colours: Record<string, string> = { ok: "#4ade80", error: "#f87171", busy: "#facc15", idle: "#6b7280" };
+            dot.style.background = colours[type] ?? colours.idle;
+        }
     }
 
     private addActivity(message: string) {

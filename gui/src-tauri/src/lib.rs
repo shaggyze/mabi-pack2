@@ -1,4 +1,4 @@
-use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption};
+﻿use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption};
 use encoding_rs::{WINDOWS_1252, SHIFT_JIS, EUC_KR, BIG5};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -222,7 +222,7 @@ fn init_logging(app: &tauri::AppHandle, level: &str) {
     let buffer = Arc::new(Mutex::new(String::new()));
     loggers.push(simplelog::WriteLogger::new(filter, config.clone(), TauriEventWriter { app_handle: app.clone(), buffer }));
     
-    // Persistent log.txt next to the executable — always at Info so all activity is captured
+    // Persistent log.txt next to the executable â€” always at Info so all activity is captured
     let log_path_result = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("log.txt")));
@@ -630,9 +630,9 @@ async fn list_sequence_contents(app: tauri::AppHandle, folder: String, key: Opti
         }
     }
 
-    // Deduplicate: archives were processed in ascending name order (data.it → data_001.it → data_002.it…)
+    // Deduplicate: archives were processed in ascending name order (data.it â†’ data_001.it â†’ data_002.itâ€¦)
     // so later entries overwrite earlier ones, meaning the highest-numbered archive's copy wins.
-    // Normalize backslashes → forward slashes so duplicate entries with mixed separators collapse.
+    // Normalize backslashes â†’ forward slashes so duplicate entries with mixed separators collapse.
     let mut deduped: std::collections::HashMap<String, AggregateEntry> = std::collections::HashMap::new();
     for mut entry in all_entries {
         if entry.name.contains('\\') { entry.name = entry.name.replace('\\', "/"); }
@@ -965,7 +965,7 @@ async fn get_preview_ext(
 
     const MAX_HEX_BYTES: usize = 32 * 1024;         // 32 KB for hex view
     const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024; // 8 MB for audio playback
-    const MAX_ADPCM_INPUT: usize = 2 * 1024 * 1024; // 2 MB ADPCM input → ~8 MB PCM
+    const MAX_ADPCM_INPUT: usize = 2 * 1024 * 1024; // 2 MB ADPCM input â†’ ~8 MB PCM
 
     let full_preview_size = raw_bytes.len() as u64;
     let file_type_str = common_ext::get_preview_ext(&entry_name).unwrap_or("unknown").to_string();
@@ -1009,7 +1009,7 @@ async fn get_preview_ext(
     } else if preview.file_type == "pmg" {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => {
-                info!("[PMG] {}  ·  {} verts  {} faces", if geo.mesh_name.is_empty() { &entry_name } else { &geo.mesh_name }, geo.vertex_count, geo.face_count);
+                info!("[PMG] {}  Â·  {} verts  {} faces", if geo.mesh_name.is_empty() { &entry_name } else { &geo.mesh_name }, geo.vertex_count, geo.face_count);
                 preview.pmg_geometry = Some(geo);
             },
             Err(e)  => {
@@ -1022,7 +1022,7 @@ async fn get_preview_ext(
         if entry_name.to_lowercase().ends_with(".wav") {
             if raw_bytes.len() <= MAX_ADPCM_INPUT {
                 if let Some(pcm_wav) = decode_ima_adpcm_wav(&raw_bytes) {
-                    debug!("[GUI] ADPCM decoded {} → {} bytes for {}", raw_bytes.len(), pcm_wav.len(), entry_name);
+                    debug!("[GUI] ADPCM decoded {} â†’ {} bytes for {}", raw_bytes.len(), pcm_wav.len(), entry_name);
                     raw_bytes = pcm_wav;
                 }
                 // else: PCM format, pass through unchanged
@@ -1030,14 +1030,14 @@ async fn get_preview_ext(
                 // Large ADPCM: browser can't play ADPCM natively, don't send unplayable bytes
                 let mb = raw_bytes.len() as f64 / 1_048_576.0;
                 let msg = format!(
-                    "ADPCM audio ({:.1} MB compressed) — too large for in-app preview. Extract and open externally.",
+                    "ADPCM audio ({:.1} MB compressed) â€” too large for in-app preview. Extract and open externally.",
                     mb
                 );
                 warn!("[GUI] Audio {}: {}", entry_name, msg);
                 preview.content_text = Some(msg);
                 raw_bytes = Vec::new();
             }
-            // else: large PCM WAV — send first 8 MB, browser handles it natively
+            // else: large PCM WAV â€” send first 8 MB, browser handles it natively
         }
     } else if preview.file_type == "binary" && entry_name.to_lowercase().ends_with(".compiled") {
         if let Some(xml_text) = try_decode_xml_compiled(&raw_bytes) {
@@ -1060,7 +1060,7 @@ async fn get_preview_ext(
         preview.raw_bytes = raw_bytes;
     }
 
-    debug!("[GUI] Preview for {} — {} bytes (truncated={})", entry_name, preview.full_preview_size, preview.truncated);
+    debug!("[GUI] Preview for {} â€” {} bytes (truncated={})", entry_name, preview.full_preview_size, preview.truncated);
     Ok(preview)
 }
 
@@ -1095,7 +1095,7 @@ fn strip_to_triangles(strip: &[u16]) -> Vec<u16> {
 fn parse_pmg_bytes(data: &[u8]) -> Result<PmgGeometry, String> {
     use mabi_pack2::pmg::PmgFile;
     if data.is_empty() {
-        return Err("Empty file (0 bytes — stub entry)".to_string());
+        return Err("Empty file (0 bytes â€” stub entry)".to_string());
     }
     let pmg = PmgFile::parse(data).map_err(|e| e.to_string())?;
     // Accept LODs with face_indices OR strip_indices; pick highest vertex count
@@ -1110,7 +1110,7 @@ fn parse_pmg_bytes(data: &[u8]) -> Result<PmgGeometry, String> {
                 total,
                 pmg.groups.iter().map(|g| g.lods.len()).sum::<usize>())
         })?;
-    // Pass raw local-space positions — Three.js geometry.center() will normalize placement
+    // Pass raw local-space positions â€” Three.js geometry.center() will normalize placement
     let mut positions = Vec::with_capacity(lod.vertices.len() * 3);
     let mut uvs       = Vec::with_capacity(lod.vertices.len() * 2);
     for v in &lod.vertices {
@@ -1347,7 +1347,7 @@ fn read_cpu_pct() -> Option<f32> {
     Some(val.max(0.0).min(100.0) as f32)
 }
 
-/// Runs once in a background thread — detects adapter link speed via PowerShell.
+/// Runs once in a background thread â€” detects adapter link speed via PowerShell.
 /// Stored in NET_LINK_MAX_KBPS atomic; JS reads it from get_system_info response.
 fn start_net_link_detect_thread() {
     std::thread::spawn(|| {
@@ -1670,7 +1670,7 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
             } else if is_adpcm_wav(&raw_bytes) {
                 let mb = raw_bytes.len() as f64 / 1_048_576.0;
                 preview.content_text = Some(format!(
-                    "ADPCM audio ({:.1} MB compressed) — too large for in-app preview. Extract and open externally.", mb
+                    "ADPCM audio ({:.1} MB compressed) â€” too large for in-app preview. Extract and open externally.", mb
                 ));
                 raw_bytes = Vec::new();
             }
@@ -1715,7 +1715,7 @@ pub struct ModInfo {
 
 /// Return the path to the mods/ directory next to the exe.
 #[tauri::command]
-pub fn get_mods_dir() -> String {
+fn get_mods_dir() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("mods").to_string_lossy().to_string()))
@@ -1724,7 +1724,7 @@ pub fn get_mods_dir() -> String {
 
 /// Scan the mods/ directory for .mod files and return metadata.
 #[tauri::command]
-pub fn list_mod_files() -> Vec<ModInfo> {
+fn list_mod_files() -> Vec<ModInfo> {
     let dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("mods")))
@@ -1764,7 +1764,7 @@ pub fn list_mod_files() -> Vec<ModInfo> {
 
 /// Parse and return a single .mod file's metadata + content.
 #[tauri::command]
-pub fn load_mod_file(path: String) -> Result<String, String> {
+fn load_mod_file(path: String) -> Result<String, String> {
     match mod_file::ModPackage::load(std::path::Path::new(&path)) {
         Ok(pkg) => serde_json::to_string(&pkg).map_err(|e| e.to_string()),
         Err(e)  => Err(e.to_string()),
@@ -1773,14 +1773,119 @@ pub fn load_mod_file(path: String) -> Result<String, String> {
 
 /// Return the blank .mod template string.
 #[tauri::command]
-pub fn get_mod_template() -> String {
+fn get_mod_template() -> String {
     mod_file::template().to_string()
 }
 
 /// Return the current API server port.
 #[tauri::command]
-pub fn get_api_port() -> u16 {
+fn get_api_port() -> u16 {
     api::DEFAULT_PORT
+}
+
+// â”€â”€ Nexon NA Launcher commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// Serializable session snapshot passed between frontend and commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub access_token: String,
+    pub g_access_token: String,
+    pub session_token: String,
+    pub hashed_user_id: String,
+}
+
+impl From<mabi_pack2::launcher::auth::NexonSession> for SessionInfo {
+    fn from(s: mabi_pack2::launcher::auth::NexonSession) -> Self {
+        Self {
+            access_token: s.access_token,
+            g_access_token: s.g_access_token,
+            session_token: s.session_token,
+            hashed_user_id: s.hashed_user_id,
+        }
+    }
+}
+
+impl From<SessionInfo> for mabi_pack2::launcher::auth::NexonSession {
+    fn from(s: SessionInfo) -> Self {
+        Self {
+            access_token: s.access_token,
+            g_access_token: s.g_access_token,
+            session_token: s.session_token,
+            hashed_user_id: s.hashed_user_id,
+        }
+    }
+}
+
+/// Login with username + password. Returns session info on success.
+#[tauri::command]
+fn launcher_login(
+    username: String,
+    password: String,
+    remember: bool,
+) -> Result<serde_json::Value, String> {
+    let result = mabi_pack2::launcher::auth::login(&username, &password, remember)
+        .map_err(|e| e.to_string())?;
+    let session: SessionInfo = result.session.into();
+    Ok(serde_json::json!({
+        "session": session,
+        "expiresIn": result.session_expires_in,
+    }))
+}
+
+/// Refresh using a stored session token (no password needed).
+#[tauri::command]
+fn launcher_autologin(session_token: String) -> Result<serde_json::Value, String> {
+    let result = mabi_pack2::launcher::auth::autologin(&session_token)
+        .map_err(|e| e.to_string())?;
+    let session: SessionInfo = result.session.into();
+    Ok(serde_json::json!({
+        "session": session,
+        "expiresIn": result.session_expires_in,
+    }))
+}
+
+/// Fetch a passport token for launching the game.
+#[tauri::command]
+fn launcher_get_passport(session: SessionInfo) -> Result<String, String> {
+    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
+    mabi_pack2::launcher::auth::get_passport(&nexon_session).map_err(|e| e.to_string())
+}
+
+/// Check if the game is in maintenance.
+#[tauri::command]
+fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String> {
+    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
+    mabi_pack2::launcher::patch::is_maintenance(&nexon_session).map_err(|e| e.to_string())
+}
+
+/// Get the latest game version number.
+#[tauri::command]
+fn launcher_get_version(session: SessionInfo) -> Result<i32, String> {
+    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
+    mabi_pack2::launcher::patch::get_latest_version(&nexon_session).map_err(|e| e.to_string())
+}
+
+/// Fetch launch config and spawn Client.exe. Returns launch argument info.
+#[tauri::command]
+fn launcher_launch(
+    session: SessionInfo,
+    client_dir: String,
+) -> Result<serde_json::Value, String> {
+    use mabi_pack2::launcher::{auth, launch, patch};
+    let nexon_session: auth::NexonSession = session.into();
+
+    let config = launch::fetch_launch_config(&nexon_session).map_err(|e| e.to_string())?;
+    let passport = auth::get_passport(&nexon_session).map_err(|e| e.to_string())?;
+    let summary = launch::LaunchSummary::from(&config);
+
+    let dir = std::path::Path::new(&client_dir);
+    let _child = config.spawn_client(dir, &passport).map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "executable": summary.executable,
+        "argumentCount": summary.argument_count,
+        "patchAvailable": summary.patch_available,
+    }))
 }
 
 pub fn run() {
@@ -1820,7 +1925,9 @@ pub fn run() {
             get_all_salts, is_ran_as_admin, register_associations, request_elevation,
             execute_terminal_command, get_initial_file, check_data_folder, detect_data_prefix, log_to_file, drain_log_buffer,
             preview_loose_file,
-            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port
+            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port,
+            launcher_login, launcher_autologin, launcher_get_passport,
+            launcher_check_maintenance, launcher_get_version, launcher_launch
         ])
 
         .run(tauri::generate_context!())

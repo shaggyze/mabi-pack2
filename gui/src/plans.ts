@@ -91,8 +91,8 @@ export const PLANS: Category[] = [
     title: "Launcher",
     icon: "🚀",
     tasks: [
-      { id: "launch-auth",    title: "Nexon OAuth login (SHA512 + device ID)",             done: false, priority: "high" },
-      { id: "launch-passport","title": "Passport → Client.exe launch command",             done: false, priority: "high" },
+      { id: "launch-auth",    title: "Nexon NA login (SHA512 pw + device ID + autologin)",  done: true,  priority: "high" },
+      { id: "launch-passport","title": "Passport → Client.exe launch (spawn_client)",      done: true,  priority: "high" },
       { id: "launch-profile", title: "Multi-account profile manager",                      done: false, priority: "medium" },
       { id: "launch-mabitd",  title: "MabiTDown patch downloader integration",             done: false, priority: "medium" },
       { id: "launch-kanan",   title: "Kanan mod list UI (edits LibLoader Loader.cfg)",     done: false, priority: "low" },

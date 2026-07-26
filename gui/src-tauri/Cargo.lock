@@ -2408,10 +2408,12 @@ dependencies = [
  "reqwest 0.11.27",
  "serde",
  "serde_json",
+ "sha2",
  "simplelog",
  "tiny_http",
  "toml 0.8.2",
  "walkdir",
+ "winreg 0.52.0",
  "zerocopy 0.7.35",
 ]
 

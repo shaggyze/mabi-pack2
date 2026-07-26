@@ -35,7 +35,8 @@ memmap2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["dds", "png"] }
 image_dds = "0.7"
 base64 = "0.22"
-reqwest = { version = "0.11", features = ["blocking", "rustls-tls-native-roots"] }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls-native-roots", "json"] }
+sha2 = "0.10"
 clap = "~3.2.25"
 chrono = "0.4"
 log = "0.4"
@@ -59,6 +60,9 @@ strip = true
 [features]
 default = []
 debug = []
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 
 [build-dependencies]
 cc = "1.0"
