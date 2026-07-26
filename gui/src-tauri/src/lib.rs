@@ -1797,10 +1797,6 @@ pub fn run() {
             start_stats_refresher();
             auto_register_associations_silent(&config);
 
-            // Auto-start the local REST API server for WebUI integration
-            let _api_stop = api::spawn(api::DEFAULT_PORT);
-            info!("[GUI] API server started on http://127.0.0.1:{}", api::DEFAULT_PORT);
-
             // Handle CLI arguments (e.g. drag and drop onto EXE)
             let args: Vec<String> = std::env::args().collect();
             let full_sequence = args.contains(&"--full".to_string());
