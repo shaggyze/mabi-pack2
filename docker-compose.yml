@@ -1,0 +1,22 @@
+services:
+  mabi-patcher:
+    build: .
+    container_name: mabi-patcher
+    restart: unless-stopped
+    ports:
+      - "7331:7331"
+    volumes:
+      # Mount your Mabinogi archive directory (read-only is fine for list/extract)
+      - /opt/mabinogi/data:/data/archives:ro
+      # Mount your mods directory (read-write so the WebUI can write .mod files)
+      - ./mods:/data/mods
+    environment:
+      MABI_HOST: "0.0.0.0"
+      MABI_PORT: "7331"
+      RUST_LOG: "info"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7331/api/v1/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

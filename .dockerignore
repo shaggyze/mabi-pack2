@@ -1,0 +1,7 @@
+target/
+gui/
+.git/
+*.md
+!mods/
+.gemini/
+.claude/

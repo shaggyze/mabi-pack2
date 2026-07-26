@@ -220,10 +220,10 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
 // ---- server -----------------------------------------------------------------
 
-/// Start the API server on the given port. Blocks until `stop` is set.
-/// Typically called on a background thread.
-pub fn run_server(port: u16, stop: Arc<AtomicBool>) -> Result<()> {
-    let addr = format!("127.0.0.1:{}", port);
+/// Start the API server. Blocks until `stop` is set.
+/// `host` defaults to `"127.0.0.1"` (loopback); pass `"0.0.0.0"` for Docker/container use.
+pub fn run_server(host: &str, port: u16, stop: Arc<AtomicBool>) -> Result<()> {
+    let addr = format!("{}:{}", host, port);
     let server = Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("API server bind failed on {}: {}", addr, e))?;
     log::info!("[API] Listening on http://{}", addr);
@@ -242,12 +242,12 @@ pub fn run_server(port: u16, stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the API server on a background thread. Returns the stop flag.
+/// Spawn the API server on a background thread (loopback only). Returns the stop flag.
 pub fn spawn(port: u16) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = Arc::clone(&stop);
     std::thread::spawn(move || {
-        if let Err(e) = run_server(port, stop2) {
+        if let Err(e) = run_server("127.0.0.1", port, stop2) {
             log::error!("[API] {}", e);
         }
     });

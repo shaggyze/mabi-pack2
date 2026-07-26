@@ -138,7 +138,7 @@ fn main() -> Result<()> {
         )
         .subcommand(
             Command::new("serve")
-                .about("Run mabi-patcher as a local HTTP API server (for UOTiara WebUI integration)")
+                .about("Run mabi-patcher as an HTTP API server (for UOTiara WebUI integration)")
                 .arg(
                     Arg::new("port")
                         .short('p')
@@ -146,6 +146,13 @@ fn main() -> Result<()> {
                         .value_name("PORT")
                         .help("Port to listen on (default: 7331)")
                         .default_value("7331")
+                )
+                .arg(
+                    Arg::new("host")
+                        .long("host")
+                        .value_name("HOST")
+                        .help("Address to bind (default: 127.0.0.1; use 0.0.0.0 for Docker/LXC)")
+                        .default_value("127.0.0.1")
                 )
         )
         .subcommand(
@@ -428,13 +435,14 @@ fn main() -> Result<()> {
         let port: u16 = sub.get_one::<String>("port")
             .and_then(|s| s.parse().ok())
             .unwrap_or(api::DEFAULT_PORT);
-        info!("[SERVE] Starting mabi-patcher API server on http://127.0.0.1:{}", port);
+        let host = sub.get_one::<String>("host").map(String::as_str).unwrap_or("127.0.0.1");
+        info!("[SERVE] Starting mabi-patcher API server on http://{}:{}", host, port);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let stop2 = stop.clone();
             ctrlc_handler(move || { stop2.store(true, std::sync::atomic::Ordering::Relaxed); });
         }
-        api::run_server(port, stop)?;
+        api::run_server(host, port, stop)?;
     } else if let Some(sub) = matches.subcommand_matches("mod") {
         if let Some(ins) = sub.subcommand_matches("inspect") {
             let path = std::path::Path::new(ins.get_one::<String>("file").unwrap());
