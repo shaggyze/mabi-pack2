@@ -489,6 +489,20 @@
             <button id="ctxConvIt" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_it">TO .IT</button>
             <button id="ctxConvPack" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_pack">TO .PACK</button>
         </div>
+
+        <!-- VFS edit toolbar -->
+        <div class="input-row vfs-toolbar hidden" id="vfs-toolbar" style="margin-top: 6px; gap: 6px;">
+            <span id="vfs-pending-badge" class="vfs-badge">0 changes</span>
+            <button id="btn-vfs-merge" class="tab-btn" style="flex:0; white-space:nowrap" data-tooltip="tooltip_vfs_merge">MERGE .IT</button>
+            <button id="btn-vfs-apply" class="run-btn" style="flex:1" data-tooltip="tooltip_vfs_apply">APPLY CHANGES</button>
+            <button id="btn-vfs-reset" class="tab-btn" style="color:var(--accent-warn,#f90)" data-tooltip="tooltip_vfs_reset">RESET</button>
+        </div>
+
+        <!-- Context menu (shared) -->
+        <div id="tree-ctx-menu" class="ctx-menu hidden">
+            <div class="ctx-item" id="ctx-rename">Rename</div>
+            <div class="ctx-item" id="ctx-delete">Delete</div>
+        </div>
       </div>
 
       <!-- Differ Tab -->
