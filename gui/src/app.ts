@@ -279,6 +279,7 @@ class App {
         this.setupNavigation();
         this.setupDashboard();
         this.setupJobQueue();
+        this.setupVfsEditing();
         this.setupLauncher();
         this.setupFeaturesEditor();
         this.setupForms();
@@ -711,6 +712,163 @@ class App {
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
             } catch (_) {}
         });
+    }
+
+    // ── VFS editing ─────────────────────────────────────────────────────────────
+
+    private vfsPending: Array<{op: string; [k: string]: string}> = [];
+    private vfsCtxTarget: string = "";
+
+    private setupVfsEditing() {
+        const tree = document.getElementById("file-tree")!;
+        const ctxMenu = document.getElementById("tree-ctx-menu")!;
+        const toolbar = document.getElementById("vfs-toolbar")!;
+
+        // Drag-over: highlight drop target
+        tree.addEventListener("dragover", (e) => {
+            if (e.dataTransfer?.types.includes("Files")) {
+                e.preventDefault();
+                tree.classList.add("vfs-drop-active");
+            }
+        });
+        tree.addEventListener("dragleave", () => tree.classList.remove("vfs-drop-active"));
+        tree.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            tree.classList.remove("vfs-drop-active");
+            if (!this.currentArchive) return;
+            const files = Array.from(e.dataTransfer?.files ?? []);
+            // Find which folder was hovered
+            const hoveredRow = (e.target as HTMLElement).closest<HTMLElement>(".tree-row.folder, .tree-item");
+            let destFolder = "";
+            if (hoveredRow) {
+                const folderPath = hoveredRow.dataset.path ?? "";
+                destFolder = folderPath ? folderPath.replace(/\\/g, "/").replace(/\/?$/, "/") : "";
+            }
+            for (const f of files) {
+                const localPath = (f as any).path as string | undefined;
+                if (!localPath) continue;
+                const destPath = destFolder + f.name;
+                this.vfsPending.push({ op: "add", dest: destPath, local_src: localPath });
+                this.renderVfsPending();
+            }
+        });
+
+        // Right-click on tree items → context menu
+        tree.addEventListener("contextmenu", (e) => {
+            if (!this.currentArchive) return;
+            const row = (e.target as HTMLElement).closest<HTMLElement>(".tree-item, .tree-row");
+            if (!row) { ctxMenu.classList.add("hidden"); return; }
+            e.preventDefault();
+            this.vfsCtxTarget = row.dataset.path ?? "";
+            ctxMenu.style.left = e.clientX + "px";
+            ctxMenu.style.top  = e.clientY + "px";
+            ctxMenu.classList.remove("hidden");
+        });
+        document.addEventListener("click", () => ctxMenu.classList.add("hidden"));
+
+        document.getElementById("ctx-rename")?.addEventListener("click", () => {
+            if (!this.vfsCtxTarget) return;
+            const newName = prompt("New path (relative to archive root):", this.vfsCtxTarget);
+            if (!newName || newName === this.vfsCtxTarget) return;
+            this.vfsPending.push({ op: "rename", from: this.vfsCtxTarget, to: newName });
+            this.renderVfsPending();
+        });
+        document.getElementById("ctx-delete")?.addEventListener("click", () => {
+            if (!this.vfsCtxTarget) return;
+            this.vfsPending.push({ op: "delete", path: this.vfsCtxTarget });
+            this.renderVfsPending();
+        });
+
+        // Merge archive button
+        document.getElementById("btn-vfs-merge")?.addEventListener("click", async () => {
+            if (!this.currentArchive) return;
+            try {
+                const { open } = await import("@tauri-apps/plugin-dialog");
+                const chosen = await open({ filters: [{ name: "Archive", extensions: ["it", "pack"] }] });
+                if (!chosen) return;
+                const srcPath = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
+                this.vfsPending.push({ op: "merge", src_archive: srcPath });
+                this.renderVfsPending();
+            } catch (err) { alert("Merge error: " + err); }
+        });
+
+        // Apply button
+        document.getElementById("btn-vfs-apply")?.addEventListener("click", async () => {
+            if (!this.currentArchive || this.vfsPending.length === 0) return;
+            const btn = document.getElementById("btn-vfs-apply")!;
+            btn.textContent = "Applying…";
+            btn.setAttribute("disabled", "true");
+            try {
+                const result = await invoke("apply_vfs_changes", {
+                    archive: this.currentArchive,
+                    key: null,
+                    changes: this.vfsPending,
+                }) as any;
+                this.vfsPending = [];
+                this.renderVfsPending();
+                alert(`Applied ${result.changes} change(s) — ${JSON.stringify(result.stats)}`);
+                // Reload the archive listing
+                await this.listArchive(this.currentArchive);
+            } catch (err) { alert("Apply failed: " + err); }
+            btn.textContent = "APPLY CHANGES";
+            btn.removeAttribute("disabled");
+        });
+
+        // Reset button
+        document.getElementById("btn-vfs-reset")?.addEventListener("click", () => {
+            this.vfsPending = [];
+            this.renderVfsPending();
+            // Re-render tree without pending overlays
+            const items = document.querySelectorAll<HTMLElement>(".tree-item, .tree-row");
+            items.forEach(i => { i.classList.remove("vfs-delete", "vfs-add", "vfs-rename"); });
+        });
+
+        // Show toolbar only when an archive is loaded
+        const showToolbar = () => {
+            if (this.currentArchive) toolbar.classList.remove("hidden");
+        };
+        document.getElementById("btn-browse-list")?.addEventListener("click", showToolbar);
+    }
+
+    private renderVfsPending() {
+        const badge = document.getElementById("vfs-pending-badge");
+        if (badge) badge.textContent = `${this.vfsPending.length} pending`;
+        // Overlay tree items with pending-change decorations
+        const tree = document.getElementById("file-tree")!;
+        // Reset existing overlays
+        tree.querySelectorAll<HTMLElement>(".tree-item, .tree-row").forEach(r => {
+            r.classList.remove("vfs-delete", "vfs-add", "vfs-rename");
+        });
+        for (const ch of this.vfsPending) {
+            if (ch.op === "delete") {
+                const el = tree.querySelector<HTMLElement>(`[data-path="${ch.path}"]`);
+                if (el) el.classList.add("vfs-delete");
+            } else if (ch.op === "rename") {
+                const el = tree.querySelector<HTMLElement>(`[data-path="${ch.from}"]`);
+                if (el) el.classList.add("vfs-rename");
+            }
+        }
+        // Show "add" badges at the bottom of the tree
+        const existing = tree.querySelectorAll(".vfs-add-item");
+        existing.forEach(e => e.remove());
+        for (const ch of this.vfsPending) {
+            if (ch.op === "add") {
+                const row = document.createElement("div");
+                row.className = "tree-item vfs-add vfs-add-item";
+                row.textContent = `+ ${ch.dest}`;
+                tree.appendChild(row);
+            }
+        }
+    }
+
+    private async listArchive(archivePath: string) {
+        // Helper: re-run the list command for the given archive and rebuild tree
+        const listInput = document.getElementById("list-input") as HTMLInputElement | null;
+        if (listInput) listInput.value = archivePath;
+        // Simulate clicking list (trigger the existing list flow)
+        document.getElementById("tab-list")?.click();
+        // Trigger the existing load flow by dispatching a fake event on the list input
+        listInput?.dispatchEvent(new Event("list-reload", { bubbles: true }));
     }
 
     // ── Job queue tab ────────────────────────────────────────────────────────────
@@ -1869,6 +2027,8 @@ class App {
             this.updateProgress(100, "");
             setTimeout(() => this.updateProgress(0, ""), 600);
             this.renderTree();
+            this.vfsPending = [];
+            document.getElementById("vfs-toolbar")?.classList.remove("hidden");
             this.log(this.t("filesLoaded", [this.loadedEntries.length.toString()]), "success");
             // Fill in the discovered salt so the user can see what key was used
             const detailSalt = res.details.salt;
@@ -1945,6 +2105,7 @@ class App {
 
             const row = document.createElement("div");
             row.className = "tree-row folder";
+            row.dataset.path = path.replace(/\/$/, "");
             row.style.display = "flex";
             row.style.alignItems = "center";
 
@@ -1988,6 +2149,7 @@ class App {
             node.files.sort((a: any, b: any) => a.name.localeCompare(b.name)).forEach((f: AggregateEntry) => {
                 const frow = document.createElement("div");
                 frow.className = "tree-item";
+                frow.dataset.path = f.name;
                 frow.style.marginLeft = "20px";
                 frow.style.display = "flex";
                 frow.style.alignItems = "center";

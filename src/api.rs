@@ -11,6 +11,8 @@
 ///   POST /api/v1/mod/apply
 ///   GET  /api/v1/mods
 ///   GET  /api/v1/mod-template
+///   GET  /api/v1/uotiara/mods
+///   POST /api/v1/uotiara/build
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -273,6 +275,48 @@ fn apply_mod_to_archive(
         }
     }
 
+    // 2b. Apply feature flag toggles if any are specified
+    let has_feat_changes = pkg.features.enable.as_ref().map_or(false, |v| !v.is_empty())
+        || pkg.features.disable.as_ref().map_or(false, |v| !v.is_empty());
+    if has_feat_changes {
+        // Find features.xml.compiled in the temp tree
+        let feat_path = walkdir::WalkDir::new(&tmp_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("features.xml.compiled"))
+            .map(|e| e.path().to_path_buf());
+
+        if let Some(fp) = feat_path {
+            let raw = std::fs::read(&fp)?;
+            if let Some(mut fd) = crate::common_ext::parse_features_compiled(&raw) {
+                let parse_hash = |s: &str| -> Option<u32> {
+                    u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+                };
+                if let Some(enables) = &pkg.features.enable {
+                    for hex in enables {
+                        if let Some(h) = parse_hash(hex) {
+                            if let Some(feat) = fd.features.iter_mut().find(|f| f.hash == h) {
+                                feat.conditions.retain(|c| !c.is_empty());
+                            }
+                        }
+                    }
+                }
+                if let Some(disables) = &pkg.features.disable {
+                    for hex in disables {
+                        if let Some(h) = parse_hash(hex) {
+                            if let Some(feat) = fd.features.iter_mut().find(|f| f.hash == h) {
+                                feat.conditions = vec!["FALSE".to_string()];
+                            }
+                        }
+                    }
+                }
+                let encoded = crate::common_ext::encode_features_compiled(&fd);
+                std::fs::write(&fp, encoded)?;
+                stats.patched += 1;
+            }
+        }
+    }
+
     // 3. Repack the modified folder back over the original archive
     let key_str = key.unwrap_or(&salt_used);
     // Detect wrap-data prefix from archive name (same heuristic as GUI)
@@ -323,6 +367,177 @@ fn handle_mod_template() -> Response<std::io::Cursor<Vec<u8>>> {
     ok(json!({ "template": crate::mod_file::template() }))
 }
 
+// ---- uotiara helpers --------------------------------------------------------
+
+/// Minimal INI parser: returns section → key → value (all lowercase section names).
+fn parse_ini(text: &str) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+    let mut map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = Default::default();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') { continue; }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len()-1].to_string();
+        } else if let Some(eq) = line.find('=') {
+            let k = line[..eq].trim().to_string();
+            let v = line[eq+1..].trim().to_string();
+            map.entry(section.clone()).or_default().insert(k, v);
+        }
+    }
+    map
+}
+
+/// Parse a uotiaralist.ini into a list of {id, name, files}.
+fn parse_uotiara_ini(path: &str) -> anyhow::Result<Vec<Value>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path, e))?;
+    let ini = parse_ini(&text);
+
+    let mods_section = ini.get("Mods").cloned().unwrap_or_default();
+    let mut entries: Vec<Value> = Vec::new();
+    let mut ids: Vec<u32> = mods_section.keys()
+        .filter_map(|k| k.parse::<u32>().ok())
+        .collect();
+    ids.sort_unstable();
+
+    for id in ids {
+        let name = match mods_section.get(&id.to_string()) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => continue,
+        };
+        // Collect FileN entries from the [Name] section
+        let file_sec = ini.get(&name).cloned().unwrap_or_default();
+        let mut file_nums: Vec<u32> = file_sec.keys()
+            .filter_map(|k| k.strip_prefix("File").and_then(|n| n.parse().ok()))
+            .collect();
+        file_nums.sort_unstable();
+        let files: Vec<String> = file_nums.iter()
+            .filter_map(|n| file_sec.get(&format!("File{}", n)))
+            .map(|f| f.replace('\\', "/").trim_start_matches('/').to_string())
+            .collect();
+        entries.push(json!({ "id": id, "name": name, "files": files }));
+    }
+    Ok(entries)
+}
+
+fn default_ini_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("uotiaralist.ini")))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "uotiaralist.ini".to_string())
+}
+
+fn handle_uotiara_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+    // Parse ?ini=<path> from query string
+    let url = req.url().to_string();
+    let ini_path = url.split('?').nth(1)
+        .and_then(|qs| qs.split('&').find(|p| p.starts_with("ini=")))
+        .map(|p| p[4..].to_string())
+        .map(|s| percent_decode(&s))
+        .unwrap_or_else(default_ini_path);
+
+    match parse_uotiara_ini(&ini_path) {
+        Ok(mods) => ok(json!({ "ini": ini_path, "count": mods.len(), "mods": mods })),
+        Err(e)   => err(&e.to_string(), 500),
+    }
+}
+
+fn handle_uotiara_build(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+
+    let ini_path = match body["ini"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'ini' (path to uotiaralist.ini) is required", 400),
+    };
+    let it_path = match body["it"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'it' (path to source .it archive) is required", 400),
+    };
+    let output = match body["output"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'output' (destination .it path) is required", 400),
+    };
+    let key = body["key"].as_str().map(String::from);
+    let selected: std::collections::HashSet<u64> = body["selected"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+        .unwrap_or_default();
+
+    if selected.is_empty() {
+        return err("'selected' must be a non-empty array of mod IDs", 400);
+    }
+
+    // Parse ini to find which files are needed
+    let all_mods = match parse_uotiara_ini(&ini_path) {
+        Ok(m) => m,
+        Err(e) => return err(&e.to_string(), 500),
+    };
+    let mut needed_files: std::collections::HashSet<String> = Default::default();
+    for m in &all_mods {
+        let id = m["id"].as_u64().unwrap_or(0);
+        if selected.contains(&id) {
+            if let Some(files) = m["files"].as_array() {
+                for f in files {
+                    if let Some(s) = f.as_str() { needed_files.insert(s.to_string()); }
+                }
+            }
+        }
+    }
+
+    // Extract full archive to temp dir (filtered to only needed files)
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("mabi_uotiara_{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+        return err(&format!("cannot create temp dir: {}", e), 500);
+    }
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
+    let filters: Vec<String> = needed_files.iter().cloned().collect();
+    let salts = crate::load_salts();
+
+    let salt_used = match crate::extract::run_extract_with_key_search(
+        &it_path, &tmp_str, key.clone(), &salts,
+        filters, None, false, false, false, None,
+    ) {
+        Ok(s) => s,
+        Err(e) => { let _ = std::fs::remove_dir_all(&tmp_dir); return err(&e.to_string(), 500); }
+    };
+
+    // Pack the filtered temp dir into the output .it
+    let key_str = key.as_deref().unwrap_or(&salt_used);
+    let result = crate::pack::run_pack(&tmp_str, &output, key_str, vec![], false, 0, None, None);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    match result {
+        Ok(_) => ok(json!({
+            "ini":      ini_path,
+            "it":       it_path,
+            "output":   output,
+            "selected": selected.len(),
+            "files":    needed_files.len(),
+        })),
+        Err(e) => err(&format!("pack failed: {}", e), 500),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i+1..i+3]).unwrap_or(""), 16) {
+                out.push(b as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
     let s = s.trim_start_matches("0x").trim_start_matches("0X");
     if s.len() % 2 != 0 { return Err(()); }
@@ -350,8 +565,10 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Post, "/api/v1/pack")         => handle_pack(req),
         (Method::Post, "/api/v1/list")         => handle_list(req),
         (Method::Post, "/api/v1/mod/apply")    => handle_mod_apply(req),
-        (Method::Get,  "/api/v1/mods")         => handle_list_mods(),
-        (Method::Get,  "/api/v1/mod-template") => handle_mod_template(),
+        (Method::Get,  "/api/v1/mods")              => handle_list_mods(),
+        (Method::Get,  "/api/v1/mod-template")      => handle_mod_template(),
+        (Method::Get,  "/api/v1/uotiara/mods")      => handle_uotiara_list(req),
+        (Method::Post, "/api/v1/uotiara/build")     => handle_uotiara_build(req),
         _ => err(&format!("Not found: {} {}", method, url), 404),
     }
 }

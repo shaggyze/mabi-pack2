@@ -1967,7 +1967,7 @@ fn launcher_launch(
     session: SessionInfo,
     client_dir: String,
 ) -> Result<serde_json::Value, String> {
-    use mabi_pack2::launcher::{auth, launch, patch};
+    use mabi_pack2::launcher::{auth, launch};
     let nexon_session: auth::NexonSession = session.into();
 
     let config = launch::fetch_launch_config(&nexon_session).map_err(|e| e.to_string())?;
@@ -2081,6 +2081,104 @@ fn save_features_to_archive(
     }))
 }
 
+/// VFS change descriptor — one op per file operation.
+#[derive(serde::Deserialize, Debug)]
+#[serde(tag = "op", rename_all = "lowercase")]
+enum VfsChange {
+    Delete { path: String },
+    Rename { from: String, to: String },
+    Add { dest: String, local_src: String },
+    Merge { src_archive: String, src_key: Option<String> },
+}
+
+/// Apply a list of VFS changes (delete/rename/add/merge) to an archive in-place.
+#[tauri::command]
+fn apply_vfs_changes(
+    archive: String,
+    key: Option<String>,
+    changes: Vec<VfsChange>,
+) -> Result<serde_json::Value, String> {
+    use std::path::Path;
+
+    let salts = mabi_pack2::load_salts();
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_vfs_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
+
+    // Extract entire archive
+    let salt_used = mabi_pack2::extract::run_extract_with_key_search(
+        &archive, &tmp_str, key.clone(), &salts,
+        vec![], None, false, false, false, None,
+    ).map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+
+    let mut stats = serde_json::json!({ "deleted": 0, "renamed": 0, "added": 0, "merged": 0 });
+
+    let normalize = |p: &str| -> String {
+        p.replace('\\', "/").trim_start_matches('/').to_string()
+    };
+
+    for change in &changes {
+        match change {
+            VfsChange::Delete { path } => {
+                let rel = normalize(path);
+                let target = tmp_dir.join(&rel);
+                if target.exists() {
+                    std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+                    stats["deleted"] = (stats["deleted"].as_i64().unwrap_or(0) + 1).into();
+                }
+            }
+            VfsChange::Rename { from, to } => {
+                let src = tmp_dir.join(normalize(from));
+                let dst = tmp_dir.join(normalize(to));
+                if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
+                if src.exists() {
+                    std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+                    stats["renamed"] = (stats["renamed"].as_i64().unwrap_or(0) + 1).into();
+                }
+            }
+            VfsChange::Add { dest, local_src } => {
+                let dst = tmp_dir.join(normalize(dest));
+                if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
+                std::fs::copy(Path::new(local_src), &dst).map_err(|e| e.to_string())?;
+                stats["added"] = (stats["added"].as_i64().unwrap_or(0) + 1).into();
+            }
+            VfsChange::Merge { src_archive, src_key } => {
+                let merge_tmp = std::env::temp_dir().join(format!("mabi_vfs_merge_{}", std::process::id()));
+                std::fs::create_dir_all(&merge_tmp).map_err(|e| e.to_string())?;
+                let merge_str = merge_tmp.to_string_lossy().to_string();
+                mabi_pack2::extract::run_extract_with_key_search(
+                    src_archive, &merge_str, src_key.clone(), &salts,
+                    vec![], None, false, false, false, None,
+                ).map_err(|e| { let _ = std::fs::remove_dir_all(&merge_tmp); e.to_string() })?;
+                // Copy all files from merge_tmp into tmp_dir (overwrite = newer wins)
+                let mut count = 0u32;
+                for entry in walkdir::WalkDir::new(&merge_tmp).into_iter().filter_map(|e| e.ok()) {
+                    if entry.file_type().is_file() {
+                        let rel = entry.path().strip_prefix(&merge_tmp).unwrap();
+                        let dst = tmp_dir.join(rel);
+                        if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
+                        std::fs::copy(entry.path(), &dst).map_err(|e| e.to_string())?;
+                        count += 1;
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&merge_tmp);
+                stats["merged"] = (stats["merged"].as_i64().unwrap_or(0) + count as i64).into();
+            }
+        }
+    }
+
+    // Repack modified tree back into archive
+    let key_str = key.as_deref().unwrap_or(&salt_used);
+    let archive_name = Path::new(&archive).file_name()
+        .and_then(|n| n.to_str()).unwrap_or("");
+    let prefix = if archive_name.to_lowercase().ends_with(".pack") { Some("data") } else { None };
+    mabi_pack2::pack::run_pack(&tmp_str, &archive, key_str, vec![], false, 0, prefix, None)
+        .map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    Ok(serde_json::json!({ "archive": archive, "changes": changes.len(), "stats": stats }))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2123,7 +2221,8 @@ pub fn run() {
             launcher_check_maintenance, launcher_get_version, launcher_launch,
             launcher_list_profiles, launcher_save_profile, launcher_delete_profile,
             launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
-            get_features_from_archive, save_features_to_archive
+            get_features_from_archive, save_features_to_archive,
+            apply_vfs_changes
         ])
 
         .run(tauri::generate_context!())
