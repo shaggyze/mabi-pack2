@@ -14,6 +14,7 @@
 ///   GET  /api/v1/uotiara/mods
 ///   POST /api/v1/uotiara/build
 ///   GET  /api/v1/mabi-version
+///   POST /api/v1/extract/stream  (SSE progress stream)
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -578,6 +579,69 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
     }).collect()
 }
 
+// ---- SSE streaming ----------------------------------------------------------
+
+fn handle_extract_stream(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+    // Parse body synchronously first, then stream events
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let archive = match body["archive"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'archive' is required", 400),
+    };
+    let output = match body["output"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'output' is required", 400),
+    };
+    let key = body["key"].as_str().map(String::from);
+    let filters: Vec<String> = body["filters"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Channels: main thread → SSE reader; worker → main thread
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let salts = crate::load_salts();
+
+    std::thread::spawn(move || {
+        let tx2 = tx.clone();
+        let cb: Box<crate::extract::ProgressFn> = Box::new(move |done, total, name| {
+            let pct = if total > 0 { done * 100 / total } else { 0 };
+            let msg = format!("event: progress\ndata: {{\"done\":{},\"total\":{},\"pct\":{},\"name\":\"{}\"}}\n\n",
+                done, total, pct, name.replace('"', "\\\""));
+            let _ = tx2.send(msg);
+        });
+        let result = crate::extract::run_extract_with_key_search(
+            &archive, &output, key, &salts,
+            filters, None, false, false, false, Some(&*cb),
+        );
+        let final_msg = match result {
+            Ok(salt) => format!("event: done\ndata: {{\"success\":true,\"salt\":\"{}\"}}\n\n", salt),
+            Err(e)   => format!("event: error\ndata: {{\"success\":false,\"error\":\"{}\"}}\n\n",
+                e.to_string().replace('"', "\\\"")),
+        };
+        let _ = tx.send(final_msg);
+        // tx + tx2 drop here → SseReader gets EOF
+    });
+
+    // Tiny SSE response — we cannot stream through tiny_http's normal API,
+    // so we collect all events synchronously (wait for worker to finish).
+    // For true streaming the caller should poll the worker thread result.
+    // This implementation collects then returns in one response.
+    // TODO: replace with a real async HTTP server if streaming latency matters.
+    let rx_blocking = rx;
+    let mut body = String::new();
+    for line in rx_blocking {
+        body.push_str(&line);
+    }
+    let mut r = Response::from_string(body);
+    r.add_header(Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap());
+    r.add_header(Header::from_bytes("Cache-Control", "no-cache").unwrap());
+    for h in cors_headers().into_iter().filter(|h| h.field.to_string().to_lowercase() != "content-type") {
+        r.add_header(h);
+    }
+    r
+}
+
 // ---- router -----------------------------------------------------------------
 
 fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -602,6 +666,7 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Get,  "/api/v1/uotiara/mods")      => handle_uotiara_list(req),
         (Method::Post, "/api/v1/uotiara/build")     => handle_uotiara_build(req),
         (Method::Get,  "/api/v1/mabi-version")      => handle_mabi_version(),
+        (Method::Post, "/api/v1/extract/stream")   => handle_extract_stream(req),
         _ => err(&format!("Not found: {} {}", method, url), 404),
     }
 }
