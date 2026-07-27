@@ -31,7 +31,7 @@ export const PLANS: Category[] = [
     icon: "⚡",
     tasks: [
       { id: "jobs-queue",    title: "Dedicated batch-queue tab for multiple jobs",      done: true,  priority: "high" },
-      { id: "jobs-parallel", title: "Parallel job execution with per-job progress",     done: false, priority: "medium" },
+      { id: "jobs-parallel", title: "Parallel job execution with per-job progress",     done: true,  priority: "medium" },
       { id: "jobs-eta",      title: "ETA + indeterminate shimmer for list ops",         done: true,  priority: "medium" },
     ],
   },
@@ -66,7 +66,7 @@ export const PLANS: Category[] = [
       { id: "mod-apply",     title: "Apply .mod: replace/delete/patch files in archive", done: true,  priority: "high" },
       { id: "mod-features",  title: "Apply feature flag toggles from .mod",              done: true,  priority: "high" },
       { id: "mod-from-ini",  title: "Import mods from uotiaralist.ini in .mod file",     done: true,  priority: "medium" },
-      { id: "mod-browser",   title: "In-app mod browser (reads .mod from mods/ folder)", done: false, priority: "medium" },
+      { id: "mod-browser",   title: "In-app mod browser (reads .mod from mods/ folder)", done: true,  priority: "medium" },
       { id: "mod-webui",     title: "WebUI mod browsing + install-from-web",             done: false, priority: "low" },
     ],
   },
