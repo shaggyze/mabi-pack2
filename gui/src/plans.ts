@@ -65,7 +65,7 @@ export const PLANS: Category[] = [
       { id: "mod-parser",    title: ".mod parser in Rust + Tauri command",               done: true,  priority: "high" },
       { id: "mod-apply",     title: "Apply .mod: replace/delete/patch files in archive", done: true,  priority: "high" },
       { id: "mod-features",  title: "Apply feature flag toggles from .mod",              done: true,  priority: "high" },
-      { id: "mod-from-ini",  title: "Import mods from uotiaralist.ini in .mod file",     done: false, priority: "medium" },
+      { id: "mod-from-ini",  title: "Import mods from uotiaralist.ini in .mod file",     done: true,  priority: "medium" },
       { id: "mod-browser",   title: "In-app mod browser (reads .mod from mods/ folder)", done: false, priority: "medium" },
       { id: "mod-webui",     title: "WebUI mod browsing + install-from-web",             done: false, priority: "low" },
     ],

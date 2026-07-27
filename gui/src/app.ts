@@ -712,6 +712,25 @@ class App {
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
             } catch (_) {}
         });
+        document.getElementById("btn-ini-to-mod")?.addEventListener("click", async () => {
+            try {
+                const { open, save } = await import("@tauri-apps/plugin-dialog");
+                const iniPath = await open({ title: "Select uotiaralist.ini", filters: [{ name: "INI", extensions: ["ini"] }] });
+                if (!iniPath) return;
+                const iniStr = typeof iniPath === "string" ? iniPath : (iniPath as any).path ?? iniPath[0];
+                const itPath = await open({ title: "Select source uotiara .it archive", filters: [{ name: "Archive", extensions: ["it", "pack"] }] });
+                if (!itPath) return;
+                const itStr = typeof itPath === "string" ? itPath : (itPath as any).path ?? itPath[0];
+                const idStr = prompt("Enter mod IDs to include (comma-separated, e.g. 1,2,5):");
+                if (!idStr) return;
+                const selectedIds = idStr.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+                const toml = await invoke("ini_to_mod", { iniPath: iniStr, itPath: itStr, selectedIds }) as string;
+                const dir = await invoke("get_mods_dir") as string;
+                const dest = dir + "\\from_ini.mod";
+                await writeTextFile(dest, toml);
+                await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
+            } catch (err) { alert("ini_to_mod failed: " + err); }
+        });
     }
 
     // ── VFS editing ─────────────────────────────────────────────────────────────
