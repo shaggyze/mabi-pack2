@@ -2081,6 +2081,66 @@ fn save_features_to_archive(
     }))
 }
 
+/// Generate a .mod TOML file from selected entries in a uotiaralist.ini.
+/// `ini_path`: path to uotiaralist.ini
+/// `it_path`: path to the source uotiara .it archive (written into [[files]] source fields)
+/// `selected_ids`: array of mod IDs (1-based) to include
+/// Returns the TOML string of the generated .mod file.
+#[tauri::command]
+fn ini_to_mod(ini_path: String, it_path: String, selected_ids: Vec<u32>) -> Result<String, String> {
+    let text = std::fs::read_to_string(&ini_path)
+        .map_err(|e| format!("cannot read {}: {}", ini_path, e))?;
+
+    // Minimal INI parser (duplicates the api.rs helper — keep them independent)
+    let mut sections: std::collections::HashMap<String, std::collections::HashMap<String, String>> = Default::default();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') { continue; }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len()-1].to_string();
+        } else if let Some(eq) = line.find('=') {
+            sections.entry(section.clone()).or_default()
+                .insert(line[..eq].trim().to_string(), line[eq+1..].trim().to_string());
+        }
+    }
+
+    let mods_sec = sections.get("Mods").cloned().unwrap_or_default();
+    let selected_set: std::collections::HashSet<u32> = selected_ids.iter().cloned().collect();
+
+    let mut toml = format!(
+        "[meta]\nname = \"uotiara-custom\"\nversion = \"1.0.0\"\nauthor = \"uotiara\"\ndescription = \"Auto-generated from {}\"\n\n",
+        std::path::Path::new(&ini_path).file_name().and_then(|n| n.to_str()).unwrap_or("uotiaralist.ini")
+    );
+
+    for id in &selected_ids {
+        let name = match mods_sec.get(&id.to_string()) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => continue,
+        };
+        let file_sec = sections.get(&name).cloned().unwrap_or_default();
+        if file_sec.is_empty() { continue; }
+
+        toml.push_str(&format!("# Mod {}: {}\n", id, name));
+        let mut file_nums: Vec<u32> = file_sec.keys()
+            .filter_map(|k| k.strip_prefix("File").and_then(|n| n.parse().ok()))
+            .collect();
+        file_nums.sort_unstable();
+
+        for fnum in file_nums {
+            if let Some(path) = file_sec.get(&format!("File{}", fnum)) {
+                let norm = path.replace('\\', "/").trim_start_matches('/').to_string();
+                toml.push_str(&format!(
+                    "[[files]]\narchive_path = \"{}\"\nop = \"replace\"\nsource = \"{}\"\n\n",
+                    norm, it_path.replace('\\', "/")
+                ));
+            }
+        }
+    }
+    let _ = selected_set; // suppress unused warning
+    Ok(toml)
+}
+
 /// VFS change descriptor — one op per file operation.
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "lowercase")]
@@ -2222,7 +2282,8 @@ pub fn run() {
             launcher_list_profiles, launcher_save_profile, launcher_delete_profile,
             launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
             get_features_from_archive, save_features_to_archive,
-            apply_vfs_changes
+            apply_vfs_changes,
+            ini_to_mod
         ])
 
         .run(tauri::generate_context!())
