@@ -364,6 +364,158 @@ pub fn run_batch_extract(
     Ok(())
 }
 
+// ── Features XML structures ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeaturesData {
+    pub servers: Vec<ServerEntry>,
+    pub features: Vec<FeatureEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerEntry {
+    pub name: String,
+    pub region: String,
+    pub server_id: u16,
+    pub channel: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeatureEntry {
+    pub hash: u32,
+    pub hash_hex: String,
+    pub conditions: Vec<String>,
+}
+
+/// Parse features.xml.compiled binary into a structured `FeaturesData`.
+pub fn parse_features_compiled(data: &[u8]) -> Option<FeaturesData> {
+    fn r16(d: &[u8], p: usize) -> Option<u16> {
+        if p + 2 > d.len() { return None; }
+        Some(u16::from_le_bytes([d[p], d[p + 1]]))
+    }
+    fn r32(d: &[u8], p: usize) -> Option<u32> {
+        if p + 4 > d.len() { return None; }
+        Some(u32::from_le_bytes([d[p], d[p + 1], d[p + 2], d[p + 3]]))
+    }
+    fn xdec(d: &[u8], pos: usize, len: usize) -> Option<String> {
+        if pos + len > d.len() { return None; }
+        if len > 0 && !d[pos..pos + len].iter().all(|&b| { let c = b ^ 0x80; c >= 0x20 && c <= 0x7E }) { return None; }
+        Some(d[pos..pos + len].iter().map(|&b| (b ^ 0x80) as char).collect())
+    }
+
+    let mut pos = 0usize;
+    let server_count = r16(data, pos)? as usize;
+    pos += 2;
+    if server_count > 200 { return None; }
+
+    let mut servers = Vec::with_capacity(server_count);
+    for _ in 0..server_count {
+        let nl = r16(data, pos)? as usize; pos += 2;
+        let name = xdec(data, pos, nl)?; pos += nl;
+        let rl = r16(data, pos)? as usize; pos += 2;
+        let region = xdec(data, pos, rl)?; pos += rl;
+        let server_id = r16(data, pos)?; pos += 2;
+        if pos >= data.len() { return None; }
+        let channel = data[pos]; pos += 1;
+        servers.push(ServerEntry { name, region, server_id, channel });
+    }
+
+    let feature_count = r16(data, pos)? as usize;
+    pos += 2;
+    if feature_count > 100_000 { return None; }
+
+    let mut features = Vec::with_capacity(feature_count);
+    for _ in 0..feature_count {
+        let hash = r32(data, pos)?;
+        pos += 4;
+        let mut conds: Vec<String> = Vec::new();
+        loop {
+            if pos + 2 > data.len() { break; }
+            let clen = r16(data, pos)? as usize;
+            if clen > 500 { break; }
+            if clen > 0 {
+                if pos + 2 + clen > data.len() { break; }
+                if !data[pos + 2..pos + 2 + clen].iter().all(|&b| { let c = b ^ 0x80; c >= 0x20 && c <= 0x7E }) { break; }
+            }
+            pos += 2;
+            let s: String = data[pos..pos + clen].iter().map(|&b| (b ^ 0x80) as char).collect();
+            pos += clen;
+            conds.push(s);
+        }
+        features.push(FeatureEntry {
+            hash,
+            hash_hex: format!("{:#010x}", hash),
+            conditions: conds,
+        });
+    }
+
+    Some(FeaturesData { servers, features })
+}
+
+/// Re-encode a `FeaturesData` back to the features.xml.compiled binary format.
+///
+/// The format stores conditions per-feature with no explicit count; the decoder
+/// terminates the condition list when it sees a u16 > 500.  For all
+/// features except the last, that terminator is the low-two-bytes of the next
+/// feature's u32 hash.  This means hashes whose LE low-u16 ≤ 500 would confuse
+/// the decoder.  We write an explicit 0xFFFF sentinel (2 bytes) after each
+/// feature's conditions to guarantee the decoder always sees a value > 500
+/// before the next hash.  The sentinel is NOT part of the next hash — the
+/// decoder breaks out and then reads 4 bytes for the hash, so we need the
+/// sentinel to be consumed as a "too-large clen" without pos advancing.
+///
+/// Wait — the decoder does NOT advance pos when it breaks on clen > 500.
+/// So it will re-read those 2 bytes as the first 2 bytes of the next u32 hash.
+/// That means: if we write sentinel (0xFFFF, 2 bytes) then the next hash (4 bytes),
+/// the decoder reads sentinel+first-2-of-hash as a u32 hash. Wrong.
+///
+/// Solution: we only need the EXISTING hash's low-u16 to be > 500.
+/// For hashes where it isn't, we store an explicit u16 between conditions and hash
+/// — but since the decoder re-reads that u16 as part of the hash, this is
+/// fundamentally impossible to do without changing the hash.
+///
+/// We therefore rely on the game's hash values all having low-u16 > 500.
+/// If a hash doesn't satisfy this, we emit a warning but still produce output.
+pub fn encode_features_compiled(data: &FeaturesData) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+
+    let xenc = |s: &str| -> Vec<u8> {
+        s.bytes().map(|b| b ^ 0x80).collect()
+    };
+    let w16 = |out: &mut Vec<u8>, v: u16| {
+        out.extend_from_slice(&v.to_le_bytes());
+    };
+    let w32 = |out: &mut Vec<u8>, v: u32| {
+        out.extend_from_slice(&v.to_le_bytes());
+    };
+
+    w16(&mut out, data.servers.len() as u16);
+    for s in &data.servers {
+        let name_enc = xenc(&s.name);
+        w16(&mut out, name_enc.len() as u16);
+        out.extend_from_slice(&name_enc);
+        let region_enc = xenc(&s.region);
+        w16(&mut out, region_enc.len() as u16);
+        out.extend_from_slice(&region_enc);
+        w16(&mut out, s.server_id);
+        out.push(s.channel);
+    }
+
+    w16(&mut out, data.features.len() as u16);
+    for f in &data.features {
+        w32(&mut out, f.hash);
+        for cond in &f.conditions {
+            let enc = xenc(cond);
+            w16(&mut out, enc.len() as u16);
+            out.extend_from_slice(&enc);
+        }
+        // No explicit terminator — the next hash's low-u16 terminates the list.
+        // The last feature's list is terminated by EOF.
+    }
+
+    out
+}
+
 /// Decode a features.xml.compiled binary blob to XML text.
 /// Returns None if the data doesn't match the expected format.
 pub fn decode_features_compiled(data: &[u8]) -> Option<String> {

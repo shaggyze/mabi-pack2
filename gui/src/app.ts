@@ -268,6 +268,7 @@ class App {
         this.setupNavigation();
         this.setupDashboard();
         this.setupLauncher();
+        this.setupFeaturesEditor();
         this.setupForms();
         this.setupEventListen();
 
@@ -700,13 +701,193 @@ class App {
         });
     }
 
+    // ── Features editor tab ─────────────────────────────────────────────────────
+
+    private featuresData: any | null = null;
+    private featuresModified = false;
+
+    private setupFeaturesEditor() {
+        document.getElementById("btn-features-browse")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const file = await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] });
+            if (file && !Array.isArray(file)) {
+                (document.getElementById("features-archive") as HTMLInputElement).value = file as string;
+            }
+        });
+
+        document.getElementById("btn-features-load")?.addEventListener("click", () => this.loadFeatures());
+        document.getElementById("btn-features-save")?.addEventListener("click", () => this.saveFeatures());
+
+        document.getElementById("features-search")?.addEventListener("input", (e) => {
+            this.filterFeaturesList((e.target as HTMLInputElement).value.trim().toLowerCase());
+        });
+    }
+
+    private async loadFeatures() {
+        const archive = (document.getElementById("features-archive") as HTMLInputElement).value.trim();
+        const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
+        const key = keyEl || null;
+        if (!archive) { this.setFeaturesStatus("Please select an archive", "error"); return; }
+
+        this.setFeaturesStatus("Loading…", "busy");
+        const btn = document.getElementById("btn-features-load") as HTMLButtonElement;
+        btn.disabled = true;
+
+        try {
+            const data = await invoke("get_features_from_archive", { archive, key }) as any;
+            this.featuresData = data;
+            this.featuresModified = false;
+            this.renderFeatures();
+            this.setFeaturesStatus(`Loaded ${data.features.length} features, ${data.servers.length} servers`, "ok");
+            document.getElementById("btn-features-save")?.classList.remove("hidden");
+        } catch (e: any) {
+            this.setFeaturesStatus(`Load failed: ${e}`, "error");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    private async saveFeatures() {
+        if (!this.featuresData) return;
+        const archive = (document.getElementById("features-archive") as HTMLInputElement).value.trim();
+        const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
+        const key = keyEl || null;
+
+        this.setFeaturesStatus("Saving…", "busy");
+        const btn = document.getElementById("btn-features-save") as HTMLButtonElement;
+        btn.disabled = true;
+
+        try {
+            const result = await invoke("save_features_to_archive", {
+                archive,
+                key,
+                featuresJson: JSON.stringify(this.featuresData),
+            }) as any;
+            this.featuresModified = false;
+            this.setFeaturesStatus(`Saved — ${result.features} features, ${result.bytes} bytes`, "ok");
+        } catch (e: any) {
+            this.setFeaturesStatus(`Save failed: ${e}`, "error");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    private renderFeatures() {
+        if (!this.featuresData) return;
+
+        // Servers
+        const serversCard = document.getElementById("features-servers-card")!;
+        const serversList = document.getElementById("features-servers-list")!;
+        serversCard.classList.remove("hidden");
+        serversList.innerHTML = "";
+        for (const s of this.featuresData.servers) {
+            const row = document.createElement("div");
+            row.className = "features-server-row";
+            row.innerHTML = `<span>ID ${s.server_id}</span><b>${s.name}</b><span>${s.region}</span><span>ch ${s.channel}</span>`;
+            serversList.appendChild(row);
+        }
+
+        // Features
+        const listCard = document.getElementById("features-list-card")!;
+        listCard.classList.remove("hidden");
+        const badge = document.getElementById("features-count-badge")!;
+        badge.textContent = `(${this.featuresData.features.length})`;
+        this.renderFeatureRows(this.featuresData.features);
+    }
+
+    private renderFeatureRows(features: any[]) {
+        const list = document.getElementById("features-list")!;
+        list.innerHTML = "";
+        for (let fi = 0; fi < features.length; fi++) {
+            const f = features[fi];
+            const row = document.createElement("div");
+            row.className = "feature-row";
+            row.dataset.featureIdx = String(fi);
+
+            const hashSpan = document.createElement("span");
+            hashSpan.className = "feature-hash";
+            hashSpan.textContent = f.hash_hex;
+            row.appendChild(hashSpan);
+
+            const condsDiv = document.createElement("div");
+            condsDiv.className = "feature-conds";
+
+            if (f.conditions.length === 0) {
+                const empty = document.createElement("span");
+                empty.style.cssText = "opacity:.3;font-size:11px;";
+                empty.textContent = "(no conditions)";
+                condsDiv.appendChild(empty);
+            } else {
+                for (let ci = 0; ci < f.conditions.length; ci++) {
+                    const cond = f.conditions[ci];
+                    if (!cond) continue;
+                    const tag = document.createElement("span");
+                    tag.className = "feature-cond-tag";
+                    tag.textContent = cond;
+                    tag.title = `Click to toggle condition at index ${ci}`;
+                    tag.dataset.featureIdx = String(fi);
+                    tag.dataset.condIdx = String(ci);
+                    tag.addEventListener("click", () => this.toggleFeatureCondition(fi, ci, tag));
+                    condsDiv.appendChild(tag);
+                }
+            }
+            row.appendChild(condsDiv);
+            list.appendChild(row);
+        }
+    }
+
+    private toggleFeatureCondition(featureIdx: number, condIdx: number, tag: HTMLElement) {
+        if (!this.featuresData) return;
+        const feature = this.featuresData.features[featureIdx];
+        const cond = feature.conditions[condIdx];
+        if (tag.classList.contains("removed")) {
+            // Restore: cond was cleared, restore original
+            const original = tag.dataset.original || cond;
+            feature.conditions[condIdx] = original;
+            tag.textContent = original;
+            tag.classList.remove("removed");
+        } else {
+            // Remove: clear the condition string
+            tag.dataset.original = cond;
+            feature.conditions[condIdx] = "";
+            tag.classList.add("removed");
+        }
+        this.featuresModified = true;
+    }
+
+    private filterFeaturesList(query: string) {
+        if (!this.featuresData) return;
+        if (!query) {
+            this.renderFeatureRows(this.featuresData.features);
+            return;
+        }
+        const filtered = this.featuresData.features.filter((f: any) =>
+            f.hash_hex.includes(query) ||
+            f.conditions.some((c: string) => c.toLowerCase().includes(query))
+        );
+        this.renderFeatureRows(filtered);
+        const badge = document.getElementById("features-count-badge")!;
+        badge.textContent = `(${filtered.length} / ${this.featuresData.features.length})`;
+    }
+
+    private setFeaturesStatus(msg: string, type: "ok" | "error" | "busy" | "idle") {
+        const el = document.getElementById("features-status")!;
+        el.textContent = msg;
+        el.classList.remove("hidden");
+        const colours: Record<string, string> = { ok: "#4ade80", error: "#f87171", busy: "#facc15", idle: "#9ca3af" };
+        el.style.color = colours[type] ?? colours.idle;
+    }
+
     // ── Launcher tab ────────────────────────────────────────────────────────────
 
     private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string } | null = null;
     private readonly LAUNCHER_SESSION_KEY = "nexon_session";
+    private launcherProfiles: any[] = [];
+    private activeProfileId: string | null = null;
+    private profileEditorMode: "new" | "edit" | null = null;
 
     private setupLauncher() {
-        // Restore session from localStorage
+        // Restore session from localStorage (fallback when no profiles)
         const saved = localStorage.getItem(this.LAUNCHER_SESSION_KEY);
         if (saved) {
             try {
@@ -716,17 +897,219 @@ class App {
             } catch { localStorage.removeItem(this.LAUNCHER_SESSION_KEY); }
         }
 
+        // Load profiles from backend
+        this.loadProfiles();
+
+        // Login / logout / launch
         document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
         document.getElementById("btn-launcher-logout")?.addEventListener("click", () => this.launcherDoLogout());
         document.getElementById("btn-launcher-launch")?.addEventListener("click", () => this.launcherDoLaunch());
 
+        // Profile selector change
+        document.getElementById("launcher-profile-select")?.addEventListener("change", (e) => {
+            const id = (e.target as HTMLSelectElement).value;
+            this.selectProfile(id);
+        });
+
+        // Profile buttons
+        document.getElementById("btn-profile-new")?.addEventListener("click", () => this.openProfileEditor("new"));
+        document.getElementById("btn-profile-delete")?.addEventListener("click", () => this.deleteActiveProfile());
+        document.getElementById("btn-profile-save")?.addEventListener("click", () => this.saveProfileEditor());
+        document.getElementById("btn-profile-cancel")?.addEventListener("click", () => this.closeProfileEditor());
+        document.getElementById("btn-profile-save-after-launch")?.addEventListener("click", () => this.saveCurrentSettingsToProfile());
+
+        // Browse buttons
         document.getElementById("btn-launcher-browse")?.addEventListener("click", async () => {
             const { open } = await import("@tauri-apps/plugin-dialog");
             const dir = await open({ directory: true });
             if (dir && !Array.isArray(dir)) {
-                (document.getElementById("launcher-client-dir") as HTMLInputElement).value = dir;
+                (document.getElementById("launcher-client-dir") as HTMLInputElement).value = dir as string;
             }
         });
+        document.getElementById("btn-profile-browse")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const dir = await open({ directory: true });
+            if (dir && !Array.isArray(dir)) {
+                (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = dir as string;
+            }
+        });
+    }
+
+    private async loadProfiles() {
+        try {
+            const profiles = await invoke("launcher_list_profiles") as any[];
+            this.launcherProfiles = profiles || [];
+            this.renderProfileSelect();
+
+            // Auto-select active profile and populate client-dir
+            const active = this.launcherProfiles[0];
+            if (active) {
+                this.activeProfileId = active.id;
+                this.applyProfileToUI(active);
+                // If auto-login + valid session, restore it
+                if (active.auto_login && active.session_valid) {
+                    await this.autologinProfile(active.id);
+                }
+            }
+        } catch {
+            // No profiles yet or backend not available — silent
+        }
+    }
+
+    private renderProfileSelect() {
+        const sel = document.getElementById("launcher-profile-select") as HTMLSelectElement;
+        if (!sel) return;
+        sel.innerHTML = "";
+        if (this.launcherProfiles.length === 0) {
+            sel.innerHTML = "<option value=''>— No profiles saved —</option>";
+            return;
+        }
+        for (const p of this.launcherProfiles) {
+            const opt = document.createElement("option");
+            opt.value = p.id;
+            const badge = p.session_valid ? " ✓" : p.has_session ? " ⚠" : "";
+            opt.textContent = `${p.name} (${p.email})${badge}`;
+            if (p.id === this.activeProfileId) opt.selected = true;
+            sel.appendChild(opt);
+        }
+    }
+
+    private applyProfileToUI(profile: any) {
+        if (profile.client_dir) {
+            (document.getElementById("launcher-client-dir") as HTMLInputElement).value = profile.client_dir;
+        }
+        // Pre-fill email in login form if not yet logged in
+        if (!this.launcherSession && profile.email) {
+            (document.getElementById("launcher-email") as HTMLInputElement).value = profile.email;
+        }
+    }
+
+    private async selectProfile(id: string) {
+        this.activeProfileId = id;
+        const profile = this.launcherProfiles.find(p => p.id === id);
+        if (!profile) return;
+        this.applyProfileToUI(profile);
+        try { await invoke("launcher_set_active_profile", { id }); } catch {}
+        if (profile.auto_login && profile.session_valid) {
+            await this.autologinProfile(id);
+        }
+    }
+
+    private async autologinProfile(profileId: string) {
+        try {
+            const data = await invoke("launcher_load_profile", { id: profileId }) as any;
+            const token = data.session_token_for_autologin;
+            if (!token) return;
+            this.setLauncherStatus("Auto-logging in…", "busy");
+            const result = await invoke("launcher_autologin", { sessionToken: token }) as any;
+            this.launcherSession = result.session;
+            this.updateLauncherUI(true);
+            this.setLauncherStatus("Auto-logged in", "ok");
+            this.fetchLauncherVersion();
+            // Update session expiry in profile
+            await invoke("launcher_update_profile_session", {
+                id: profileId,
+                sessionToken: result.session.session_token,
+                expiresIn: result.expiresIn || 86400,
+            }).catch(() => {});
+        } catch (e: any) {
+            this.setLauncherStatus(`Auto-login failed: ${e}`, "error");
+        }
+    }
+
+    private openProfileEditor(mode: "new" | "edit") {
+        this.profileEditorMode = mode;
+        const editor = document.getElementById("launcher-profile-editor")!;
+        editor.classList.remove("hidden");
+        if (mode === "new") {
+            (document.getElementById("launcher-profile-name") as HTMLInputElement).value = "";
+            (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value =
+                (document.getElementById("launcher-client-dir") as HTMLInputElement).value;
+            (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = false;
+        } else {
+            const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
+            if (profile) {
+                (document.getElementById("launcher-profile-name") as HTMLInputElement).value = profile.name;
+                (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = profile.client_dir || "";
+                (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = !!profile.auto_login;
+            }
+        }
+    }
+
+    private closeProfileEditor() {
+        this.profileEditorMode = null;
+        document.getElementById("launcher-profile-editor")?.classList.add("hidden");
+    }
+
+    private async saveProfileEditor() {
+        const name = (document.getElementById("launcher-profile-name") as HTMLInputElement).value.trim();
+        const clientDir = (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value.trim();
+        const autoLogin = (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked;
+
+        // Get email from current login form or active profile
+        const emailEl = document.getElementById("launcher-email") as HTMLInputElement;
+        const email = emailEl.value.trim() ||
+            this.launcherProfiles.find(p => p.id === this.activeProfileId)?.email || "";
+
+        if (!name) { this.setLauncherStatus("Profile name is required", "error"); return; }
+
+        const id = this.profileEditorMode === "edit" ? this.activeProfileId : null;
+
+        try {
+            const newId = await invoke("launcher_save_profile", { id, name, email, clientDir, autoLogin }) as string;
+            this.activeProfileId = newId;
+            (document.getElementById("launcher-client-dir") as HTMLInputElement).value = clientDir;
+            await this.loadProfiles();
+            this.closeProfileEditor();
+            this.setLauncherStatus(`Profile "${name}" saved`, "ok");
+        } catch (e: any) {
+            this.setLauncherStatus(`Save failed: ${e}`, "error");
+        }
+    }
+
+    private async deleteActiveProfile() {
+        if (!this.activeProfileId) return;
+        const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
+        if (!profile) return;
+        if (!confirm(`Delete profile "${profile.name}"?`)) return;
+        try {
+            await invoke("launcher_delete_profile", { id: this.activeProfileId });
+            this.activeProfileId = null;
+            await this.loadProfiles();
+            this.setLauncherStatus("Profile deleted", "idle");
+        } catch (e: any) {
+            this.setLauncherStatus(`Delete failed: ${e}`, "error");
+        }
+    }
+
+    private async saveCurrentSettingsToProfile() {
+        const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
+        if (this.activeProfileId && this.launcherSession) {
+            try {
+                const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
+                await invoke("launcher_save_profile", {
+                    id: this.activeProfileId,
+                    name: profile?.name || "Profile",
+                    email: profile?.email || "",
+                    clientDir,
+                    autoLogin: profile?.auto_login || false,
+                });
+                if (this.launcherSession.session_token) {
+                    await invoke("launcher_update_profile_session", {
+                        id: this.activeProfileId,
+                        sessionToken: this.launcherSession.session_token,
+                        expiresIn: 86400,
+                    });
+                }
+                await this.loadProfiles();
+                this.setLauncherStatus("Saved to profile", "ok");
+            } catch (e: any) {
+                this.setLauncherStatus(`Save failed: ${e}`, "error");
+            }
+        } else {
+            // No active profile — open editor to create one
+            this.openProfileEditor("new");
+        }
     }
 
     private async launcherDoLogin() {
@@ -746,6 +1129,15 @@ class App {
             this.launcherSession = result.session;
             if (rememberEl.checked) {
                 localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
+                // Save session to active profile
+                if (this.activeProfileId && result.session.session_token) {
+                    await invoke("launcher_update_profile_session", {
+                        id: this.activeProfileId,
+                        sessionToken: result.session.session_token,
+                        expiresIn: result.expiresIn || 86400,
+                    }).catch(() => {});
+                    await this.loadProfiles();
+                }
             }
             pwEl.value = "";
             this.updateLauncherUI(true);
@@ -801,7 +1193,7 @@ class App {
             (document.getElementById("launcher-version-value") as HTMLElement).textContent = String(ver);
             const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
             (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
-        } catch { /* version fetch is non-critical */ }
+        } catch { /* non-critical */ }
     }
 
     private updateLauncherUI(loggedIn: boolean) {

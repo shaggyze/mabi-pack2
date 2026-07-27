@@ -1865,6 +1865,102 @@ fn launcher_get_version(session: SessionInfo) -> Result<i32, String> {
     mabi_pack2::launcher::patch::get_latest_version(&nexon_session).map_err(|e| e.to_string())
 }
 
+// ── Profile commands ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn launcher_list_profiles() -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        let summaries = mabi_pack2::launcher::profile::list_profiles().map_err(|e| e.to_string())?;
+        serde_json::to_value(summaries).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn launcher_save_profile(
+    id: Option<String>,
+    name: String,
+    email: String,
+    client_dir: String,
+    auto_login: bool,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        use mabi_pack2::launcher::profile::{Profile, ProfileStore};
+        let mut store = ProfileStore::load().map_err(|e| e.to_string())?;
+        let mut profile = if let Some(ref existing_id) = id {
+            store.get(existing_id).cloned().unwrap_or_else(|| Profile::new(&name, &email))
+        } else {
+            Profile::new(&name, &email)
+        };
+        profile.name = name;
+        profile.email = email;
+        profile.client_dir = client_dir;
+        profile.auto_login = auto_login;
+        let profile_id = profile.id.clone();
+        store.upsert(profile);
+        store.save().map_err(|e| e.to_string())?;
+        Ok(profile_id)
+    }
+}
+
+#[tauri::command]
+fn launcher_delete_profile(id: String) -> Result<bool, String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        mabi_pack2::launcher::profile::delete_profile(&id).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn launcher_set_active_profile(id: String) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        mabi_pack2::launcher::profile::set_active_profile(&id).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn launcher_load_profile(id: String) -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        let profile = mabi_pack2::launcher::profile::load_profile(&id).map_err(|e| e.to_string())?;
+        // Return summary (no session token) + whether session is valid
+        let summary = mabi_pack2::launcher::profile::ProfileSummary::from(&profile);
+        let mut val = serde_json::to_value(summary).map_err(|e| e.to_string())?;
+        // Include session_token only for autologin use — strip from normal display
+        if profile.auto_login && profile.is_session_valid() {
+            val["session_token_for_autologin"] = serde_json::Value::String(profile.session_token.clone());
+        }
+        Ok(val)
+    }
+}
+
+#[tauri::command]
+fn launcher_update_profile_session(
+    id: String,
+    session_token: String,
+    expires_in: i32,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    return Err("launcher only available on Windows".to_string());
+    #[cfg(target_os = "windows")]
+    {
+        mabi_pack2::launcher::profile::update_session(&id, &session_token, expires_in)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Fetch launch config and spawn Client.exe. Returns launch argument info.
 #[tauri::command]
 fn launcher_launch(
@@ -1885,6 +1981,103 @@ fn launcher_launch(
         "executable": summary.executable,
         "argumentCount": summary.argument_count,
         "patchAvailable": summary.patch_available,
+    }))
+}
+
+// ── Features.xml.compiled editor commands ─────────────────────────────────────
+
+/// Extract and parse features.xml.compiled from an archive into structured JSON.
+#[tauri::command]
+fn get_features_from_archive(archive: String, key: Option<String>) -> Result<serde_json::Value, String> {
+    use walkdir::WalkDir;
+    let salts = mabi_pack2::load_salts();
+
+    // Extract only features.xml.compiled to a temp dir, then parse
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_feat_load_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
+
+    let _salt = mabi_pack2::extract::run_extract_with_key_search(
+        &archive, &tmp_str, key,
+        &salts,
+        vec!["features.xml.compiled".to_string()],
+        None, false, false, false, None,
+    ).map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+
+    // Walk to find extracted file (path structure varies)
+    let feat_path = WalkDir::new(&tmp_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().to_lowercase() == "features.xml.compiled")
+        .map(|e| e.into_path());
+
+    let data = match feat_path {
+        Some(p) => std::fs::read(&p).map_err(|e| e.to_string())?,
+        None => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err("features.xml.compiled not found in archive".to_string());
+        }
+    };
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let parsed = mabi_pack2::common_ext::parse_features_compiled(&data)
+        .ok_or_else(|| "Failed to parse features.xml.compiled binary format".to_string())?;
+
+    serde_json::to_value(&parsed).map_err(|e| e.to_string())
+}
+
+/// Re-encode modified features and write back to archive.
+#[tauri::command]
+fn save_features_to_archive(
+    archive: String,
+    key: Option<String>,
+    features_json: String,
+) -> Result<serde_json::Value, String> {
+    let features_data: mabi_pack2::common_ext::FeaturesData =
+        serde_json::from_str(&features_json).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+    let binary = mabi_pack2::common_ext::encode_features_compiled(&features_data);
+
+    // Extract archive to temp dir, overwrite features.xml.compiled, repack
+    let salts = mabi_pack2::load_salts();
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_feat_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
+
+    let salt_used = mabi_pack2::extract::run_extract_with_key_search(
+        &archive, &tmp_str, key.clone(), &salts,
+        vec![], None, false, false, false, None,
+    ).map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+
+    // Write the re-encoded features.xml.compiled
+    let candidates = [
+        tmp_dir.join("data").join("xml").join("features.xml.compiled"),
+        tmp_dir.join("xml").join("features.xml.compiled"),
+        tmp_dir.join("features.xml.compiled"),
+    ];
+    let dest = candidates.iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "Could not find features.xml.compiled in extracted data".to_string())?;
+
+    std::fs::write(dest, &binary).map_err(|e| e.to_string())?;
+
+    // Repack
+    let key_str = key.as_deref().unwrap_or(&salt_used);
+    let is_pack = archive.to_lowercase().ends_with(".pack");
+    let prefix = if is_pack { Some("data") } else { None };
+
+    mabi_pack2::pack::run_pack(&tmp_str, &archive, key_str, vec![], false, 0, prefix, None)
+        .map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    Ok(serde_json::json!({
+        "archive": archive,
+        "features": features_data.features.len(),
+        "servers": features_data.servers.len(),
+        "bytes": binary.len(),
+        "status": "saved",
     }))
 }
 
@@ -1927,7 +2120,10 @@ pub fn run() {
             preview_loose_file,
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port,
             launcher_login, launcher_autologin, launcher_get_passport,
-            launcher_check_maintenance, launcher_get_version, launcher_launch
+            launcher_check_maintenance, launcher_get_version, launcher_launch,
+            launcher_list_profiles, launcher_save_profile, launcher_delete_profile,
+            launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
+            get_features_from_archive, save_features_to_archive
         ])
 
         .run(tauri::generate_context!())

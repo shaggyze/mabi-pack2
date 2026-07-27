@@ -48,6 +48,10 @@
           <span class="nav-icon">⚡</span>
           <span class="nav-text" id="tab-differ-text">Differ</span>
         </button>
+        <button class="nav-item" data-tab="features" id="tab-features" data-tooltip="tab_features">
+          <span class="nav-icon">🔧</span>
+          <span class="nav-text" id="tab-features-text">Features</span>
+        </button>
         <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
           <span class="nav-icon">🚀</span>
           <span class="nav-label" id="tab-launcher-text">Launcher</span>
@@ -139,6 +143,52 @@
         </div>
       </div>
 
+      <!-- Features Editor Tab -->
+      <div id="features" class="tab-content">
+        <div class="features-panel">
+          <div class="card">
+            <div class="card-header" id="features-title-text">Features.xml Editor</div>
+            <div class="form-group">
+              <label id="features-archive-label-text">Archive (.it / .pack)</label>
+              <div class="input-row">
+                <input type="text" id="features-archive" class="form-input" placeholder="path\to\package.it" />
+                <button class="tab-btn" id="btn-features-browse" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label id="features-key-label-text">Salt / Key (optional)</label>
+              <input type="text" id="features-key" class="form-input" placeholder="auto-detect" />
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-features-load">
+                <span id="btn-features-load-text">Load Features</span>
+              </button>
+              <button class="tab-btn success hidden" id="btn-features-save">
+                <span id="btn-features-save-text">Save to Archive</span>
+              </button>
+            </div>
+            <div id="features-status" class="hidden" style="margin-top:8px;font-size:12px;opacity:.7;"></div>
+          </div>
+
+          <!-- Servers section -->
+          <div class="card hidden" id="features-servers-card">
+            <div class="card-header" id="features-servers-header-text">Servers</div>
+            <div id="features-servers-list" class="features-server-list"></div>
+          </div>
+
+          <!-- Features section -->
+          <div class="card hidden" id="features-list-card">
+            <div class="card-header">
+              <span id="features-list-header-text">Features</span>
+              <span id="features-count-badge" style="font-size:11px;opacity:.6;margin-left:8px;"></span>
+              <input type="text" id="features-search" class="form-input" placeholder="Search features…"
+                style="margin-left:auto;max-width:180px;font-size:12px;padding:3px 8px;" />
+            </div>
+            <div id="features-list" class="features-list"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Launcher Tab -->
       <div id="launcher" class="tab-content">
         <div class="launcher-panel">
@@ -149,6 +199,41 @@
             <div class="launcher-status-bar">
               <span id="launcher-status-dot" class="status-dot"></span>
               <span id="launcher-status-text">Not logged in</span>
+            </div>
+          </div>
+
+          <!-- Profile selector -->
+          <div class="card" id="launcher-profile-card">
+            <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
+            <div class="profile-selector-row">
+              <select id="launcher-profile-select" class="form-input profile-select">
+                <option value="">— No profiles saved —</option>
+              </select>
+              <button class="tab-btn" id="btn-profile-new" title="New profile">+</button>
+              <button class="tab-btn" id="btn-profile-delete" title="Delete profile">🗑</button>
+            </div>
+            <div id="launcher-profile-editor" class="hidden">
+              <div class="form-group">
+                <label id="launcher-profile-name-label-text">Profile Name</label>
+                <input type="text" id="launcher-profile-name" class="form-input" placeholder="Main Account" />
+              </div>
+              <div class="form-group">
+                <label id="launcher-profile-client-label-text">Mabinogi Folder</label>
+                <div class="input-row">
+                  <input type="text" id="launcher-profile-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
+                  <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
+                </div>
+              </div>
+              <div class="form-group form-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="launcher-profile-autologin" />
+                  <span id="launcher-profile-autologin-text">Auto-login with saved session</span>
+                </label>
+              </div>
+              <div class="form-actions">
+                <button class="tab-btn primary" id="btn-profile-save">Save Profile</button>
+                <button class="tab-btn" id="btn-profile-cancel">Cancel</button>
+              </div>
             </div>
           </div>
 
@@ -212,6 +297,7 @@
               <button class="tab-btn primary" id="btn-launcher-launch">
                 <span id="btn-launcher-launch-text">Launch Mabinogi</span>
               </button>
+              <button class="tab-btn" id="btn-profile-save-after-launch">Save to Profile</button>
             </div>
             <div id="launcher-launch-result" class="hidden"></div>
           </div>
