@@ -1315,6 +1315,43 @@ class App {
         document.getElementById("btn-launcher-logout")?.addEventListener("click", () => this.launcherDoLogout());
         document.getElementById("btn-launcher-launch")?.addEventListener("click", () => this.launcherDoLaunch());
 
+        document.getElementById("btn-launcher-check-update")?.addEventListener("click", async () => {
+            const statusEl = document.getElementById("launcher-update-status")!;
+            statusEl.textContent = "Checking...";
+            statusEl.className = "launcher-update-status";
+            try {
+                // Local version from registry
+                const localInfo = await invoke("get_mabi_version_local") as { installed_version?: string } | null;
+                const localVer = localInfo?.installed_version ? parseInt(localInfo.installed_version, 10) : null;
+                // Remote version (requires session)
+                let remoteVer: number | null = null;
+                if (this.launcherSession) {
+                    try {
+                        remoteVer = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
+                    } catch (_) {}
+                }
+                if (localVer && remoteVer) {
+                    if (remoteVer > localVer) {
+                        statusEl.innerHTML = `⬆ Update available: v${localVer} → v${remoteVer}. <a href="#" id="lnk-nexon-launcher">Open Nexon Launcher</a>`;
+                        document.getElementById("lnk-nexon-launcher")?.addEventListener("click", async (e) => {
+                            e.preventDefault();
+                            await invoke("execute_terminal_command", { command: "start nexonlauncher://" });
+                        });
+                        statusEl.className = "launcher-update-status update-available";
+                    } else {
+                        statusEl.textContent = `✓ Up to date (v${localVer})`;
+                        statusEl.className = "launcher-update-status up-to-date";
+                    }
+                } else if (localVer) {
+                    statusEl.textContent = `Local: v${localVer} (login to check remote version)`;
+                    statusEl.className = "launcher-update-status";
+                } else {
+                    statusEl.textContent = "Mabinogi not found in registry";
+                    statusEl.className = "launcher-update-status error";
+                }
+            } catch (e) { statusEl.textContent = "Check failed: " + e; statusEl.className = "launcher-update-status error"; }
+        });
+
         // Profile selector change
         document.getElementById("launcher-profile-select")?.addEventListener("change", (e) => {
             const id = (e.target as HTMLSelectElement).value;

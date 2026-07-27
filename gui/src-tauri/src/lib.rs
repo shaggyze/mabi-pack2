@@ -2081,6 +2081,33 @@ fn save_features_to_archive(
     }))
 }
 
+/// Read locally installed Mabinogi version from Windows registry.
+#[tauri::command]
+fn get_mabi_version_local() -> Option<serde_json::Value> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        for path in &["SOFTWARE\\WOW6432Node\\Nexon\\Mabinogi", "SOFTWARE\\Nexon\\Mabinogi"] {
+            if let Ok(key) = hklm.open_subkey(path) {
+                let ver: String = key.get_value("Version").unwrap_or_default();
+                if !ver.is_empty() {
+                    return Some(serde_json::json!({
+                        "installed_version": ver,
+                        "client_dir": key.get_value::<String, _>("ExePath")
+                            .or_else(|_| key.get_value::<String, _>("InstallLocation"))
+                            .unwrap_or_default(),
+                    }));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    None
+}
+
 /// Apply a .mod TOML file to an archive in-place.
 #[tauri::command]
 fn apply_mod(
@@ -2365,7 +2392,8 @@ pub fn run() {
             get_features_from_archive, save_features_to_archive,
             apply_vfs_changes,
             ini_to_mod,
-            apply_mod
+            apply_mod,
+            get_mabi_version_local
         ])
 
         .run(tauri::generate_context!())
