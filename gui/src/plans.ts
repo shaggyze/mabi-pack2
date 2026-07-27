@@ -83,7 +83,7 @@ export const PLANS: Category[] = [
       { id: "api-serve-cli","title": "mabi-patcher serve --port N CLI subcommand",        done: true,  priority: "high" },
       { id: "api-stream",   title: "Streaming progress via SSE or WebSocket",             done: false, priority: "medium" },
       { id: "api-uotiara",  title: "Connect to Uotiara WebUI (mod-picker → .it build)",  done: true,  priority: "high" },
-      { id: "api-version",  title: "/api/mabi-version endpoint (replaces Proff API)",    done: false, priority: "medium" },
+      { id: "api-version",  title: "/api/mabi-version endpoint (replaces Proff API)",    done: true,  priority: "medium" },
     ],
   },
   {

@@ -13,6 +13,7 @@
 ///   GET  /api/v1/mod-template
 ///   GET  /api/v1/uotiara/mods
 ///   POST /api/v1/uotiara/build
+///   GET  /api/v1/mabi-version
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -65,6 +66,37 @@ fn handle_status() -> Response<std::io::Cursor<Vec<u8>>> {
         "api":     "v1",
         "port":    DEFAULT_PORT,
     }))
+}
+
+fn handle_mabi_version() -> Response<std::io::Cursor<Vec<u8>>> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let paths = [
+            "SOFTWARE\\WOW6432Node\\Nexon\\Mabinogi",
+            "SOFTWARE\\Nexon\\Mabinogi",
+        ];
+        for path in &paths {
+            if let Ok(key) = hklm.open_subkey(path) {
+                let installed: String = key.get_value("Version").unwrap_or_default();
+                let client_dir: String = key.get_value("ExePath")
+                    .or_else(|_| key.get_value("InstallLocation"))
+                    .unwrap_or_default();
+                if !installed.is_empty() {
+                    return ok(json!({
+                        "installed_version": installed,
+                        "client_dir": client_dir,
+                        "registry_key": path,
+                    }));
+                }
+            }
+        }
+        err("Mabinogi registry key not found", 404)
+    }
+    #[cfg(not(target_os = "windows"))]
+    err("mabi-version only available on Windows", 501)
 }
 
 fn handle_extract(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -569,6 +601,7 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Get,  "/api/v1/mod-template")      => handle_mod_template(),
         (Method::Get,  "/api/v1/uotiara/mods")      => handle_uotiara_list(req),
         (Method::Post, "/api/v1/uotiara/build")     => handle_uotiara_build(req),
+        (Method::Get,  "/api/v1/mabi-version")      => handle_mabi_version(),
         _ => err(&format!("Not found: {} {}", method, url), 404),
     }
 }
