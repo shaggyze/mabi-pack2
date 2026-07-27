@@ -48,6 +48,10 @@
           <span class="nav-icon">⚡</span>
           <span class="nav-text" id="tab-differ-text">Differ</span>
         </button>
+        <button class="nav-item" data-tab="jobs" id="tab-jobs" data-tooltip="tab_jobs">
+          <span class="nav-icon">⚡</span>
+          <span class="nav-text" id="tab-jobs-text">Jobs</span>
+        </button>
         <button class="nav-item" data-tab="features" id="tab-features" data-tooltip="tab_features">
           <span class="nav-icon">🔧</span>
           <span class="nav-text" id="tab-features-text">Features</span>
@@ -139,6 +143,41 @@
           <div class="mods-actions">
             <button class="tab-btn" id="btn-open-mods-dir" data-tooltip="tooltip_open_mods_dir">Open Folder</button>
             <button class="tab-btn" id="btn-new-mod-template" data-tooltip="tooltip_new_mod_template">New .mod Template</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Jobs Queue Tab -->
+      <div id="jobs" class="tab-content">
+        <div class="jobs-panel">
+          <div class="card">
+            <div class="card-header">
+              <span id="jobs-title-text">Job Queue</span>
+              <button class="tab-btn" id="btn-jobs-clear-done" style="margin-left:auto;font-size:11px;padding:2px 8px;" id="btn-jobs-clear">Clear Done</button>
+            </div>
+            <div class="jobs-add-row">
+              <select id="jobs-type-select" class="form-input" style="max-width:120px;">
+                <option value="extract">Extract</option>
+                <option value="pack">Pack</option>
+              </select>
+              <input type="text" id="jobs-input" class="form-input" placeholder="Archive or folder path" />
+              <button class="tab-btn" id="btn-jobs-browse-input" data-tooltip="tooltip_browse">…</button>
+              <input type="text" id="jobs-output" class="form-input" placeholder="Output path" />
+              <button class="tab-btn" id="btn-jobs-browse-output" data-tooltip="tooltip_browse">…</button>
+              <input type="text" id="jobs-key" class="form-input" style="max-width:130px;" placeholder="key / salt" />
+              <button class="tab-btn primary" id="btn-jobs-add">Add</button>
+            </div>
+          </div>
+
+          <div class="card" id="jobs-list-card">
+            <div class="card-header">
+              <span id="jobs-list-header-text">Queue</span>
+              <span id="jobs-count-badge" style="font-size:11px;opacity:.6;margin-left:6px;"></span>
+              <button class="tab-btn primary" id="btn-jobs-run-all" style="margin-left:auto;">Run All</button>
+            </div>
+            <div id="jobs-list" class="jobs-list">
+              <div class="jobs-empty" id="jobs-empty-msg">No jobs queued. Add extract or pack jobs above.</div>
+            </div>
           </div>
         </div>
       </div>

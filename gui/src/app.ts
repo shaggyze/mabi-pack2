@@ -5,6 +5,17 @@ import { listen } from "@tauri-apps/api/event";
 import { locales as TRANSLATIONS } from "./locales";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
 
+interface JobEntry {
+    id: number;
+    type: "extract" | "pack";
+    input: string;
+    output: string;
+    key?: string;
+    status: "pending" | "running" | "done" | "error";
+    progress: number;
+    log: string;
+}
+
 interface FileEntry {
     name: string;
     original_size: number;
@@ -267,6 +278,7 @@ class App {
         this.initTooltip();
         this.setupNavigation();
         this.setupDashboard();
+        this.setupJobQueue();
         this.setupLauncher();
         this.setupFeaturesEditor();
         this.setupForms();
@@ -701,6 +713,175 @@ class App {
         });
     }
 
+    // ── Job queue tab ────────────────────────────────────────────────────────────
+
+    private jobs: JobEntry[] = [];
+    private jobsRunning = false;
+
+    private setupJobQueue() {
+        document.getElementById("btn-jobs-add")?.addEventListener("click", () => this.jobsAdd());
+        document.getElementById("btn-jobs-run-all")?.addEventListener("click", () => this.jobsRunAll());
+        document.getElementById("btn-jobs-clear-done")?.addEventListener("click", () => this.jobsClearDone());
+
+        document.getElementById("btn-jobs-browse-input")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value;
+            const selected = type === "extract"
+                ? await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] })
+                : await open({ directory: true });
+            if (selected && !Array.isArray(selected)) {
+                (document.getElementById("jobs-input") as HTMLInputElement).value = selected as string;
+            }
+        });
+
+        document.getElementById("btn-jobs-browse-output")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const selected = await open({ directory: true });
+            if (selected && !Array.isArray(selected)) {
+                (document.getElementById("jobs-output") as HTMLInputElement).value = selected as string;
+            }
+        });
+    }
+
+    private jobsAdd() {
+        const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value as "extract" | "pack";
+        const input = (document.getElementById("jobs-input") as HTMLInputElement).value.trim();
+        const output = (document.getElementById("jobs-output") as HTMLInputElement).value.trim();
+        const key = (document.getElementById("jobs-key") as HTMLInputElement).value.trim() || undefined;
+
+        if (!input || !output) return;
+
+        const job: JobEntry = {
+            id: Date.now() + Math.random(),
+            type,
+            input,
+            output,
+            key,
+            status: "pending",
+            progress: 0,
+            log: "",
+        };
+        this.jobs.push(job);
+        this.renderJob(job);
+        document.getElementById("jobs-empty-msg")?.classList.add("hidden");
+        const badge = document.getElementById("jobs-count-badge")!;
+        badge.textContent = `(${this.jobs.length})`;
+
+        // Clear inputs
+        (document.getElementById("jobs-input") as HTMLInputElement).value = "";
+        (document.getElementById("jobs-output") as HTMLInputElement).value = "";
+    }
+
+    private renderJob(job: JobEntry) {
+        const list = document.getElementById("jobs-list")!;
+        const row = document.createElement("div");
+        row.className = "job-row";
+        row.id = `job-${job.id}`;
+        row.innerHTML = `
+            <div class="job-header">
+                <span class="job-type-badge ${job.type}">${job.type}</span>
+                <span class="job-path" title="${job.input}">${job.input}</span>
+                <span class="job-status" id="job-status-${job.id}">pending</span>
+                <div class="job-actions">
+                    <button class="tab-btn" data-job-run="${job.id}">Run</button>
+                    <button class="tab-btn" data-job-remove="${job.id}">✕</button>
+                </div>
+            </div>
+            <div class="job-progress-bar"><div class="job-progress-fill" id="job-prog-${job.id}" style="width:0%"></div></div>
+            <div class="job-log" id="job-log-${job.id}"></div>`;
+
+        row.querySelector(`[data-job-run="${job.id}"]`)?.addEventListener("click", () => this.runJob(job));
+        row.querySelector(`[data-job-remove="${job.id}"]`)?.addEventListener("click", () => {
+            this.jobs = this.jobs.filter(j => j.id !== job.id);
+            row.remove();
+            const badge = document.getElementById("jobs-count-badge")!;
+            badge.textContent = `(${this.jobs.length})`;
+            if (this.jobs.length === 0) document.getElementById("jobs-empty-msg")?.classList.remove("hidden");
+        });
+
+        list.appendChild(row);
+    }
+
+    private async runJob(job: JobEntry) {
+        if (job.status === "running") return;
+        job.status = "running";
+        this.updateJobUI(job, "running", 0, "Starting…");
+
+        const row = document.getElementById(`job-${job.id}`)!;
+        row.className = "job-row running";
+
+        // Listen for progress events from this operation
+        const progressHandler = (payload: any) => {
+            if (payload?.total > 0) {
+                const pct = Math.round((payload.current / payload.total) * 100);
+                this.updateJobUI(job, "running", pct, payload.msg || "");
+            }
+        };
+
+        try {
+            const { listen } = await import("@tauri-apps/api/event");
+            const unlisten = await listen("progress", (e) => progressHandler(e.payload));
+
+            if (job.type === "extract") {
+                await invoke("extract_pack_to", {
+                    input: job.input,
+                    output: job.output,
+                    key: job.key || null,
+                    filters: [] as string[],
+                });
+            } else {
+                await invoke("create_archive", {
+                    input: job.input,
+                    output: job.output,
+                    key: job.key || "",
+                    wrapData: false,
+                });
+            }
+
+            unlisten();
+            job.status = "done";
+            this.updateJobUI(job, "done", 100, "Completed");
+            row.className = "job-row done";
+        } catch (e: any) {
+            job.status = "error";
+            this.updateJobUI(job, "error", 0, `Error: ${e}`);
+            row.className = "job-row error";
+        }
+    }
+
+    private updateJobUI(job: JobEntry, status: string, pct: number, log: string) {
+        const statusEl = document.getElementById(`job-status-${job.id}`);
+        const progEl = document.getElementById(`job-prog-${job.id}`);
+        const logEl = document.getElementById(`job-log-${job.id}`);
+        if (statusEl) statusEl.textContent = status;
+        if (progEl) {
+            progEl.style.width = `${pct}%`;
+            progEl.className = `job-progress-fill ${status === "done" ? "done" : status === "error" ? "error" : ""}`;
+        }
+        if (logEl) logEl.textContent = log;
+    }
+
+    private async jobsRunAll() {
+        if (this.jobsRunning) return;
+        this.jobsRunning = true;
+        const pending = this.jobs.filter(j => j.status === "pending");
+        for (const job of pending) {
+            await this.runJob(job);
+        }
+        this.jobsRunning = false;
+    }
+
+    private jobsClearDone() {
+        const done = this.jobs.filter(j => j.status === "done" || j.status === "error");
+        for (const job of done) {
+            document.getElementById(`job-${job.id}`)?.remove();
+        }
+        this.jobs = this.jobs.filter(j => j.status !== "done" && j.status !== "error");
+        const badge = document.getElementById("jobs-count-badge")!;
+        badge.textContent = `(${this.jobs.length})`;
+        if (this.jobs.length === 0) document.getElementById("jobs-empty-msg")?.classList.remove("hidden");
+    }
+
     // ── Features editor tab ─────────────────────────────────────────────────────
 
     private featuresData: any | null = null;
@@ -749,6 +930,9 @@ class App {
 
     private async saveFeatures() {
         if (!this.featuresData) return;
+        if (this.featuresModified) {
+            document.getElementById("btn-features-save")?.classList.remove("unsaved");
+        }
         const archive = (document.getElementById("features-archive") as HTMLInputElement).value.trim();
         const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
         const key = keyEl || null;
@@ -853,6 +1037,9 @@ class App {
             tag.classList.add("removed");
         }
         this.featuresModified = true;
+        // Update save button to indicate unsaved changes
+        const saveBtn = document.getElementById("btn-features-save");
+        if (saveBtn) saveBtn.classList.add("unsaved");
     }
 
     private filterFeaturesList(query: string) {

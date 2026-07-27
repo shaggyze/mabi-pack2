@@ -30,7 +30,7 @@ export const PLANS: Category[] = [
     title: "Job Queue",
     icon: "⚡",
     tasks: [
-      { id: "jobs-queue",    title: "Dedicated batch-queue tab for multiple jobs",      done: false, priority: "high" },
+      { id: "jobs-queue",    title: "Dedicated batch-queue tab for multiple jobs",      done: true,  priority: "high" },
       { id: "jobs-parallel", title: "Parallel job execution with per-job progress",     done: false, priority: "medium" },
       { id: "jobs-eta",      title: "ETA + indeterminate shimmer for list ops",         done: true,  priority: "medium" },
     ],
