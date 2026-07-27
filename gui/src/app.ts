@@ -670,7 +670,7 @@ class App {
             const dir  = await invoke("get_mods_dir") as string;
             const mods = await invoke("list_mod_files") as Array<{
                 file: string; name: string; version?: string; author?: string;
-                tags?: string[]; file_count: number; is_public: boolean; error?: string;
+                description?: string; tags?: string[]; file_count: number; is_public: boolean; error?: string;
             }>;
             if (path) path.textContent = dir;
             list.querySelectorAll(".mod-item").forEach(el => el.remove());
@@ -685,15 +685,48 @@ class App {
                         el.innerHTML = `<span class="mod-item-name">${m.file}</span><span class="mod-item-err">${m.error}</span>`;
                     } else {
                         const pub = m.is_public ? `<span class="mod-item-badge-pub">PUBLIC</span>` : "";
+                        const tagsHtml = m.tags && m.tags.length
+                            ? m.tags.map(t => `<span class="mod-tag">${t}</span>`).join("")
+                            : "";
+                        const desc = m.description ? `<div class="mod-item-desc">${m.description}</div>` : "";
+                        const byline = [m.version, m.author].filter(Boolean).join(" · ");
                         el.innerHTML = `
-                            <span class="mod-item-name">${m.name}</span>
-                            <span class="mod-item-meta">${m.version || ""} · ${m.file_count} files</span>
-                            ${pub}`;
+                            <div class="mod-item-header">
+                                <span class="mod-item-name">${m.name}</span>
+                                ${pub}
+                                <button class="tab-btn mod-apply-btn" data-modfile="${m.file}" style="margin-left:auto;font-size:11px;padding:2px 8px;">Apply</button>
+                            </div>
+                            <div class="mod-item-meta">${byline} · ${m.file_count} files ${tagsHtml}</div>
+                            ${desc}`;
+                        el.querySelector(".mod-apply-btn")?.addEventListener("click", async () => {
+                            await this.applyModFromDashboard(dir + "/" + m.file);
+                        });
                     }
                     list.insertBefore(el, empty!);
                 }
             }
         } catch (_) {}
+    }
+
+    private async applyModFromDashboard(modFilePath: string) {
+        try {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const archivePath = await open({
+                title: "Select target .it or .pack archive",
+                filters: [{ name: "Archive", extensions: ["it", "pack"] }],
+            });
+            if (!archivePath) return;
+            const archStr = typeof archivePath === "string" ? archivePath : (archivePath as any).path ?? (archivePath as any[])[0];
+            const toml = await invoke("load_mod_file", { path: modFilePath }) as string;
+            const modDir = modFilePath.replace(/[\\/][^\\/]+$/, "");
+            const result = await invoke("apply_mod", {
+                modToml: toml,
+                archive: archStr,
+                key: null,
+                modDir,
+            }) as any;
+            alert(`Applied: ${result.name} → ${result.replaced} replaced, ${result.deleted} deleted, ${result.patched} patched`);
+        } catch (err) { alert("Apply failed: " + err); }
     }
 
     private setupModsActions() {
@@ -714,7 +747,7 @@ class App {
         });
         document.getElementById("btn-ini-to-mod")?.addEventListener("click", async () => {
             try {
-                const { open, save } = await import("@tauri-apps/plugin-dialog");
+                const { open } = await import("@tauri-apps/plugin-dialog");
                 const iniPath = await open({ title: "Select uotiaralist.ini", filters: [{ name: "INI", extensions: ["ini"] }] });
                 if (!iniPath) return;
                 const iniStr = typeof iniPath === "string" ? iniPath : (iniPath as any).path ?? iniPath[0];
@@ -1042,9 +1075,22 @@ class App {
         if (this.jobsRunning) return;
         this.jobsRunning = true;
         const pending = this.jobs.filter(j => j.status === "pending");
-        for (const job of pending) {
-            await this.runJob(job);
-        }
+        const LIMIT = 4;
+        let running = 0, idx = 0;
+        await new Promise<void>(resolve => {
+            const next = () => {
+                while (running < LIMIT && idx < pending.length) {
+                    running++;
+                    this.runJob(pending[idx++]).finally(() => {
+                        running--;
+                        if (idx < pending.length) next();
+                        else if (running === 0) resolve();
+                    });
+                }
+                if (idx >= pending.length && running === 0) resolve();
+            };
+            next();
+        });
         this.jobsRunning = false;
     }
 

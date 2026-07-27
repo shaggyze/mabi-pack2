@@ -2081,6 +2081,87 @@ fn save_features_to_archive(
     }))
 }
 
+/// Apply a .mod TOML file to an archive in-place.
+#[tauri::command]
+fn apply_mod(
+    mod_toml: String,
+    archive: String,
+    key: Option<String>,
+    mod_dir: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let pkg = mabi_pack2::mod_file::ModPackage::from_str(&mod_toml)
+        .map_err(|e| e.to_string())?;
+    let dir = mod_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    // Re-use the same logic as the REST API via a thin FFI through the core crate
+    // Inline here to avoid coupling to src/api.rs internal helpers
+    let salts = mabi_pack2::load_salts();
+    let tmp = std::env::temp_dir().join(format!("mabi_mod_gui_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let tmp_str = tmp.to_string_lossy().to_string();
+    let salt_used = mabi_pack2::extract::run_extract_with_key_search(
+        &archive, &tmp_str, key.clone(), &salts,
+        vec![], None, false, false, false, None,
+    ).map_err(|e| { let _ = std::fs::remove_dir_all(&tmp); e.to_string() })?;
+
+    let mut replaced = 0usize; let mut deleted = 0usize; let mut patched = 0usize; let mut skipped = 0usize;
+    use mabi_pack2::mod_file::FileAction;
+    for entry in &pkg.files {
+        let rel = entry.archive_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
+        let rel = rel.trim_start_matches("data/").trim_start_matches("data\\").to_string();
+        let dest = tmp.join(&rel);
+        match entry.action {
+            FileAction::Delete => { if dest.exists() { std::fs::remove_file(&dest).ok(); deleted += 1; } else { skipped += 1; } }
+            FileAction::Replace => {
+                if let Some(src) = &entry.source {
+                    let sp = if std::path::Path::new(src).is_absolute() { std::path::PathBuf::from(src) } else { dir.join(src) };
+                    if let Some(p) = dest.parent() { std::fs::create_dir_all(p).ok(); }
+                    std::fs::copy(&sp, &dest).map_err(|e| e.to_string())?; replaced += 1;
+                } else { skipped += 1; }
+            }
+            FileAction::Patch => { skipped += 1; } // simplified; full logic is in api.rs
+        }
+    }
+
+    // features toggle
+    let has_feat = pkg.features.enable.as_ref().map_or(false, |v| !v.is_empty())
+        || pkg.features.disable.as_ref().map_or(false, |v| !v.is_empty());
+    if has_feat {
+        if let Some(fp) = walkdir::WalkDir::new(&tmp).into_iter().filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("features.xml.compiled"))
+            .map(|e| e.path().to_path_buf())
+        {
+            if let Ok(raw) = std::fs::read(&fp) {
+                if let Some(mut fd) = mabi_pack2::common_ext::parse_features_compiled(&raw) {
+                    let ph = |s: &str| u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
+                    for h in pkg.features.enable.iter().flatten().filter_map(|s| ph(s)) {
+                        if let Some(f) = fd.features.iter_mut().find(|f| f.hash == h) { f.conditions.retain(|c| !c.is_empty()); }
+                    }
+                    for h in pkg.features.disable.iter().flatten().filter_map(|s| ph(s)) {
+                        if let Some(f) = fd.features.iter_mut().find(|f| f.hash == h) { f.conditions = vec!["FALSE".to_string()]; }
+                    }
+                    let _ = std::fs::write(&fp, mabi_pack2::common_ext::encode_features_compiled(&fd));
+                    patched += 1;
+                }
+            }
+        }
+    }
+
+    let ks = key.as_deref().unwrap_or(&salt_used);
+    let pref = if std::path::Path::new(&archive).file_name().and_then(|n| n.to_str())
+        .map(|n| n.to_lowercase().ends_with(".pack")).unwrap_or(false) { Some("data") } else { None };
+    mabi_pack2::pack::run_pack(&tmp_str, &archive, ks, vec![], false, 0, pref, None)
+        .map_err(|e| { let _ = std::fs::remove_dir_all(&tmp); e.to_string() })?;
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    Ok(serde_json::json!({
+        "name": pkg.meta.name, "version": pkg.meta.version,
+        "archive": archive,
+        "replaced": replaced, "deleted": deleted, "patched": patched, "skipped": skipped,
+    }))
+}
+
 /// Generate a .mod TOML file from selected entries in a uotiaralist.ini.
 /// `ini_path`: path to uotiaralist.ini
 /// `it_path`: path to the source uotiara .it archive (written into [[files]] source fields)
@@ -2283,7 +2364,8 @@ pub fn run() {
             launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
             get_features_from_archive, save_features_to_archive,
             apply_vfs_changes,
-            ini_to_mod
+            ini_to_mod,
+            apply_mod
         ])
 
         .run(tauri::generate_context!())

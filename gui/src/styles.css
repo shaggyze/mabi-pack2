@@ -667,11 +667,15 @@ input:checked + .slider:before { transform: translateX(20px); }
 .mods-path { font-size: 10px; opacity: .4; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
 .mods-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; margin-bottom: 8px; }
 .mods-empty { font-size: 11px; opacity: .4; font-style: italic; }
-.mod-item { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 5px 8px; background: rgba(255,255,255,.03); border-radius: 4px; border: 1px solid var(--border, rgba(255,255,255,.06)); }
+.mod-item { display: flex; flex-direction: column; gap: 3px; font-size: 11px; padding: 7px 8px; background: rgba(255,255,255,.03); border-radius: 4px; border: 1px solid var(--border, rgba(255,255,255,.06)); }
+.mod-item-header { display: flex; align-items: center; gap: 6px; }
 .mod-item-name { font-weight: 600; flex: 1; }
-.mod-item-meta { opacity: .45; font-size: 10px; }
+.mod-item-meta { opacity: .45; font-size: 10px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.mod-item-desc { opacity: .6; font-size: 10px; margin-top: 1px; }
 .mod-item-err { color: #f87171; font-size: 10px; }
 .mod-item-badge-pub { font-size: 9px; background: rgba(34,197,94,.15); color: #4ade80; border: 1px solid rgba(34,197,94,.3); border-radius: 3px; padding: 1px 5px; }
+.mod-tag { font-size: 9px; background: rgba(99,102,241,.15); color: #a5b4fc; border: 1px solid rgba(99,102,241,.3); border-radius: 3px; padding: 1px 4px; }
+.mod-apply-btn { font-size: 10px !important; padding: 1px 6px !important; }
 .mods-actions { display: flex; gap: 8px; }
 
 .context-menu {
