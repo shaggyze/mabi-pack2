@@ -45,8 +45,8 @@ export const PLANS: Category[] = [
       { id: "preview-xml",        title: "XML syntax-highlighted viewer",                   done: true,  priority: "high" },
       { id: "preview-audio",      title: "Audio playback (.wav/.mp3/.ogg)",                 done: true,  priority: "medium" },
       { id: "preview-features",   title: "features.xml.compiled auto-decompile on extract", done: true,  priority: "high" },
-      { id: "preview-feat-edit",  title: "features.xml editor (Fetitor-style toggle UI)",   done: false, priority: "high" },
-      { id: "preview-feat-repack","title": "features.xml recompile on pack (round-trip)",    done: false, priority: "high" },
+      { id: "preview-feat-edit",  title: "features.xml editor (Fetitor-style toggle UI)",   done: true,  priority: "high" },
+      { id: "preview-feat-repack","title": "features.xml recompile on pack (round-trip)",    done: true,  priority: "high" },
       { id: "preview-rgn",        title: ".rgn region parser (terrain height map)",          done: false, priority: "medium" },
       { id: "preview-area",       title: ".area prop placement parser + 2D map overlay",     done: false, priority: "medium" },
       { id: "preview-area-3d",    title: ".area + .rgn full 3D world preview (Three.js)",    done: false, priority: "low" },
@@ -63,7 +63,7 @@ export const PLANS: Category[] = [
     tasks: [
       { id: "mod-format",    title: ".mod instruction file format (TOML-based spec)",    done: true,  priority: "high" },
       { id: "mod-parser",    title: ".mod parser in Rust + Tauri command",               done: true,  priority: "high" },
-      { id: "mod-apply",     title: "Apply .mod: replace/delete/patch files in archive", done: false, priority: "high" },
+      { id: "mod-apply",     title: "Apply .mod: replace/delete/patch files in archive", done: true,  priority: "high" },
       { id: "mod-features",  title: "Apply feature flag toggles from .mod",              done: false, priority: "high" },
       { id: "mod-from-ini",  title: "Import mods from uotiaralist.ini in .mod file",     done: false, priority: "medium" },
       { id: "mod-browser",   title: "In-app mod browser (reads .mod from mods/ folder)", done: false, priority: "medium" },
@@ -93,7 +93,7 @@ export const PLANS: Category[] = [
     tasks: [
       { id: "launch-auth",    title: "Nexon NA login (SHA512 pw + device ID + autologin)",  done: true,  priority: "high" },
       { id: "launch-passport","title": "Passport → Client.exe launch (spawn_client)",      done: true,  priority: "high" },
-      { id: "launch-profile", title: "Multi-account profile manager",                      done: false, priority: "medium" },
+      { id: "launch-profile", title: "Multi-account profile manager",                      done: true,  priority: "medium" },
       { id: "launch-mabitd",  title: "MabiTDown patch downloader integration",             done: false, priority: "medium" },
       { id: "launch-kanan",   title: "Kanan mod list UI (edits LibLoader Loader.cfg)",     done: false, priority: "low" },
     ],

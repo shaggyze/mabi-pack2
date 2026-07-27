@@ -145,20 +145,150 @@ fn handle_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn handle_mod_apply(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+
     let toml_src = match body["mod_toml"].as_str().or(body["mod"].as_str()) {
         Some(s) => s.to_string(),
         None => return err("'mod_toml' (TOML string) is required", 400),
     };
-    match crate::mod_file::ModPackage::from_str(&toml_src) {
-        Ok(pkg) => ok(json!({
-            "name":       pkg.meta.name,
-            "version":    pkg.meta.version,
-            "file_count": pkg.file_count(),
-            "status":     "parsed_ok",
-            "note":       "apply pipeline not yet implemented — use CLI for now",
+    let archive = match body["archive"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err("'archive' (path to .it/.pack) is required", 400),
+    };
+    let key = body["key"].as_str().map(String::from);
+    // Base dir for resolving relative source= paths in [[files]] entries
+    let mod_dir: std::path::PathBuf = body["mod_dir"].as_str()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir());
+
+    let pkg = match crate::mod_file::ModPackage::from_str(&toml_src) {
+        Ok(p) => p,
+        Err(e) => return err(&e.to_string(), 400),
+    };
+
+    match apply_mod_to_archive(&pkg, &archive, key.as_deref(), &mod_dir) {
+        Ok(stats) => ok(json!({
+            "name":     pkg.meta.name,
+            "version":  pkg.meta.version,
+            "archive":  archive,
+            "replaced": stats.replaced,
+            "deleted":  stats.deleted,
+            "patched":  stats.patched,
+            "skipped":  stats.skipped,
+            "status":   "applied",
         })),
-        Err(e) => err(&e.to_string(), 400),
+        Err(e) => err(&format!("mod apply failed: {}", e), 500),
     }
+}
+
+#[derive(Default)]
+struct ApplyStats { replaced: usize, deleted: usize, patched: usize, skipped: usize }
+
+fn apply_mod_to_archive(
+    pkg: &crate::mod_file::ModPackage,
+    archive_path: &str,
+    key: Option<&str>,
+    mod_dir: &std::path::Path,
+) -> anyhow::Result<ApplyStats> {
+    use crate::mod_file::FileAction;
+    use std::path::Path;
+
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_mod_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
+    let salts = crate::load_salts();
+
+    // 1. Extract the whole archive to a temp folder
+    let salt_used = crate::extract::run_extract_with_key_search(
+        archive_path, &tmp_str, key.map(String::from), &salts,
+        vec![], None, false, false, false, None,
+    )?;
+
+    // 2. Apply each [[files]] instruction
+    let mut stats = ApplyStats::default();
+    for entry in &pkg.files {
+        // Normalise the archive path separator to the OS path separator
+        let rel = entry.archive_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
+        // Strip a leading "data\" prefix that the extractor may add
+        let rel = rel.trim_start_matches("data/").trim_start_matches("data\\").to_string();
+        let dest = tmp_dir.join(&rel);
+
+        match entry.action {
+            FileAction::Delete => {
+                if dest.exists() {
+                    std::fs::remove_file(&dest)?;
+                    stats.deleted += 1;
+                } else {
+                    stats.skipped += 1;
+                }
+            }
+            FileAction::Replace => {
+                if let Some(src) = &entry.source {
+                    let src_path = if Path::new(src).is_absolute() {
+                        Path::new(src).to_path_buf()
+                    } else {
+                        mod_dir.join(src)
+                    };
+                    if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent)?; }
+                    std::fs::copy(&src_path, &dest)?;
+                    stats.replaced += 1;
+                } else {
+                    stats.skipped += 1;
+                }
+            }
+            FileAction::Patch => {
+                // Apply byte-level patches then optionally overlay source file
+                if let Some(patches) = &entry.patches {
+                    let mut data = if dest.exists() {
+                        std::fs::read(&dest)?
+                    } else {
+                        Vec::new()
+                    };
+                    for patch in patches {
+                        let offset = u64::from_str_radix(
+                            patch.offset.trim_start_matches("0x").trim_start_matches("0X"), 16
+                        ).map_err(|_| anyhow::anyhow!("invalid offset: {}", patch.offset))?;
+                        let patched_bytes = decode_hex(&patch.patched)
+                            .map_err(|_| anyhow::anyhow!("invalid hex in patched: {}", patch.patched))?;
+                        let end = offset as usize + patched_bytes.len();
+                        if end > data.len() { data.resize(end, 0); }
+                        data[offset as usize..end].copy_from_slice(&patched_bytes);
+                    }
+                    if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent)?; }
+                    std::fs::write(&dest, &data)?;
+                    stats.patched += 1;
+                } else if let Some(src) = &entry.source {
+                    let src_path = if Path::new(src).is_absolute() {
+                        Path::new(src).to_path_buf()
+                    } else {
+                        mod_dir.join(src)
+                    };
+                    if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent)?; }
+                    std::fs::copy(&src_path, &dest)?;
+                    stats.patched += 1;
+                } else {
+                    stats.skipped += 1;
+                }
+            }
+        }
+    }
+
+    // 3. Repack the modified folder back over the original archive
+    let key_str = key.unwrap_or(&salt_used);
+    // Detect wrap-data prefix from archive name (same heuristic as GUI)
+    let archive_name = Path::new(archive_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let needs_wrap = archive_name.to_lowercase().ends_with(".pack");
+    let prefix = if needs_wrap { Some("data") } else { None };
+
+    crate::pack::run_pack(&tmp_str, archive_path, key_str, vec![], false, 0, prefix, None)?;
+
+    // 4. Cleanup temp dir
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    Ok(stats)
 }
 
 fn handle_list_mods() -> Response<std::io::Cursor<Vec<u8>>> {
@@ -191,6 +321,14 @@ fn handle_list_mods() -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn handle_mod_template() -> Response<std::io::Cursor<Vec<u8>>> {
     ok(json!({ "template": crate::mod_file::template() }))
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
+    let s = s.trim_start_matches("0x").trim_start_matches("0X");
+    if s.len() % 2 != 0 { return Err(()); }
+    (0..s.len()).step_by(2).map(|i| {
+        u8::from_str_radix(&s[i..i+2], 16).map_err(|_| ())
+    }).collect()
 }
 
 // ---- router -----------------------------------------------------------------
