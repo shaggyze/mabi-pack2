@@ -14,9 +14,16 @@ use image_dds::image_from_dds;
 
 pub fn get_preview_ext(entry_name: &str) -> Option<&str> {
     let name = entry_name.to_lowercase();
-    if name.ends_with(".xml") || name.ends_with(".txt") || name.ends_with(".set") ||
-       name.ends_with(".area") || name.ends_with(".rgn") || name.ends_with(".data") ||
-       name.ends_with(".csh") {
+    if name.ends_with(".rgn") {
+        Some("rgn")
+    } else if name.ends_with(".area") {
+        Some("area")
+    } else if name.ends_with(".set") {
+        Some("set")
+    } else if name.ends_with(".mml") {
+        Some("mml")
+    } else if name.ends_with(".xml") || name.ends_with(".txt") ||
+       name.ends_with(".data") || name.ends_with(".csh") {
         Some("text")
     } else if name.ends_with(".dds") || name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".bmp") {
         Some("image")
@@ -24,9 +31,10 @@ pub fn get_preview_ext(entry_name: &str) -> Option<&str> {
         Some("pmg")
     } else if name.ends_with(".wav") || name.ends_with(".mp3") || name.ends_with(".ogg") || name.ends_with(".nxa") {
         Some("audio")
+    } else if name.ends_with(".anievent") {
+        Some("anievent")
     } else if name.ends_with(".ani") || name.ends_with(".mov") || name.ends_with(".frm") ||
-              name.ends_with(".ttf") || name.ends_with(".raw") || name.ends_with(".compiled") ||
-              name.ends_with(".anievent") {
+              name.ends_with(".ttf") || name.ends_with(".raw") || name.ends_with(".compiled") {
         Some("binary")
     } else {
         None

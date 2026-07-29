@@ -19,6 +19,10 @@ path = "src/bin/mabi-pack-cli.rs"
 name = "pmg_export"
 path = "src/bin/pmg_export.rs"
 
+[[bin]]
+name = "nsi_to_mods"
+path = "src/bin/nsi_to_mods.rs"
+
 [dependencies]
 aes = "0.8.4"
 cbc = "0.1"
@@ -136,4 +140,9 @@ required-features = ["debug"]
 [[bin]]
 name = "crack_propdb"
 path = "src/bin/crack_propdb.rs"
+required-features = ["debug"]
+
+[[bin]]
+name = "test_propdb_key"
+path = "src/bin/test_propdb_key.rs"
 required-features = ["debug"]

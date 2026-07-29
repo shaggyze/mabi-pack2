@@ -9,6 +9,10 @@ export interface PmgGeometry {
     texture_name: string;
     vertex_count: number;
     face_count: number;
+    /** Per-vertex RGB (r0,g0,b0, r1,g1,b1, …), 0-1. Empty when all vertices are white. */
+    vertex_colors?: number[];
+    /** Average RGB of all vertices, 0-1. Always present from Rust side. */
+    avg_color?: [number, number, number];
 }
 
 export interface PMGViewer {
@@ -48,12 +52,31 @@ export function createPMGViewer(container: HTMLElement, geo: PmgGeometry | null 
     scene.add(grid);
 
     const geometry = new THREE.BufferGeometry();
+
+    // Determine material colour from per-vertex data shipped by the Rust side.
+    // Priority: per-vertex colours (varied) > average colour > accent fallback.
+    const hasVColors = !!(geo && geo.vertex_colors && geo.vertex_colors.length > 0);
+    const vColorsVary = hasVColors && vertexColorsVary(geo!.vertex_colors!);
+
+    // Compute a single diffuse hex from avg_color (if not nearly all-white).
+    let diffuseHex = accentHex;
+    if (geo?.avg_color) {
+        const [ar, ag, ab] = geo.avg_color;
+        // Ignore if average is basically white — that means "no material tint"
+        if (ar < 0.95 || ag < 0.95 || ab < 0.95) {
+            diffuseHex = (Math.round(ar * 255) << 16) | (Math.round(ag * 255) << 8) | Math.round(ab * 255);
+        }
+    }
+
     const material = new THREE.MeshPhongMaterial({
-        color: accentHex,
-        emissive: new THREE.Color(accentHex).multiplyScalar(0.08),
+        // When using per-vertex colours the base colour must be white so Three.js
+        // multiplies it by the vertex colour attribute directly.
+        color: vColorsVary ? 0xffffff : diffuseHex,
+        emissive: new THREE.Color(diffuseHex).multiplyScalar(0.08),
         specular: 0x555555,
         shininess: 40,
         side: THREE.DoubleSide,
+        vertexColors: vColorsVary,
     });
     let meshObject: THREE.Object3D;
     let extraDispose: (() => void) | null = null;
@@ -62,6 +85,9 @@ export function createPMGViewer(container: HTMLElement, geo: PmgGeometry | null 
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(geo.positions, 3));
         if (geo.uvs.length > 0) {
             geometry.setAttribute('uv', new THREE.Float32BufferAttribute(geo.uvs, 2));
+        }
+        if (vColorsVary && geo.vertex_colors) {
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(geo.vertex_colors, 3));
         }
         geometry.setIndex(geo.indices);
 
@@ -158,6 +184,25 @@ export function createPMGViewer(container: HTMLElement, geo: PmgGeometry | null 
             if (extraDispose) extraDispose();
         },
     };
+}
+
+/**
+ * Returns true if the per-vertex colour array has meaningful variation
+ * (i.e. not all vertices share the same RGB within a small tolerance).
+ * Uniform-colour arrays (e.g. all-grey default tints) are not worth enabling
+ * vertexColors for — a single material colour looks identical and is cheaper.
+ */
+function vertexColorsVary(colors: number[]): boolean {
+    if (colors.length < 6) return false;
+    const r0 = colors[0], g0 = colors[1], b0 = colors[2];
+    for (let i = 3; i < colors.length; i += 3) {
+        if (Math.abs(colors[i]     - r0) > 0.01 ||
+            Math.abs(colors[i + 1] - g0) > 0.01 ||
+            Math.abs(colors[i + 2] - b0) > 0.01) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function parseCssColor(css: string): number | null {

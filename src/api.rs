@@ -400,78 +400,166 @@ fn handle_mod_template() -> Response<std::io::Cursor<Vec<u8>>> {
     ok(json!({ "template": crate::mod_file::template() }))
 }
 
-// ---- uotiara helpers --------------------------------------------------------
+// ---- uotiara helpers (NSI-based) --------------------------------------------
 
-/// Minimal INI parser: returns section → key → value (all lowercase section names).
-fn parse_ini(text: &str) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
-    let mut map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = Default::default();
-    let mut section = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(';') || line.starts_with('#') { continue; }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line[1..line.len()-1].to_string();
-        } else if let Some(eq) = line.find('=') {
-            let k = line[..eq].trim().to_string();
-            let v = line[eq+1..].trim().to_string();
-            map.entry(section.clone()).or_default().insert(k, v);
+/// Extract the first double-quoted string from an NSIS line.
+fn nsi_quoted(line: &str) -> Option<String> {
+    let start = line.find('"')?;
+    let rest = &line[start+1..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Parse `Section "Name" MOD###` → (name, id).  Returns None for unnamed sections.
+fn parse_nsi_section(line: &str) -> Option<(String, u32)> {
+    let name = nsi_quoted(line)?;
+    let after_quote = &line[line.rfind('"')? + 1..].trim();
+    let id_str = after_quote.strip_prefix("MOD")?;
+    let id: u32 = id_str.trim().parse().ok()?;
+    Some((name, id))
+}
+
+/// Parse uotiara.nsi and return every data mod (installs to `$INSTDIR\data\`).
+///
+/// Each entry: `{ id, name, group, files: [{src, dest}] }` where
+///   - `src`  = relative to nsi directory (e.g. `Tiara's Moonshine Mod/data/db/foo.xml`)
+///   - `dest` = relative to game `data/`   (e.g. `db/foo.xml`)
+pub fn parse_uotiara_nsi(nsi_path: &str) -> anyhow::Result<Vec<Value>> {
+    let text = std::fs::read_to_string(nsi_path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", nsi_path, e))?;
+
+    let mut result: Vec<Value> = Vec::new();
+    let mut group_stack: Vec<String> = Vec::new();
+
+    let mut in_section = false;
+    let mut cur_name = String::new();
+    let mut cur_id: u32 = 0;
+    let mut cur_set_out = String::new();   // full NSIS SetOutPath value
+    let mut cur_files: Vec<Value> = Vec::new();
+
+    for raw in text.lines() {
+        let t = raw.trim();
+        if t.starts_with(';') { continue; }   // NSIS comment
+
+        // Track SectionGroup nesting for group metadata
+        if t.starts_with("SectionGroup") && !t.contains("SectionGroupEnd") {
+            if let Some(name) = nsi_quoted(t) {
+                group_stack.push(name);
+            }
+            continue;
+        }
+        if t == "SectionGroupEnd" {
+            group_stack.pop();
+            continue;
+        }
+
+        // Section header: must have MOD### constant
+        if t.starts_with("Section ")
+            && !t.starts_with("SectionGroup")
+            && !t.starts_with("SectionEnd")
+            && !t.starts_with("SectionIn")
+        {
+            if let Some((name, id)) = parse_nsi_section(t) {
+                in_section = true;
+                cur_name = name;
+                cur_id = id;
+                cur_set_out.clear();
+                cur_files.clear();
+            }
+            continue;
+        }
+
+        if t == "SectionEnd" {
+            if in_section && !cur_files.is_empty() {
+                result.push(json!({
+                    "id":    cur_id,
+                    "name":  cur_name,
+                    "group": group_stack.join("/"),
+                    "files": cur_files,
+                }));
+            }
+            in_section = false;
+            cur_files.clear();
+            cur_set_out.clear();
+            continue;
+        }
+
+        if !in_section { continue; }
+
+        // SetOutPath — update current destination prefix
+        if t.starts_with("SetOutPath ") {
+            if let Some(path) = nsi_quoted(t) {
+                cur_set_out = path;
+            }
+            continue;
+        }
+
+        // Delete — installer-time delete inside data\ (e.g. MOD89 "Dark Knight Sound")
+        if t.starts_with("Delete ") {
+            if let Some(target) = nsi_quoted(t) {
+                let is_data = target == "$INSTDIR\\data"
+                    || target.starts_with("$INSTDIR\\data\\");
+                if is_data {
+                    let dest_rel = target
+                        .trim_start_matches("$INSTDIR\\data\\")
+                        .trim_start_matches("$INSTDIR\\data")
+                        .replace('\\', "/");
+                    if !dest_rel.is_empty() {
+                        cur_files.push(json!({ "action": "delete", "dest": dest_rel }));
+                    }
+                }
+            }
+            continue;
+        }
+
+        // File — only collect if destination is under $INSTDIR\data\
+        if t.starts_with("File ") {
+            let is_data = cur_set_out == "$INSTDIR\\data"
+                || cur_set_out.starts_with("$INSTDIR\\data\\");
+            if !is_data { continue; }
+            if let Some(src) = nsi_quoted(t) {
+                // Strip ${srcdir}\ prefix; normalise to forward slashes
+                let src_rel = src
+                    .trim_start_matches("${srcdir}\\")
+                    .replace('\\', "/");
+                let filename = src_rel.split('/').last().unwrap_or("").to_string();
+
+                let dest_base = cur_set_out
+                    .trim_start_matches("$INSTDIR\\data\\")
+                    .trim_start_matches("$INSTDIR\\data")
+                    .replace('\\', "/");
+                let dest_rel = if dest_base.is_empty() {
+                    filename
+                } else {
+                    format!("{}/{}", dest_base, filename)
+                };
+
+                cur_files.push(json!({ "action": "replace", "src": src_rel, "dest": dest_rel }));
+            }
         }
     }
-    map
+
+    Ok(result)
 }
 
-/// Parse a uotiaralist.ini into a list of {id, name, files}.
-fn parse_uotiara_ini(path: &str) -> anyhow::Result<Vec<Value>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path, e))?;
-    let ini = parse_ini(&text);
-
-    let mods_section = ini.get("Mods").cloned().unwrap_or_default();
-    let mut entries: Vec<Value> = Vec::new();
-    let mut ids: Vec<u32> = mods_section.keys()
-        .filter_map(|k| k.parse::<u32>().ok())
-        .collect();
-    ids.sort_unstable();
-
-    for id in ids {
-        let name = match mods_section.get(&id.to_string()) {
-            Some(n) if !n.is_empty() => n.clone(),
-            _ => continue,
-        };
-        // Collect FileN entries from the [Name] section
-        let file_sec = ini.get(&name).cloned().unwrap_or_default();
-        let mut file_nums: Vec<u32> = file_sec.keys()
-            .filter_map(|k| k.strip_prefix("File").and_then(|n| n.parse().ok()))
-            .collect();
-        file_nums.sort_unstable();
-        let files: Vec<String> = file_nums.iter()
-            .filter_map(|n| file_sec.get(&format!("File{}", n)))
-            .map(|f| f.replace('\\', "/").trim_start_matches('/').to_string())
-            .collect();
-        entries.push(json!({ "id": id, "name": name, "files": files }));
-    }
-    Ok(entries)
-}
-
-fn default_ini_path() -> String {
+fn default_nsi_path() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("uotiaralist.ini")))
+        .and_then(|p| p.parent().map(|d| d.join("uotiara.nsi")))
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "uotiaralist.ini".to_string())
+        .unwrap_or_else(|| "uotiara.nsi".to_string())
 }
 
 fn handle_uotiara_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    // Parse ?ini=<path> from query string
     let url = req.url().to_string();
-    let ini_path = url.split('?').nth(1)
-        .and_then(|qs| qs.split('&').find(|p| p.starts_with("ini=")))
+    let nsi_path = url.split('?').nth(1)
+        .and_then(|qs| qs.split('&').find(|p| p.starts_with("nsi=")))
         .map(|p| p[4..].to_string())
         .map(|s| percent_decode(&s))
-        .unwrap_or_else(default_ini_path);
+        .unwrap_or_else(default_nsi_path);
 
-    match parse_uotiara_ini(&ini_path) {
-        Ok(mods) => ok(json!({ "ini": ini_path, "count": mods.len(), "mods": mods })),
+    match parse_uotiara_nsi(&nsi_path) {
+        Ok(mods) => ok(json!({ "nsi": nsi_path, "count": mods.len(), "mods": mods })),
         Err(e)   => err(&e.to_string(), 500),
     }
 }
@@ -479,13 +567,9 @@ fn handle_uotiara_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> 
 fn handle_uotiara_build(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
 
-    let ini_path = match body["ini"].as_str() {
+    let nsi_path = match body["nsi"].as_str() {
         Some(s) => s.to_string(),
-        None => return err("'ini' (path to uotiaralist.ini) is required", 400),
-    };
-    let it_path = match body["it"].as_str() {
-        Some(s) => s.to_string(),
-        None => return err("'it' (path to source .it archive) is required", 400),
+        None => return err("'nsi' (path to uotiara.nsi) is required", 400),
     };
     let output = match body["output"].as_str() {
         Some(s) => s.to_string(),
@@ -501,53 +585,63 @@ fn handle_uotiara_build(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>>
         return err("'selected' must be a non-empty array of mod IDs", 400);
     }
 
-    // Parse ini to find which files are needed
-    let all_mods = match parse_uotiara_ini(&ini_path) {
+    let all_mods = match parse_uotiara_nsi(&nsi_path) {
         Ok(m) => m,
         Err(e) => return err(&e.to_string(), 500),
     };
-    let mut needed_files: std::collections::HashSet<String> = Default::default();
-    for m in &all_mods {
-        let id = m["id"].as_u64().unwrap_or(0);
-        if selected.contains(&id) {
-            if let Some(files) = m["files"].as_array() {
-                for f in files {
-                    if let Some(s) = f.as_str() { needed_files.insert(s.to_string()); }
-                }
-            }
-        }
-    }
 
-    // Extract full archive to temp dir (filtered to only needed files)
+    // Base directory is the folder containing the NSI file
+    let nsi_dir = std::path::Path::new(&nsi_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    // Stage files into tmp_dir/data/<dest_rel> so the pack preserves data\ prefix
     let tmp_dir = std::env::temp_dir()
         .join(format!("mabi_uotiara_{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         return err(&format!("cannot create temp dir: {}", e), 500);
     }
+
+    let mut copied = 0usize;
+    for m in &all_mods {
+        let id = m["id"].as_u64().unwrap_or(0);
+        if !selected.contains(&id) { continue; }
+        if let Some(files) = m["files"].as_array() {
+            for f in files {
+                let src_rel  = match f["src"].as_str()  { Some(s) => s, None => continue };
+                let dest_rel = match f["dest"].as_str() { Some(s) => s, None => continue };
+
+                let src_path  = nsi_dir.join(src_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let dest_path = tmp_dir.join("data").join(dest_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+                if let Some(parent) = dest_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::copy(&src_path, &dest_path) {
+                    Ok(_) => copied += 1,
+                    Err(e) => eprintln!("warning: skip {:?}: {}", src_path, e),
+                }
+            }
+        }
+    }
+
+    if copied == 0 {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return err("no files copied — verify nsi path and that mod source files exist", 400);
+    }
+
     let tmp_str = tmp_dir.to_string_lossy().to_string();
-    let filters: Vec<String> = needed_files.iter().cloned().collect();
-    let salts = crate::load_salts();
-
-    let salt_used = match crate::extract::run_extract_with_key_search(
-        &it_path, &tmp_str, key.clone(), &salts,
-        filters, None, false, false, false, None,
-    ) {
-        Ok(s) => s,
-        Err(e) => { let _ = std::fs::remove_dir_all(&tmp_dir); return err(&e.to_string(), 500); }
-    };
-
-    // Pack the filtered temp dir into the output .it
-    let key_str = key.as_deref().unwrap_or(&salt_used);
+    let key_str = key.as_deref().unwrap_or("})wWb4?-sVGHNoPKpc");
     let result = crate::pack::run_pack(&tmp_str, &output, key_str, vec![], false, 0, None, None);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     match result {
         Ok(_) => ok(json!({
-            "ini":      ini_path,
-            "it":       it_path,
-            "output":   output,
-            "selected": selected.len(),
-            "files":    needed_files.len(),
+            "nsi":          nsi_path,
+            "output":       output,
+            "selected":     selected.len(),
+            "files_copied": copied,
         })),
         Err(e) => err(&format!("pack failed: {}", e), 500),
     }
@@ -655,18 +749,21 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         return r;
     }
 
-    match (&method, url.as_str()) {
-        (Method::Get,  "/api/v1/status")       => handle_status(),
-        (Method::Post, "/api/v1/extract")      => handle_extract(req),
-        (Method::Post, "/api/v1/pack")         => handle_pack(req),
-        (Method::Post, "/api/v1/list")         => handle_list(req),
-        (Method::Post, "/api/v1/mod/apply")    => handle_mod_apply(req),
-        (Method::Get,  "/api/v1/mods")              => handle_list_mods(),
-        (Method::Get,  "/api/v1/mod-template")      => handle_mod_template(),
-        (Method::Get,  "/api/v1/uotiara/mods")      => handle_uotiara_list(req),
-        (Method::Post, "/api/v1/uotiara/build")     => handle_uotiara_build(req),
-        (Method::Get,  "/api/v1/mabi-version")      => handle_mabi_version(),
-        (Method::Post, "/api/v1/extract/stream")   => handle_extract_stream(req),
+    // Strip query string so routes match regardless of query params
+    let path = url.split('?').next().unwrap_or(&url).to_string();
+
+    match (&method, path.as_str()) {
+        (Method::Get,  "/api/v1/status")          => handle_status(),
+        (Method::Post, "/api/v1/extract")         => handle_extract(req),
+        (Method::Post, "/api/v1/pack")            => handle_pack(req),
+        (Method::Post, "/api/v1/list")            => handle_list(req),
+        (Method::Post, "/api/v1/mod/apply")       => handle_mod_apply(req),
+        (Method::Get,  "/api/v1/mods")            => handle_list_mods(),
+        (Method::Get,  "/api/v1/mod-template")    => handle_mod_template(),
+        (Method::Get,  "/api/v1/uotiara/mods")    => handle_uotiara_list(req),
+        (Method::Post, "/api/v1/uotiara/build")   => handle_uotiara_build(req),
+        (Method::Get,  "/api/v1/mabi-version")    => handle_mabi_version(),
+        (Method::Post, "/api/v1/extract/stream")  => handle_extract_stream(req),
         _ => err(&format!("Not found: {} {}", method, url), 404),
     }
 }
