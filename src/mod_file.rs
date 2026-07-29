@@ -4,7 +4,7 @@
 /// - metadata for the WebUI to display
 /// - which files to replace/delete inside the archive
 /// - feature flag toggles (features.xml.compiled round-trip)
-/// - optional import from uotiaralist.ini
+/// - optional reference to uotiara.nsi for auto-generated entries
 /// - pack/extract settings
 /// - API exposure metadata
 use anyhow::{bail, Result};
@@ -75,13 +75,6 @@ pub struct FeatureSettings {
     pub disable: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IniImport {
-    /// Path to uotiaralist.ini (relative to .mod or absolute)
-    pub path: String,
-    /// Mod names to import from the ini
-    pub entries: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ApiSettings {
@@ -103,7 +96,6 @@ pub struct ModPackage {
     pub files: Vec<ModFile>,
     #[serde(default)]
     pub features: FeatureSettings,
-    pub from_ini: Option<IniImport>,
     pub api: Option<ApiSettings>,
 }
 
@@ -204,10 +196,6 @@ action       = "replace"
 enable  = []
 disable = []
 
-# --- Import from uotiaralist.ini (optional) ----------------------------------
-# [from_ini]
-# path    = "uotiaralist.ini"
-# entries = ["Autoproduction Uncaps", "Dungeon Fog Removal 1"]
 
 # --- API settings (optional) -------------------------------------------------
 [api]

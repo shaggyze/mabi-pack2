@@ -1,4 +1,4 @@
-﻿use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption};
+use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption, rgn as rgn_lib};
 use encoding_rs::{WINDOWS_1252, SHIFT_JIS, EUC_KR, BIG5};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -134,14 +134,20 @@ struct Config {
     auto_convert_features: bool,
     #[serde(default)]
     auto_convert_pmg: bool,
+    #[serde(default)]
+    theme_overrides: serde_json::Value,
+    #[serde(default)]
+    custom_themes: serde_json::Value,
+    #[serde(default)]
+    kanan_cfg_path: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: "neon-fog-dark".to_string(),
+            theme: "sky-dark".to_string(),
             locale: "en".to_string(),
-            log_level: "error".to_string(),
+            log_level: "info".to_string(),
             associate_it: true,
             associate_pack: false,
             associate_it_full: false,
@@ -169,6 +175,9 @@ impl Default for Config {
             sequence_ignore_list: Vec::new(),
             auto_convert_features: false,
             auto_convert_pmg: false,
+            theme_overrides: serde_json::Value::Object(serde_json::Map::new()),
+            custom_themes: serde_json::Value::Object(serde_json::Map::new()),
+            kanan_cfg_path: String::new(),
         }
     }
 }
@@ -925,6 +934,7 @@ pub struct PreviewData {
     pub full_preview_size: u64,
     pub truncated: bool,
     pub pmg_geometry: Option<PmgGeometry>,
+    pub rgn_data: Option<rgn_lib::RgnData>,
 }
 
 #[tauri::command]
@@ -987,6 +997,7 @@ async fn get_preview_ext(
         full_preview_size,
         truncated: false,
         pmg_geometry: None,
+        rgn_data: None,
     };
 
     if preview.file_type == "image" {
@@ -1018,6 +1029,18 @@ async fn get_preview_ext(
             }
         }
         raw_bytes = Vec::new(); // geometry is in pmg_geometry; no need to ship raw bytes over IPC
+    } else if preview.file_type == "rgn" {
+        match rgn_lib::parse_rgn(&raw_bytes) {
+            Some(rgn) => {
+                info!("[RGN] {} v{}  .  {}x{} px  ({} areas)", entry_name, rgn.version, rgn.width, rgn.height, rgn.area_count);
+                preview.rgn_data = Some(rgn);
+            }
+            None => {
+                warn!("[GUI] RGN parse failed for {}", entry_name);
+                preview.content_text = Some("RGN parse failed - unknown format (see Hex View)".to_string());
+            }
+        }
+        raw_bytes = Vec::new(); // heights are in rgn_data; no need to ship raw bytes over IPC
     } else if preview.file_type == "audio" {
         if entry_name.to_lowercase().ends_with(".wav") {
             if raw_bytes.len() <= MAX_ADPCM_INPUT {
@@ -1050,7 +1073,7 @@ async fn get_preview_ext(
     // Cap raw_bytes transferred over IPC to avoid saturating the JSON bridge
     let limit = match preview.file_type.as_str() {
         "audio" => MAX_AUDIO_BYTES,
-        "pmg"   => 0, // raw bytes cleared above; geometry is in pmg_geometry
+        "pmg" | "rgn" => 0, // raw bytes cleared above; parsed data in pmg_geometry / rgn_data
         _       => MAX_HEX_BYTES,
     };
     if raw_bytes.len() > limit {
@@ -1139,6 +1162,139 @@ fn parse_pmg_bytes(data: &[u8]) -> Result<PmgGeometry, String> {
 #[tauri::command]
 fn parse_pmg_geometry(bytes: Vec<u8>) -> Result<PmgGeometry, String> {
     parse_pmg_bytes(&bytes)
+}
+
+#[tauri::command]
+fn parse_rgn(bytes: Vec<u8>) -> Option<rgn_lib::RgnData> {
+    rgn_lib::parse_rgn(&bytes)
+}
+
+#[derive(Serialize)]
+struct SetHeaderInfo {
+    magic: String,
+    version: u32,
+    bone_count: u32,
+    frame_count: u32,
+    duration_ms: u32,
+    is_xml: bool,
+}
+
+fn parse_set_header_inner(bytes: &[u8]) -> Result<SetHeaderInfo, String> {
+    if bytes.len() < 4 {
+        return Err(format!("File too small ({} bytes)", bytes.len()));
+    }
+    if bytes.starts_with(b"<?") || bytes.starts_with(b"<") {
+        return Ok(SetHeaderInfo {
+            magic: String::from_utf8_lossy(&bytes[..4.min(bytes.len())]).into_owned(),
+            version: 0, bone_count: 0, frame_count: 0, duration_ms: 0,
+            is_xml: true,
+        });
+    }
+    let magic = format!("{:02X}{:02X}{:02X}{:02X}", bytes[0], bytes[1], bytes[2], bytes[3]);
+    if bytes.len() < 20 {
+        return Err(format!("Header too small ({} bytes, need 20)", bytes.len()));
+    }
+    let r32 = |off: usize| -> u32 {
+        u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    Ok(SetHeaderInfo {
+        magic,
+        version: r32(4),
+        bone_count: r32(8),
+        frame_count: r32(12),
+        duration_ms: r32(16),
+        is_xml: false,
+    })
+}
+
+#[tauri::command]
+fn parse_set_header(bytes: Vec<u8>) -> Result<SetHeaderInfo, String> {
+    parse_set_header_inner(&bytes)
+}
+
+#[tauri::command]
+fn parse_area(bytes: Vec<u8>) -> Result<mabi_pack2::area::AreaData, String> {
+    mabi_pack2::area::parse_area(&bytes)
+        .ok_or_else(|| "No recognizable prop data found in .area file".to_string())
+}
+
+#[derive(Serialize)]
+struct AniEventEntry {
+    frame: u32,
+    event_type: String,
+    anim_name: String,
+    params: String,
+}
+
+#[derive(Serialize)]
+struct AnieventData {
+    set_name: String,
+    animation_count: usize,
+    event_count: usize,
+    events: Vec<AniEventEntry>,
+}
+
+#[tauri::command]
+fn parse_anievent(bytes: Vec<u8>) -> Result<AnieventData, String> {
+    let text = std::str::from_utf8(&bytes)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| {
+            let (decoded, _, _) = EUC_KR.decode(&bytes);
+            decoded.into_owned()
+        });
+
+    let mut set_name = String::new();
+    let mut current_anim = String::new();
+    let mut seen_anims: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut events: Vec<AniEventEntry> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("set(") {
+            if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.split('"').next()) {
+                set_name = inner.to_string();
+            }
+            continue;
+        }
+        if trimmed.starts_with("folder(") {
+            continue;
+        }
+        if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() > 2 {
+            current_anim = trimmed[1..trimmed.len() - 1].to_string();
+            seen_anims.insert(current_anim.clone());
+            continue;
+        }
+        if let Some(colon) = trimmed.find(':') {
+            let frame_str = trimmed[..colon].trim();
+            if let Ok(frame) = frame_str.parse::<u32>() {
+                let rest = trimmed[colon + 1..].trim();
+                let (event_type, params) = if let Some(paren) = rest.find('(') {
+                    (rest[..paren].trim().to_string(), rest[paren..].trim().to_string())
+                } else {
+                    (rest.to_string(), String::new())
+                };
+                if !event_type.is_empty() {
+                    events.push(AniEventEntry {
+                        frame,
+                        event_type,
+                        anim_name: current_anim.clone(),
+                        params,
+                    });
+                }
+            }
+        }
+    }
+
+    if events.is_empty() && set_name.is_empty() {
+        return Err("No recognisable anievent data found".to_string());
+    }
+
+    let animation_count = seen_anims.len();
+    let event_count = events.len();
+    Ok(AnieventData { set_name, animation_count, event_count, events })
 }
 
 /// Checks if a WAV buffer uses IMA ADPCM (format 0x0011) without fully decoding it.
@@ -1636,6 +1792,7 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
         full_preview_size: file_size,
         truncated: false,
         pmg_geometry: None,
+        rgn_data: None,
     };
 
     if preview.file_type == "image" {
@@ -1659,6 +1816,18 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => { preview.pmg_geometry = Some(geo); },
             Err(e) => { preview.content_text = Some(format!("PMG parse failed: {}", e)); }
+        }
+        raw_bytes = Vec::new();
+    } else if preview.file_type == "rgn" {
+        match rgn_lib::parse_rgn(&raw_bytes) {
+            Some(rgn) => {
+                info!("[RGN] {} v{}  .  {}x{} px  ({} areas)", entry_name, rgn.version, rgn.width, rgn.height, rgn.area_count);
+                preview.rgn_data = Some(rgn);
+            }
+            None => {
+                warn!("[GUI] RGN parse failed for {}", entry_name);
+                preview.content_text = Some("RGN parse failed - unknown format (see Hex View)".to_string());
+            }
         }
         raw_bytes = Vec::new();
     } else if preview.file_type == "audio" {
@@ -1685,7 +1854,7 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
 
     let limit = match preview.file_type.as_str() {
         "audio" => MAX_AUDIO_BYTES,
-        "pmg"   => 0,
+        "pmg" | "rgn" => 0,
         _       => MAX_HEX_BYTES,
     };
     if raw_bytes.len() > limit {
@@ -2347,6 +2516,82 @@ fn apply_vfs_changes(
     Ok(serde_json::json!({ "archive": archive, "changes": changes.len(), "stats": stats }))
 }
 
+
+/// Convert a uotiaralist.ini (or .nsi) into a .mod TOML — frontend-facing alias.
+/// it_path defaults to empty; the [[files]] source field can be edited manually.
+#[tauri::command]
+fn nsi_to_mod(nsi_path: String, selected_ids: Vec<u32>) -> Result<String, String> {
+    ini_to_mod(nsi_path, String::new(), selected_ids)
+}
+
+/// Persist pending VFS changes to <archive>.pending.json.
+/// Passing an empty array deletes the file.
+#[tauri::command]
+fn save_pending_changes(archive: String, changes: Vec<serde_json::Value>) -> Result<(), String> {
+    let pending_path = format!("{}.pending.json", archive);
+    if changes.is_empty() {
+        if Path::new(&pending_path).exists() {
+            let _ = fs::remove_file(&pending_path);
+        }
+    } else {
+        let json = serde_json::to_string_pretty(&changes).map_err(|e| e.to_string())?;
+        fs::write(&pending_path, &json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Load pending VFS changes from <archive>.pending.json.
+#[tauri::command]
+fn load_pending_changes(archive: String) -> Result<Vec<serde_json::Value>, String> {
+    let pending_path = format!("{}.pending.json", archive);
+    if !Path::new(&pending_path).exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&pending_path).map_err(|e| e.to_string())?;
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+/// Kanan LibLoader mod entry.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct KananMod {
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// Read a Kanan LibLoader Loader.cfg (INI-style) and return mod list.
+#[tauri::command]
+fn read_kanan_cfg(path: String) -> Result<Vec<KananMod>, String> {
+    let content = fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    let mut mods: Vec<KananMod> = Vec::new();
+    let mut current_name: Option<String> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            current_name = Some(line[1..line.len() - 1].trim().to_string());
+        } else if let Some(ref name) = current_name {
+            if let Some(rest) = line.strip_prefix("Enabled=") {
+                let enabled = rest.trim().eq_ignore_ascii_case("true");
+                mods.push(KananMod { name: name.clone(), enabled });
+                current_name = None;
+            }
+        }
+    }
+    Ok(mods)
+}
+
+/// Write updated mod list back to a Kanan LibLoader Loader.cfg.
+#[tauri::command]
+fn write_kanan_cfg(path: String, mods: Vec<KananMod>) -> Result<(), String> {
+    let mut out = String::new();
+    for m in &mods {
+        out.push('[');
+        out.push_str(&m.name);
+        out.push_str("]\r\nEnabled=");
+        out.push_str(if m.enabled { "true" } else { "false" });
+        out.push_str("\r\n\r\n");
+    }
+    fs::write(&path, out.trim_end()).map_err(|e| format!("Cannot write {}: {}", path, e))
+}
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2377,7 +2622,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_pack_contents, create_archive, extract_pack_to,
             extract_file_to, create_patch, list_sequence_contents,
-            get_preview_ext, parse_pmg_geometry, get_config, set_config,
+            get_preview_ext, parse_pmg_geometry, parse_set_header, parse_rgn, parse_area, parse_anievent, get_config, set_config,
             get_config_path_str, get_appdata_config_path, get_portable_config_path,
             is_portable_mode, set_portable_mode, reset_config, wipe_registry_associations,
             get_system_info, run_convert, get_app_exe_dir, open_log_file,
@@ -2391,7 +2636,9 @@ pub fn run() {
             launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
             get_features_from_archive, save_features_to_archive,
             apply_vfs_changes,
-            ini_to_mod,
+            ini_to_mod, nsi_to_mod,
+            save_pending_changes, load_pending_changes,
+            read_kanan_cfg, write_kanan_cfg,
             apply_mod,
             get_mabi_version_local
         ])

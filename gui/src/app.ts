@@ -47,6 +47,22 @@ interface PackListResponse {
     details: ArchiveDetails;
 }
 
+interface ThemeOverrides {
+    bg_deep?: string;
+    bg_sidebar?: string;
+    bg_input?: string;
+    bg_surface_color?: string;
+    surface_opacity?: number;
+    border_color?: string;
+    border_opacity?: number;
+    accent_cyan?: string;
+    accent_blue?: string;
+    text_primary?: string;
+    text_muted?: string;
+    font_family?: string;
+    font_size?: number;
+}
+
 interface Config {
     theme: string;
     locale: string;
@@ -78,6 +94,9 @@ interface Config {
     associate_xmlcompiled: boolean;
     pack_v1_version: number;
     sequence_ignore_list: string[];
+    theme_overrides: ThemeOverrides;
+    custom_themes: Record<string, ThemeOverrides>;
+    kanan_cfg_path: string;
 }
 
 interface PreviewData {
@@ -96,13 +115,23 @@ interface PreviewData {
     full_preview_size: number;
     truncated: boolean;
     pmg_geometry?: PmgGeometry | null;
+    rgn_data?: RgnData | null;
+}
+
+interface RgnData {
+    version: number;
+    region_id: number;
+    area_count: number;
+    width: number;
+    height: number;
+    heights: number[];   // normalized 0.0–1.0, row-major
 }
 
 class App {
     private config: Config = {
         theme: "sky-dark",
         locale: "en",
-        log_level: "error",
+        log_level: "info",
         associate_it: true,
         associate_pack: false,
         associate_it_full: false,
@@ -129,7 +158,10 @@ class App {
         associate_pmg: false,
         associate_xmlcompiled: false,
         pack_v1_version: 999,
-        sequence_ignore_list: []
+        sequence_ignore_list: [],
+        theme_overrides: {},
+        custom_themes: {},
+        kanan_cfg_path: ""
     };
 
     private loadedEntries: AggregateEntry[] = [];
@@ -141,6 +173,8 @@ class App {
     private _taskStartTime: number | null = null;
     private _audioBlobUrl: string = "";
     private _activePreviewContainer: string = "preview-visual";
+    private _mmlAudioCtx: AudioContext | null = null;
+    private _mmlStopFlag: boolean = false;
 
     private previewKey(e: AggregateEntry) { return `${e.source_archive}::${e.name}`; }
     
@@ -282,6 +316,7 @@ class App {
         this.setupVfsEditing();
         this.setupLauncher();
         this.setupFeaturesEditor();
+        this.setupThemeCustomizer();
         this.setupForms();
         this.setupEventListen();
 
@@ -357,7 +392,7 @@ class App {
             "label_audio_autoplay", "label_audio_autoplay_inline", "label_audio_loop",
             "ctx_extract", "ctx_copy_name", "ctx_copy_key", "ctx_conv_png", "ctx_conv_dds",
             "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config",
-            "dash_roadmap_title", "dash_mods_title"
+            "dash_mods_title"
         ];
         ids.forEach(id => {
             document.querySelectorAll<HTMLElement>(`[id="${id}"]`).forEach(el => {
@@ -549,6 +584,8 @@ class App {
             const span = label.querySelector<HTMLElement>("span[id]");
             if (span?.id) label.dataset.tooltip = span.id;
         });
+
+        this.syncCustomizerUI();
     }
 
     private applyTheme() {
@@ -556,6 +593,197 @@ class App {
         document.documentElement.className = cls;
         document.body.className = cls;
         localStorage.setItem("mabi_theme", this.config.theme);
+        this.applyThemeOverrides();
+    }
+
+    private applyThemeOverrides() {
+        const o = this.config.theme_overrides ?? {};
+        const s = document.documentElement.style;
+        const set = (v: string | undefined, prop: string) => v ? s.setProperty(prop, v) : s.removeProperty(prop);
+
+        set(o.bg_deep, '--bg-deep');
+        set(o.bg_sidebar, '--bg-sidebar');
+        set(o.bg_input, '--bg-input');
+        set(o.bg_deep ?? o.bg_surface_color, '--bg-terminal');
+        set(o.accent_cyan, '--accent-cyan');
+        set(o.accent_blue, '--accent-blue');
+        set(o.accent_cyan, '--accent-neon');
+        set(o.text_primary, '--text-primary');
+        set(o.text_muted, '--text-muted');
+
+        if (o.bg_surface_color !== undefined || o.surface_opacity !== undefined) {
+            const base = o.bg_surface_color ?? this.getCssVar('--bg-deep');
+            const alpha = ((o.surface_opacity ?? 60) / 100).toFixed(2);
+            const hex = base.startsWith('#') ? base : '#011627';
+            const r = parseInt(hex.slice(1,3), 16);
+            const g = parseInt(hex.slice(3,5), 16);
+            const b = parseInt(hex.slice(5,7), 16);
+            s.setProperty('--bg-surface', `rgba(${r},${g},${b},${alpha})`);
+        } else {
+            s.removeProperty('--bg-surface');
+        }
+
+        if (o.border_color !== undefined || o.border_opacity !== undefined) {
+            const base = o.border_color ?? this.getCssVar('--accent-cyan');
+            const alpha = ((o.border_opacity ?? 30) / 100).toFixed(2);
+            const hex = base.startsWith('#') ? base : '#7fdbca';
+            const r = parseInt(hex.slice(1,3), 16);
+            const g = parseInt(hex.slice(3,5), 16);
+            const b = parseInt(hex.slice(5,7), 16);
+            s.setProperty('--border-glass', `rgba(${r},${g},${b},${alpha})`);
+        } else {
+            s.removeProperty('--border-glass');
+        }
+
+        if (o.font_family) s.setProperty('--ui-font', o.font_family);
+        else s.removeProperty('--ui-font');
+        if (o.font_size) s.fontSize = `${o.font_size}px`;
+        else s.fontSize = '';
+    }
+
+    private getCssVar(name: string): string {
+        return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    private cssColorToHex(cssVal: string): string {
+        const v = cssVal.trim();
+        if (v.startsWith('#')) return v.length === 4
+            ? '#' + v[1]+v[1]+v[2]+v[2]+v[3]+v[3]
+            : v.slice(0,7);
+        const m = v.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (m) return '#' + [m[1],m[2],m[3]].map(n => parseInt(n).toString(16).padStart(2,'0')).join('');
+        return '#000000';
+    }
+
+    private rgbaOpacity(cssVal: string): number {
+        const m = cssVal.trim().match(/rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)/);
+        return m ? Math.round(parseFloat(m[1]) * 100) : 100;
+    }
+
+    private syncCustomizerUI() {
+        const o = this.config.theme_overrides ?? {};
+        const get = (prop: string) => this.cssColorToHex(this.getCssVar(prop));
+
+        const setColor = (id: string, val: string | undefined, fallbackProp: string) => {
+            const el = document.getElementById(id) as HTMLInputElement | null;
+            if (el) el.value = val ?? get(fallbackProp);
+        };
+        setColor('tc-bg-deep',       o.bg_deep,          '--bg-deep');
+        setColor('tc-bg-sidebar',    o.bg_sidebar,       '--bg-sidebar');
+        setColor('tc-bg-input',      o.bg_input,         '--bg-input');
+        setColor('tc-bg-surface',    o.bg_surface_color, '--bg-deep');
+        setColor('tc-border-color',  o.border_color,     '--accent-cyan');
+        setColor('tc-accent-cyan',   o.accent_cyan,      '--accent-cyan');
+        setColor('tc-accent-blue',   o.accent_blue,      '--accent-blue');
+        setColor('tc-text-primary',  o.text_primary,     '--text-primary');
+        setColor('tc-text-muted',    o.text_muted,       '--text-muted');
+
+        const surf = o.surface_opacity ?? this.rgbaOpacity(this.getCssVar('--bg-surface'));
+        const bord = o.border_opacity  ?? this.rgbaOpacity(this.getCssVar('--border-glass'));
+        const fsize = o.font_size ?? 14;
+
+        const setSlider = (id: string, valId: string, v: number, suffix: string) => {
+            const el = document.getElementById(id) as HTMLInputElement | null;
+            const lbl = document.getElementById(valId);
+            if (el) el.value = String(v);
+            if (lbl) lbl.textContent = v + suffix;
+        };
+        setSlider('tc-surface-opacity', 'tc-surface-opacity-val', surf, '%');
+        setSlider('tc-border-opacity',  'tc-border-opacity-val',  bord, '%');
+        setSlider('tc-font-size',        'tc-font-size-val',      fsize, 'px');
+
+        const ff = document.getElementById('tc-font-family') as HTMLSelectElement | null;
+        if (ff) ff.value = o.font_family ?? '';
+
+        // Populate saved themes dropdown
+        const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
+        if (sel) {
+            sel.innerHTML = '<option value="">— saved themes —</option>';
+            for (const name of Object.keys(this.config.custom_themes ?? {})) {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                sel.appendChild(opt);
+            }
+        }
+    }
+
+    private setupThemeCustomizer() {
+        const update = (key: keyof ThemeOverrides, value: any) => {
+            (this.config.theme_overrides as any)[key] = value;
+            this.applyThemeOverrides();
+            this.saveConfig();
+        };
+
+        const bindColor = (id: string, key: keyof ThemeOverrides) => {
+            document.getElementById(id)?.addEventListener('input', (e) => {
+                update(key, (e.target as HTMLInputElement).value);
+            });
+        };
+        const bindSlider = (id: string, valId: string, key: keyof ThemeOverrides, suffix: string) => {
+            document.getElementById(id)?.addEventListener('input', (e) => {
+                const v = parseInt((e.target as HTMLInputElement).value);
+                const lbl = document.getElementById(valId);
+                if (lbl) lbl.textContent = v + suffix;
+                update(key, v);
+            });
+        };
+
+        bindColor('tc-bg-deep',      'bg_deep');
+        bindColor('tc-bg-sidebar',   'bg_sidebar');
+        bindColor('tc-bg-input',     'bg_input');
+        bindColor('tc-bg-surface',   'bg_surface_color');
+        bindColor('tc-border-color', 'border_color');
+        bindColor('tc-accent-cyan',  'accent_cyan');
+        bindColor('tc-accent-blue',  'accent_blue');
+        bindColor('tc-text-primary', 'text_primary');
+        bindColor('tc-text-muted',   'text_muted');
+
+        bindSlider('tc-surface-opacity', 'tc-surface-opacity-val', 'surface_opacity', '%');
+        bindSlider('tc-border-opacity',  'tc-border-opacity-val',  'border_opacity',  '%');
+        bindSlider('tc-font-size',       'tc-font-size-val',       'font_size',       'px');
+
+        document.getElementById('tc-font-family')?.addEventListener('change', (e) => {
+            update('font_family', (e.target as HTMLSelectElement).value || undefined);
+        });
+
+        document.getElementById('btn-theme-reset')?.addEventListener('click', () => {
+            this.config.theme_overrides = {};
+            this.applyTheme();
+            this.syncCustomizerUI();
+            this.saveConfig();
+        });
+
+        document.getElementById('btn-theme-save')?.addEventListener('click', () => {
+            const nameEl = document.getElementById('custom-theme-name') as HTMLInputElement | null;
+            const name = nameEl?.value.trim();
+            if (!name) { alert('Enter a theme name first.'); return; }
+            if (!this.config.custom_themes) this.config.custom_themes = {};
+            this.config.custom_themes[name] = { ...this.config.theme_overrides };
+            this.saveConfig();
+            this.syncCustomizerUI();
+            if (nameEl) nameEl.value = '';
+        });
+
+        document.getElementById('btn-theme-load')?.addEventListener('click', () => {
+            const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
+            const name = sel?.value;
+            if (!name || !this.config.custom_themes?.[name]) return;
+            this.config.theme_overrides = { ...this.config.custom_themes[name] };
+            this.applyThemeOverrides();
+            this.syncCustomizerUI();
+            this.saveConfig();
+        });
+
+        document.getElementById('btn-theme-delete')?.addEventListener('click', () => {
+            const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
+            const name = sel?.value;
+            if (!name || !this.config.custom_themes?.[name]) return;
+            if (!confirm(`Delete theme "${name}"?`)) return;
+            delete this.config.custom_themes[name];
+            this.saveConfig();
+            this.syncCustomizerUI();
+        });
     }
 
     private setGauge(arcId: string, pct: number) {
@@ -584,81 +812,8 @@ class App {
             } catch (_) {}
         };
         setTimeout(() => { pollStats(); setInterval(pollStats, 2000); }, 1800);
-        this.renderRoadmap();
         this.refreshModsList();
         this.setupModsActions();
-    }
-
-    private renderRoadmap(openCats?: Set<string>) {
-        import("./plans.js").then(({ PLANS }) => {
-            const container = document.getElementById("roadmap-list");
-            const pctEl    = document.getElementById("dash-roadmap-progress");
-            if (!container) return;
-
-            // Preserve which categories are currently open across re-renders
-            const currentOpen = openCats ?? new Set(
-                [...container.querySelectorAll<HTMLElement>(".roadmap-category.open")]
-                    .map(el => el.dataset["id"] ?? "")
-            );
-
-            const DONE_KEY = "mabi_roadmap_done";
-            const saved: Record<string, boolean> = JSON.parse(localStorage.getItem(DONE_KEY) || "{}");
-
-            let totalAll = 0, doneAll = 0;
-            container.innerHTML = "";
-
-            for (const cat of PLANS) {
-                const total = cat.tasks.length;
-                const done  = cat.tasks.filter(t => saved[t.id] ?? t.done).length;
-                totalAll += total; doneAll += done;
-                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
-                const catEl = document.createElement("div");
-                catEl.className = "roadmap-category" + (currentOpen.has(cat.id) ? " open" : "");
-                catEl.dataset["id"] = cat.id;
-
-                const headerEl = document.createElement("div");
-                headerEl.className = "roadmap-cat-header";
-                headerEl.innerHTML = `
-                    <span class="roadmap-cat-icon">${cat.icon}</span>
-                    <span class="roadmap-cat-name">${cat.title}</span>
-                    <div class="roadmap-cat-bar"><div class="roadmap-cat-fill" style="width:${pct}%"></div></div>
-                    <span class="roadmap-cat-pct">${pct}%</span>
-                    <span class="roadmap-cat-chevron">▶</span>`;
-                headerEl.addEventListener("click", () => catEl.classList.toggle("open"));
-
-                const tasksEl = document.createElement("div");
-                tasksEl.className = "roadmap-tasks";
-                for (const task of cat.tasks) {
-                    const isDone = saved[task.id] ?? task.done;
-                    const taskEl = document.createElement("div");
-                    taskEl.className = `roadmap-task${isDone ? " done" : ""}`;
-                    const prioClass = `prio-${task.priority}`;
-                    taskEl.innerHTML = `
-                        <input type="checkbox" id="rt-${task.id}" ${isDone ? "checked" : ""}>
-                        <label for="rt-${task.id}">${task.title}</label>
-                        <span class="${prioClass}">${task.priority.toUpperCase()}</span>`;
-                    const cb = taskEl.querySelector("input") as HTMLInputElement;
-                    cb.addEventListener("change", () => {
-                        saved[task.id] = cb.checked;
-                        localStorage.setItem(DONE_KEY, JSON.stringify(saved));
-                        const open = new Set(
-                            [...container.querySelectorAll<HTMLElement>(".roadmap-category.open")]
-                                .map(el => el.dataset["id"] ?? "")
-                        );
-                        this.renderRoadmap(open);
-                    });
-                    tasksEl.appendChild(taskEl);
-                }
-
-                catEl.appendChild(headerEl);
-                catEl.appendChild(tasksEl);
-                container.appendChild(catEl);
-            }
-
-            const overall = totalAll > 0 ? Math.round((doneAll / totalAll) * 100) : 0;
-            if (pctEl) pctEl.textContent = `${doneAll}/${totalAll} (${overall}%)`;
-        }).catch(() => {});
     }
 
     private async refreshModsList() {
@@ -748,21 +903,18 @@ class App {
         document.getElementById("btn-ini-to-mod")?.addEventListener("click", async () => {
             try {
                 const { open } = await import("@tauri-apps/plugin-dialog");
-                const iniPath = await open({ title: "Select uotiaralist.ini", filters: [{ name: "INI", extensions: ["ini"] }] });
-                if (!iniPath) return;
-                const iniStr = typeof iniPath === "string" ? iniPath : (iniPath as any).path ?? iniPath[0];
-                const itPath = await open({ title: "Select source uotiara .it archive", filters: [{ name: "Archive", extensions: ["it", "pack"] }] });
-                if (!itPath) return;
-                const itStr = typeof itPath === "string" ? itPath : (itPath as any).path ?? itPath[0];
-                const idStr = prompt("Enter mod IDs to include (comma-separated, e.g. 1,2,5):");
+                const nsiPath = await open({ title: "Select uotiara.nsi", filters: [{ name: "NSIS Script", extensions: ["nsi"] }] });
+                if (!nsiPath) return;
+                const nsiStr = typeof nsiPath === "string" ? nsiPath : (nsiPath as any).path ?? nsiPath[0];
+                const idStr = prompt("Enter MOD IDs to include (comma-separated, e.g. 85,86,288):");
                 if (!idStr) return;
                 const selectedIds = idStr.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-                const toml = await invoke("ini_to_mod", { iniPath: iniStr, itPath: itStr, selectedIds }) as string;
+                const toml = await invoke("nsi_to_mod", { nsiPath: nsiStr, selectedIds }) as string;
                 const dir = await invoke("get_mods_dir") as string;
-                const dest = dir + "\\from_ini.mod";
+                const dest = dir + "\\from_nsi.mod";
                 await writeTextFile(dest, toml);
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
-            } catch (err) { alert("ini_to_mod failed: " + err); }
+            } catch (err) { alert("nsi_to_mod failed: " + err); }
         });
     }
 
@@ -796,13 +948,19 @@ class App {
                 const folderPath = hoveredRow.dataset.path ?? "";
                 destFolder = folderPath ? folderPath.replace(/\\/g, "/").replace(/\/?$/, "/") : "";
             }
+            // Build candidate list for conflict checking
+            const candidates: Array<{localPath: string; destPath: string}> = [];
             for (const f of files) {
                 const localPath = (f as any).path as string | undefined;
                 if (!localPath) continue;
-                const destPath = destFolder + f.name;
-                this.vfsPending.push({ op: "add", dest: destPath, local_src: localPath });
-                this.renderVfsPending();
+                candidates.push({ localPath, destPath: destFolder + f.name });
             }
+            // Resolve conflicts (shows dialog if any file already exists in the archive)
+            const resolved = await this.resolveConflicts(candidates);
+            for (const r of resolved) {
+                this.vfsPending.push({ op: "add", dest: r.destPath, local_src: r.localPath });
+            }
+            if (resolved.length > 0) this.renderVfsPending();
         });
 
         // Right-click on tree items → context menu
@@ -882,9 +1040,20 @@ class App {
         document.getElementById("btn-browse-list")?.addEventListener("click", showToolbar);
     }
 
+    /** Fire-and-forget: persist vfsPending to <archive>.pending.json. */
+    private savePendingChanges() {
+        if (!this.currentArchive) return;
+        invoke("save_pending_changes", {
+            archive: this.currentArchive,
+            changes: this.vfsPending,
+        }).catch((e: unknown) => console.warn("[VFS] Could not persist pending changes:", e));
+    }
+
     private renderVfsPending() {
         const badge = document.getElementById("vfs-pending-badge");
         if (badge) badge.textContent = `${this.vfsPending.length} pending`;
+        // Persist to disk (fire-and-forget)
+        this.savePendingChanges();
         // Overlay tree items with pending-change decorations
         const tree = document.getElementById("file-tree")!;
         // Reset existing overlays
@@ -911,6 +1080,119 @@ class App {
                 tree.appendChild(row);
             }
         }
+    }
+
+    // ── VFS Conflict Resolution ──────────────────────────────────────────────────
+
+    /** Check candidates against the loaded archive entries and show a dialog for
+     *  each collision.  Returns only the items that should be added (with resolved
+     *  destination paths). */
+    private async resolveConflicts(
+        candidates: Array<{localPath: string; destPath: string}>
+    ): Promise<Array<{localPath: string; destPath: string}>> {
+        const result: Array<{localPath: string; destPath: string}> = [];
+
+        // Build lookup from currently loaded archive entries
+        const existingPaths = new Set(this.loadedEntries.map(e => e.name));
+
+        const conflicts: typeof candidates = [];
+        for (const c of candidates) {
+            if (existingPaths.has(c.destPath)) {
+                conflicts.push(c);
+            } else {
+                result.push(c);
+            }
+        }
+
+        if (conflicts.length === 0) return result;
+
+        let batchAction: "overwrite" | "skip" | null = null;
+
+        for (const conflict of conflicts) {
+            if (batchAction === "overwrite") {
+                result.push(conflict);
+                continue;
+            }
+            if (batchAction === "skip") {
+                continue;
+            }
+
+            const choice = await this.showConflictDialog(conflict.destPath, conflicts.length > 1);
+
+            if (choice.applyAll) {
+                if (choice.action === "overwrite") batchAction = "overwrite";
+                else if (choice.action === "skip") batchAction = "skip";
+            }
+
+            if (choice.action === "overwrite") {
+                result.push(conflict);
+            } else if (choice.action === "rename" && choice.newName) {
+                const folder = conflict.destPath.includes("/")
+                    ? conflict.destPath.slice(0, conflict.destPath.lastIndexOf("/") + 1)
+                    : "";
+                result.push({ localPath: conflict.localPath, destPath: folder + choice.newName });
+            }
+            // action === "skip" → omit from result
+        }
+
+        return result;
+    }
+
+    /** Show the conflict dialog for a single file and wait for the user's choice. */
+    private showConflictDialog(
+        destPath: string,
+        hasMore: boolean
+    ): Promise<{action: "overwrite" | "skip" | "rename"; newName?: string; applyAll: boolean}> {
+        return new Promise((resolve) => {
+            const ctrl = new AbortController();
+            const { signal } = ctrl;
+
+            const overlay      = document.getElementById("conflict-dialog")!;
+            const filenameEl   = document.getElementById("conflict-filename")!;
+            const applyAllRow  = document.getElementById("conflict-apply-all-row") as HTMLElement;
+            const applyAllCb   = document.getElementById("conflict-apply-all") as HTMLInputElement;
+            const renameInput  = document.getElementById("conflict-rename-input") as HTMLInputElement;
+            const btnOverwrite = document.getElementById("conflict-btn-overwrite")!;
+            const btnRename    = document.getElementById("conflict-btn-rename")!;
+            const btnSkip      = document.getElementById("conflict-btn-skip")!;
+
+            // Fill in the conflicting file path and pre-populate the rename input
+            filenameEl.textContent = destPath;
+            const basename = destPath.includes("/")
+                ? destPath.slice(destPath.lastIndexOf("/") + 1)
+                : destPath;
+            renameInput.value = basename;
+
+            // Show "Apply to all" only when there are multiple conflicts
+            applyAllRow.classList.toggle("hidden", !hasMore);
+            applyAllCb.checked = false;
+
+            overlay.classList.remove("hidden");
+            renameInput.focus();
+            renameInput.select();
+
+            const finish = (action: "overwrite" | "skip" | "rename", newName?: string) => {
+                ctrl.abort();
+                overlay.classList.add("hidden");
+                const applyAll = action !== "rename" && applyAllCb.checked;
+                resolve({ action, newName, applyAll });
+            };
+
+            btnOverwrite.addEventListener("click", () => finish("overwrite"), { signal });
+            btnSkip.addEventListener("click",      () => finish("skip"),      { signal });
+            btnRename.addEventListener("click", () => {
+                const newName = renameInput.value.trim();
+                finish("rename", newName || basename);
+            }, { signal });
+            renameInput.addEventListener("keydown", (e: KeyboardEvent) => {
+                if (e.key === "Enter") {
+                    const newName = renameInput.value.trim();
+                    finish("rename", newName || basename);
+                } else if (e.key === "Escape") {
+                    finish("skip");
+                }
+            }, { signal });
+        });
     }
 
     private async listArchive(archivePath: string) {
@@ -1295,6 +1577,7 @@ class App {
     private launcherProfiles: any[] = [];
     private activeProfileId: string | null = null;
     private profileEditorMode: "new" | "edit" | null = null;
+    private kananMods: Array<{ name: string; enabled: boolean }> = [];
 
     private setupLauncher() {
         // Restore session from localStorage (fallback when no profiles)
@@ -1380,6 +1663,30 @@ class App {
                 (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = dir as string;
             }
         });
+
+        // Kanan mods
+        const kananPathEl = document.getElementById("kanan-cfg-path") as HTMLInputElement;
+        if (this.config.kanan_cfg_path) {
+            kananPathEl.value = this.config.kanan_cfg_path;
+            this.loadKananMods(this.config.kanan_cfg_path);
+        }
+
+        document.getElementById("btn-kanan-browse")?.addEventListener("click", async () => {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const file = await open({
+                filters: [{ name: "Loader Config", extensions: ["cfg"] }],
+                title: "Select Kanan Loader.cfg"
+            });
+            if (file && !Array.isArray(file)) {
+                const p = file as string;
+                kananPathEl.value = p;
+                this.config.kanan_cfg_path = p;
+                await invoke("set_config", { config: this.config });
+                await this.loadKananMods(p);
+            }
+        });
+
+        document.getElementById("btn-kanan-save")?.addEventListener("click", () => this.saveKananMods());
     }
 
     private async loadProfiles() {
@@ -1666,6 +1973,75 @@ class App {
         }
     }
 
+    private async loadKananMods(path: string) {
+        const listEl = document.getElementById("kanan-mods-list")!;
+        const saveBtn = document.getElementById("btn-kanan-save")!;
+        const statusEl = document.getElementById("kanan-status")!;
+        if (!listEl) return;
+
+        try {
+            this.kananMods = await invoke("read_kanan_cfg", { path }) as Array<{ name: string; enabled: boolean }>;
+            listEl.innerHTML = "";
+            if (this.kananMods.length === 0) {
+                listEl.innerHTML = "<div style='opacity:.6;font-size:12px;padding:6px 0;'>No mods found in Loader.cfg</div>";
+                saveBtn?.classList.add("hidden");
+                return;
+            }
+            for (let i = 0; i < this.kananMods.length; i++) {
+                const mod = this.kananMods[i];
+                const row = document.createElement("div");
+                row.className = "sys-stat";
+                row.style.cssText = "padding:4px 0;min-height:unset;";
+                const lbl = document.createElement("span");
+                lbl.style.cssText = "flex:1;font-size:12px;";
+                lbl.textContent = mod.name;
+                const sw = document.createElement("label");
+                sw.className = "switch";
+                const cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.checked = mod.enabled;
+                cb.dataset.kananIdx = String(i);
+                cb.addEventListener("change", (e) => {
+                    const idx = parseInt((e.target as HTMLInputElement).dataset.kananIdx ?? "0");
+                    this.kananMods[idx].enabled = (e.target as HTMLInputElement).checked;
+                });
+                const slider = document.createElement("span");
+                slider.className = "slider";
+                sw.appendChild(cb);
+                sw.appendChild(slider);
+                row.appendChild(lbl);
+                row.appendChild(sw);
+                listEl.appendChild(row);
+            }
+            saveBtn?.classList.remove("hidden");
+            statusEl?.classList.add("hidden");
+        } catch (e: any) {
+            listEl.innerHTML = `<div style='color:var(--accent-warn,#f90);font-size:12px;padding:6px 0;'>Failed to read: ${e}</div>`;
+            saveBtn?.classList.add("hidden");
+        }
+    }
+
+    private async saveKananMods() {
+        const path = this.config.kanan_cfg_path;
+        if (!path) return;
+        const statusEl = document.getElementById("kanan-status")!;
+        try {
+            await invoke("write_kanan_cfg", { path, mods: this.kananMods });
+            if (statusEl) {
+                statusEl.textContent = "Saved!";
+                statusEl.style.color = "var(--green, #4ade80)";
+                statusEl.classList.remove("hidden");
+                setTimeout(() => statusEl.classList.add("hidden"), 2000);
+            }
+        } catch (e: any) {
+            if (statusEl) {
+                statusEl.textContent = `Save failed: ${e}`;
+                statusEl.style.color = "var(--accent-warn,#f90)";
+                statusEl.classList.remove("hidden");
+            }
+        }
+    }
+
     private addActivity(message: string) {
         const list = document.getElementById("activity-list");
         if (!list) return;
@@ -1689,6 +2065,17 @@ class App {
 
                 document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
                 document.getElementById(tab)?.classList.add("active");
+            });
+        });
+
+        // Settings sub-tab switching
+        document.querySelectorAll(".settings-stab").forEach(btn => {
+            btn.addEventListener("click", () => {
+                document.querySelectorAll(".settings-stab").forEach(b => b.classList.remove("active"));
+                document.querySelectorAll(".settings-stab-content").forEach(c => c.classList.remove("active"));
+                btn.classList.add("active");
+                const stab = btn.getAttribute("data-stab");
+                if (stab) document.getElementById("stab-" + stab)?.classList.add("active");
             });
         });
 
@@ -2129,7 +2516,17 @@ class App {
             this.updateProgress(100, "");
             setTimeout(() => this.updateProgress(0, ""), 600);
             this.renderTree();
-            this.vfsPending = [];
+            // Restore any deferred pending changes saved from a previous session
+            try {
+                const saved = await invoke("load_pending_changes", { archive: this.currentArchive }) as Array<{op: string; [k: string]: string}>;
+                this.vfsPending = saved;
+                if (saved.length > 0) {
+                    this.log(`[VFS] Restored ${saved.length} deferred pending change(s).`, "info");
+                }
+            } catch (_e) {
+                this.vfsPending = [];
+            }
+            this.renderVfsPending();
             document.getElementById("vfs-toolbar")?.classList.remove("hidden");
             this.log(this.t("filesLoaded", [this.loadedEntries.length.toString()]), "success");
             // Fill in the discovered salt so the user can see what key was used
@@ -2432,6 +2829,171 @@ class App {
         });
     }
 
+    // --- MML viewer & player ---
+
+    private mmlHighlight(text: string): string {
+        const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        // Replace special chars before span injection so escaping works on raw text
+        const safe = esc(text);
+        // Match MML tokens in order: commands (T/O/L/V + digits), notes (A-G + optional sharp/len/dot),
+        // rests (R + optional len/dot), octave shifts (<>), channel separator (,)
+        const highlighted = safe.replace(
+            /([TOLV]\d+|[A-G][+#\-]?\d*\.?|R\d*\.?|&lt;|&gt;|,)/gi,
+            (m) => {
+                const ch = m[0].toUpperCase();
+                if ("TOLV".includes(ch))
+                    return `<span style="color:var(--accent-cyan,#4dd9e4)">${m}</span>`;
+                if ("ABCDEFG".includes(ch))
+                    return `<span style="color:#ffd700">${m}</span>`;
+                if (ch === "R")
+                    return `<span style="color:var(--text-muted,#888)">${m}</span>`;
+                if (m === "," || m === "&lt;" || m === "&gt;")
+                    return `<span style="color:var(--accent-cyan,#4dd9e4)">${m}</span>`;
+                return m;
+            }
+        );
+        return `<pre style="margin:0;padding:8px 10px;flex:1;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7;box-sizing:border-box">${highlighted}</pre>`;
+    }
+
+    private mmlPlayerHtml(): string {
+        return `<div id="mml-player" style="flex-shrink:0;padding:5px 8px;border-top:1px solid var(--border,#333);display:flex;gap:8px;align-items:center">
+            <button id="mml-play-btn" style="padding:3px 13px;background:var(--accent-cyan,#4dd9e4);color:#000;border:none;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600">&#9654; Play</button>
+            <button id="mml-stop-btn" style="padding:3px 13px;background:var(--bg2,#1e2028);color:var(--text,#ccc);border:1px solid var(--border,#333);border-radius:3px;cursor:pointer;font-size:12px" disabled>&#9632; Stop</button>
+            <span id="mml-status" style="font-size:11px;color:var(--text-muted,#888)"></span>
+        </div>`;
+    }
+
+    private initMmlPlayer(mml: string): void {
+        const playBtn  = document.getElementById("mml-play-btn")  as HTMLButtonElement | null;
+        const stopBtn  = document.getElementById("mml-stop-btn")  as HTMLButtonElement | null;
+        const statusEl = document.getElementById("mml-status")    as HTMLElement | null;
+        if (!playBtn || !stopBtn) return;
+
+        const doStop = () => {
+            this._mmlStopFlag = true;
+            if (this._mmlAudioCtx) {
+                this._mmlAudioCtx.close().catch(() => {});
+                this._mmlAudioCtx = null;
+            }
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            if (statusEl) statusEl.textContent = "Stopped";
+        };
+
+        stopBtn.onclick = doStop;
+
+        playBtn.onclick = () => {
+            doStop();
+            this._mmlStopFlag = false;
+            playBtn.disabled = true;
+            stopBtn.disabled = false;
+            if (statusEl) statusEl.textContent = "Playing…";
+
+            // Use only the first channel (before the first comma)
+            const channel = mml.split(",")[0].replace(/\s+/g, "").toUpperCase();
+            const events = this.parseMmlChannel(channel);
+            if (events.length === 0) {
+                if (statusEl) statusEl.textContent = "No notes found";
+                playBtn.disabled = false;
+                stopBtn.disabled = true;
+                return;
+            }
+
+            const ctx = new AudioContext();
+            this._mmlAudioCtx = ctx;
+            const master = ctx.createGain();
+            master.gain.value = 0.4;
+            master.connect(ctx.destination);
+
+            let t = ctx.currentTime + 0.05;
+            for (const ev of events) {
+                if (ev.freq > 0) {
+                    const osc  = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(master);
+                    osc.type = "sine";
+                    osc.frequency.value = ev.freq;
+                    const vol = ev.volume * 0.9 + 0.1;
+                    gain.gain.setValueAtTime(vol, t);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, t + ev.dur * 0.88);
+                    osc.start(t);
+                    osc.stop(t + ev.dur);
+                }
+                t += ev.dur;
+            }
+
+            const totalMs = (t - ctx.currentTime) * 1000 + 150;
+            setTimeout(() => {
+                if (!this._mmlStopFlag && statusEl) statusEl.textContent = "Done";
+                if (!this._mmlStopFlag) {
+                    playBtn.disabled = false;
+                    stopBtn.disabled = true;
+                    this._mmlAudioCtx = null;
+                }
+            }, totalMs);
+        };
+    }
+
+    private parseMmlChannel(mml: string): Array<{ freq: number; dur: number; volume: number }> {
+        // semitone offset from C for each note letter
+        const semi: Record<string, number> = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+        let tempo  = 120;
+        let octave = 4;
+        let defLen = 4;     // quarter note
+        let volume = 8;     // 0-15
+
+        const events: Array<{ freq: number; dur: number; volume: number }> = [];
+        let i = 0;
+
+        const readNum = (): number | null => {
+            let s = "";
+            while (i < mml.length && mml[i] >= "0" && mml[i] <= "9") s += mml[i++];
+            return s ? parseInt(s, 10) : null;
+        };
+
+        const noteSec = (len: number, dot: boolean) => {
+            const base = (60 / tempo) * 4 / len;
+            return dot ? base * 1.5 : base;
+        };
+
+        while (i < mml.length) {
+            const ch = mml[i];
+
+            if (ch === "T") {
+                i++; const n = readNum(); if (n !== null && n > 0) tempo = n;
+            } else if (ch === "O") {
+                i++; const n = readNum(); if (n !== null) octave = Math.min(8, Math.max(1, n));
+            } else if (ch === "L") {
+                i++; const n = readNum(); if (n !== null && n > 0) defLen = n;
+            } else if (ch === "V") {
+                i++; const n = readNum(); if (n !== null) volume = Math.min(15, Math.max(0, n));
+            } else if (ch === "<") {
+                octave = Math.max(1, octave - 1); i++;
+            } else if (ch === ">") {
+                octave = Math.min(8, octave + 1); i++;
+            } else if (ch in semi) {
+                i++;
+                let s = semi[ch];
+                if (i < mml.length && (mml[i] === "+" || mml[i] === "#")) { s++; i++; }
+                else if (i < mml.length && mml[i] === "-") { s--; i++; }
+                const len = readNum() ?? defLen;
+                const dot = i < mml.length && mml[i] === "."; if (dot) i++;
+                const freq = 261.6256 * Math.pow(2, (s + (octave - 4) * 12) / 12);
+                events.push({ freq, dur: noteSec(len, dot), volume: volume / 15 });
+            } else if (ch === "R") {
+                i++;
+                const len = readNum() ?? defLen;
+                const dot = i < mml.length && mml[i] === "."; if (dot) i++;
+                events.push({ freq: 0, dur: noteSec(len, dot), volume: 0 });
+            } else {
+                i++; // skip unknown chars (&, ;, N, etc.)
+            }
+        }
+
+        return events;
+    }
+
     private async fetchPreview(entry: AggregateEntry): Promise<PreviewData> {
         const key = this.previewKey(entry);
         const cached = this.previewCache.get(key);
@@ -2459,6 +3021,8 @@ class App {
         const threed = document.getElementById("preview-3d")!;
 
         if (this.pmgViewer) { this.pmgViewer.dispose(); this.pmgViewer = undefined; }
+        this._mmlStopFlag = true;
+        if (this._mmlAudioCtx) { this._mmlAudioCtx.close().catch(() => {}); this._mmlAudioCtx = null; }
         [visual, hex, details, audio, threed].forEach(el => el.classList.remove("active"));
 
         let activeContainer = "preview-visual";
@@ -2515,6 +3079,60 @@ class App {
             }
             visual.textContent = this.t("preview_no_visual");
             visual.className = "preview-tab-content";
+        } else if (prev.file_type === "rgn" || ext === "rgn") {
+            // .rgn terrain heightmap canvas renderer
+            visual.className = "preview-tab-content active";
+            visual.innerHTML = `<div style="padding:12px;box-sizing:border-box;height:100%;overflow:auto;display:flex;flex-direction:column;align-items:center;gap:8px">
+                <canvas id="rgn-canvas" style="border:1px solid var(--border,#333);image-rendering:pixelated;max-width:100%"></canvas>
+                <div id="rgn-info" style="font-size:11px;color:var(--text-muted,#888);font-family:monospace;text-align:center;padding:0 8px"></div>
+            </div>`;
+            const rgnCanvas = document.getElementById("rgn-canvas") as HTMLCanvasElement;
+            const rgnInfo   = document.getElementById("rgn-info")!;
+
+            if (prev.rgn_data) {
+                const { width, height, heights, version, region_id, area_count } = prev.rgn_data;
+
+                // Scale down to max 512×512 for display
+                const MAX_DIM = 512;
+                const scale = Math.max(1, Math.ceil(Math.max(width, height) / MAX_DIM));
+                const dw = Math.ceil(width / scale);
+                const dh = Math.ceil(height / scale);
+
+                rgnCanvas.width  = dw;
+                rgnCanvas.height = dh;
+
+                const ctx = rgnCanvas.getContext("2d")!;
+                const img = ctx.createImageData(dw, dh);
+                const d   = img.data;
+
+                for (let py = 0; py < dh; py++) {
+                    for (let px = 0; px < dw; px++) {
+                        // Sample from source at nearest pixel
+                        const sx = Math.min(Math.round(px * scale), width - 1);
+                        const sy = Math.min(Math.round(py * scale), height - 1);
+                        const v  = Math.round(heights[sy * width + sx] * 255);
+                        const i  = (py * dw + px) * 4;
+                        d[i] = v; d[i+1] = v; d[i+2] = v; d[i+3] = 255;
+                    }
+                }
+                ctx.putImageData(img, 0, 0);
+
+                this.log(`[RGN] ${prev.name}  ·  v${version}  ·  region ${region_id}  ·  ${area_count} areas  ·  ${width}×${height} px`);
+                rgnInfo.textContent = `v${version}  ·  region ${region_id}  ·  ${area_count} area${area_count !== 1 ? "s" : ""}  ·  ${width}×${height} px (displayed ${dw}×${dh})`;
+            } else {
+                // Parse failed or file is too small – show a placeholder
+                rgnCanvas.width  = 256;
+                rgnCanvas.height = 256;
+                const ctx = rgnCanvas.getContext("2d")!;
+                ctx.fillStyle = "#0f172a";
+                ctx.fillRect(0, 0, 256, 256);
+                ctx.fillStyle = "#555";
+                ctx.font = "13px monospace";
+                ctx.textAlign = "center";
+                ctx.fillText(prev.content_text || "RGN parse failed", 128, 128);
+                rgnInfo.textContent = prev.content_text || "Could not parse .rgn – see Hex View";
+                this.log(`[RGN] ${prev.name}: ${prev.content_text || "parse failed"}`, "warn");
+            }
         } else if (ext === "ttf" || ext === "otf" || ext === "woff" || ext === "woff2") {
             const fontFamily = `PreviewFont_${Date.now()}`;
             const buffer = new Uint8Array(prev.raw_bytes).buffer;
@@ -2535,8 +3153,255 @@ class App {
                 hex.classList.add("active");
                 activeContainer = "preview-hex";
             }
+        } else if (ext === "area") {
+            visual.className = "preview-tab-content active";
+            visual.innerHTML = `<div style="padding:12px;box-sizing:border-box;height:100%;overflow:auto;display:flex;flex-direction:column;align-items:center;gap:8px">
+                <canvas id="area-canvas" width="512" height="512" style="border:1px solid var(--border,#333);image-rendering:pixelated;max-width:100%;background:#0f172a"></canvas>
+                <div id="area-info" style="font-size:11px;color:var(--text-muted,#888);font-family:monospace;text-align:center;padding:0 8px"></div>
+            </div>`;
+            const areaCanvas = document.getElementById("area-canvas") as HTMLCanvasElement;
+            const areaInfo   = document.getElementById("area-info")!;
+            const ctx = areaCanvas.getContext("2d")!;
+            // Background
+            ctx.fillStyle = "#0f172a";
+            ctx.fillRect(0, 0, 512, 512);
+            if (prev.raw_bytes.length === 0) {
+                ctx.fillStyle = "#555";
+                ctx.font = "13px monospace";
+                ctx.textAlign = "center";
+                ctx.fillText("Empty .area file", 256, 256);
+                areaInfo.textContent = "0 bytes";
+            } else {
+                type AreaProp = { id: number; x: number; y: number; z: number };
+                type AreaResult = { props: AreaProp[]; format: string };
+                let areaResult: AreaResult | null = null;
+                try {
+                    areaResult = await invoke("parse_area", { bytes: prev.raw_bytes }) as AreaResult;
+                } catch (_) { /* parse_area returns Err → caught below */ }
+
+                if (areaResult && areaResult.props.length > 0) {
+                    const props = areaResult.props;
+                    // Find bounding box using X and Z (horizontal axes in Mabinogi)
+                    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+                    for (const p of props) {
+                        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+                        if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+                    }
+                    const pad   = 20;
+                    const W     = 512 - pad * 2;
+                    const H     = 512 - pad * 2;
+                    const rangeX = maxX - minX || 1;
+                    const rangeZ = maxZ - minZ || 1;
+                    // Prop color by ID century (IDs in same hundred share a color — rough type grouping)
+                    const PALETTE = ["#4ade80","#60a5fa","#fbbf24","#f87171","#c084fc","#34d399","#fb923c","#94a3b8"];
+                    for (const p of props) {
+                        const cx = Math.round(pad + ((p.x - minX) / rangeX) * W);
+                        const cy = Math.round(pad + ((p.z - minZ) / rangeZ) * H);
+                        ctx.fillStyle = PALETTE[Math.floor(p.id / 100) % PALETTE.length];
+                        ctx.fillRect(cx - 1, cy - 1, 2, 2);
+                    }
+                    // Axis labels
+                    ctx.fillStyle = "rgba(255,255,255,0.25)";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "left";
+                    ctx.fillText(`X ${minX.toFixed(0)}`, 2, 510);
+                    ctx.textAlign = "right";
+                    ctx.fillText(`${maxX.toFixed(0)}`, 510, 510);
+                    ctx.textAlign = "left";
+                    ctx.fillText(`Z ${minZ.toFixed(0)}`, 2, 12);
+                    ctx.textAlign = "right";
+                    ctx.fillText(`${maxZ.toFixed(0)}`, 510, 12);
+                    areaInfo.textContent = `${props.length.toLocaleString()} props  ·  X ${minX.toFixed(0)}–${maxX.toFixed(0)}  Z ${minZ.toFixed(0)}–${maxZ.toFixed(0)}  ·  format: ${areaResult.format}`;
+                    if (prev.truncated) {
+                        areaInfo.textContent += `  ·  (first ${(prev.raw_bytes.length/1024).toFixed(0)} KB of ${(prev.full_preview_size/1024).toFixed(0)} KB)`;
+                    }
+                } else {
+                    // Fallback: unknown format — show message + hex dump of first 32 bytes
+                    ctx.fillStyle = "#4a5568";
+                    ctx.font = "14px monospace";
+                    ctx.textAlign = "center";
+                    ctx.fillText("Unknown .area format", 256, 230);
+                    const hexPeek = Array.from(prev.raw_bytes.slice(0, 32))
+                        .map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+                    ctx.fillStyle = "#718096";
+                    ctx.font = "10px monospace";
+                    const words = hexPeek.match(/.{1,24}/g) || [];
+                    words.forEach((w, i) => ctx.fillText(w, 256, 258 + i * 14));
+                    areaInfo.textContent = `${prev.raw_bytes.length.toLocaleString()} bytes  ·  no props parsed`;
+                }
+            }
+        } else if (prev.file_type === "set") {
+            visual.className = "preview-tab-content active";
+            let headerHtml = "";
+            try {
+                const h = await invoke<{ magic: string; version: number; bone_count: number; frame_count: number; duration_ms: number; is_xml: boolean }>(
+                    "parse_set_header", { bytes: prev.raw_bytes }
+                );
+                if (h.is_xml) {
+                    // XML-format .set: decode bytes as text and show with highlighting
+                    const xmlText = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(prev.raw_bytes));
+                    visual.className = "preview-tab-content active xml-view";
+                    visual.innerHTML = this.xmlHighlight(xmlText);
+                    headerHtml = ""; // handled above
+                } else {
+                    headerHtml = `
+                        <p style="margin:0 0 10px;color:var(--accent-cyan,#00d4ff);font-weight:600">
+                            Animation: ${h.frame_count} frames, ${h.bone_count} bones, ${h.duration_ms}&thinsp;ms duration
+                        </p>
+                        <table class="details-table" style="margin-bottom:18px"><tbody>
+                            <tr><th>Magic</th><td class="mono">${h.magic}</td></tr>
+                            <tr><th>Version</th><td>${h.version}</td></tr>
+                            <tr><th>Bone count</th><td>${h.bone_count}</td></tr>
+                            <tr><th>Frame count</th><td>${h.frame_count}</td></tr>
+                            <tr><th>Duration</th><td>${h.duration_ms} ms</td></tr>
+                        </tbody></table>`;
+                }
+            } catch (_) {
+                headerHtml = `<p style="color:var(--text-muted,#718096);margin:0 0 12px">Unknown .set format</p>`;
+            }
+            if (headerHtml) {
+                // Binary .set: show header table + hex dump of first 128 bytes
+                const hexBytes = prev.raw_bytes.slice(0, 128);
+                const hexStr = hexBytes.map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+                visual.innerHTML = `<div style="padding:16px;font-family:monospace;overflow:auto;height:100%;box-sizing:border-box">
+                    <div style="font-size:11px;opacity:0.5;margin-bottom:14px">${prev.name} &mdash; ${prev.full_preview_size.toLocaleString()} bytes</div>
+                    ${headerHtml}
+                    <div style="font-size:10px;opacity:0.5;margin-bottom:6px">First ${Math.min(128, prev.raw_bytes.length)} bytes (hex):</div>
+                    <pre style="white-space:pre-wrap;font-size:11px;line-height:1.7;word-break:break-all;opacity:0.75;margin:0">${hexStr}</pre>
+                </div>`;
+            }
+        } else if (ext === "anievent") {
+            visual.className = "preview-tab-content active";
+            visual.innerHTML = `<div style="padding:12px;box-sizing:border-box;height:100%;overflow:auto;display:flex;flex-direction:column;gap:8px">
+                <canvas id="anievent-canvas" width="512" height="80" style="border:1px solid var(--border,#333);max-width:100%;background:#0f172a;display:block"></canvas>
+                <div id="anievent-legend" style="font-size:11px;color:var(--text-muted,#888);font-family:monospace;line-height:1.6"></div>
+                <div id="anievent-info" style="font-size:11px;color:var(--text-muted,#888);font-family:monospace"></div>
+                <div id="anievent-table-wrap" style="overflow:auto;flex:1;min-height:0"></div>
+            </div>`;
+            const aniCanvas = document.getElementById("anievent-canvas") as HTMLCanvasElement;
+            const aniLegend = document.getElementById("anievent-legend")!;
+            const aniInfo   = document.getElementById("anievent-info")!;
+            const aniTable  = document.getElementById("anievent-table-wrap")!;
+            const actx = aniCanvas.getContext("2d")!;
+            actx.fillStyle = "#0f172a";
+            actx.fillRect(0, 0, 512, 80);
+            if (prev.raw_bytes.length === 0) {
+                actx.fillStyle = "#4a5568";
+                actx.font = "13px monospace";
+                actx.textAlign = "center";
+                actx.fillText("Empty .anievent file", 256, 45);
+                aniInfo.textContent = "0 bytes";
+            } else {
+                type AniEvt = { frame: number; event_type: string; anim_name: string; params: string };
+                type AnieventResult = { set_name: string; animation_count: number; event_count: number; events: AniEvt[] };
+                let aniResult: AnieventResult | null = null;
+                try {
+                    aniResult = await invoke("parse_anievent", { bytes: prev.raw_bytes }) as AnieventResult;
+                } catch (_) { /* parse_anievent returned Err */ }
+
+                if (aniResult && aniResult.events.length > 0) {
+                    const evts = aniResult.events;
+                    const maxFrame = evts.reduce((m, e) => Math.max(m, e.frame), 0) || 1;
+
+                    const TYPE_COLORS: Record<string, string> = {
+                        sound: "#60a5fa", widesound: "#3b82f6",
+                        effect: "#a78bfa", effectoff: "#7c3aed", skilleffect: "#c084fc",
+                        hit: "#f87171", blowaway: "#ef4444",
+                        face: "#4ade80", hand: "#86efac",
+                        footstep: "#fbbf24", lookat: "#fb923c",
+                        jump: "#f9a8d4", vibrate: "#e2e8f0",
+                        quake: "#94a3b8", myquake: "#94a3b8",
+                        equipment: "#34d399", linkframework: "#2dd4bf",
+                        generic: "#94a3b8", say: "#fdba74",
+                        changedir: "#a3e635", changealpha: "#67e8f9",
+                    };
+                    const getAniColor = (t: string) => TYPE_COLORS[t.toLowerCase()] ?? "#94a3b8";
+
+                    // Draw timeline axis
+                    const PAD = 16, CW = 512, CH = 80;
+                    const W = CW - PAD * 2;
+                    const Y_TOP = 14, Y_BOT = CH - 14, Y_MID = (Y_TOP + Y_BOT) / 2;
+                    actx.strokeStyle = "#334155";
+                    actx.lineWidth = 1;
+                    actx.beginPath();
+                    actx.moveTo(PAD, Y_MID);
+                    actx.lineTo(PAD + W, Y_MID);
+                    actx.stroke();
+
+                    // Draw event ticks
+                    for (const ev of evts) {
+                        const x = Math.round(PAD + (ev.frame / maxFrame) * W);
+                        actx.strokeStyle = getAniColor(ev.event_type);
+                        actx.lineWidth = 1.5;
+                        actx.beginPath();
+                        actx.moveTo(x, Y_TOP + 2);
+                        actx.lineTo(x, Y_BOT - 2);
+                        actx.stroke();
+                    }
+
+                    // Frame labels
+                    actx.fillStyle = "rgba(255,255,255,0.3)";
+                    actx.font = "10px monospace";
+                    actx.textAlign = "left";
+                    actx.fillText("0", PAD, CH - 2);
+                    actx.textAlign = "right";
+                    actx.fillText(String(maxFrame), PAD + W, CH - 2);
+
+                    // Legend
+                    const seenTypes = [...new Set(evts.map(e => e.event_type.toLowerCase()))].slice(0, 12);
+                    aniLegend.innerHTML = seenTypes.map(t =>
+                        `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:10px">` +
+                        `<span style="display:inline-block;width:10px;height:3px;background:${getAniColor(t)};border-radius:1px"></span>${t}</span>`
+                    ).join("") + `&nbsp;&middot;&nbsp;<span style="opacity:0.45;font-size:10px">0=Sound 1=FX 2=Hit 3=Spawn (guessed)</span>`;
+
+                    // Info line
+                    const truncNote = prev.truncated
+                        ? `  ·  first ${Math.round(prev.raw_bytes.length / 1024)} KB of ${Math.round(prev.full_preview_size / 1024)} KB`
+                        : "";
+                    aniInfo.textContent = (aniResult.set_name ? `set: "${aniResult.set_name}"  ·  ` : "") +
+                        `${aniResult.animation_count} anim${aniResult.animation_count !== 1 ? "s" : ""}  ·  ` +
+                        `${aniResult.events.length} events  ·  frames 0–${maxFrame}${truncNote}`;
+
+                    // Table
+                    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                    aniTable.innerHTML = `<table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:11px">
+                        <thead><tr style="background:var(--bg-panel,#1e293b)">
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Frame</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Type</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Animation</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Params</th>
+                        </tr></thead>
+                        <tbody>${evts.slice(0, 500).map(e =>
+                            `<tr><td style="padding:2px 8px;color:var(--text,#e2e8f0)">${e.frame}</td>` +
+                            `<td style="padding:2px 8px;color:${getAniColor(e.event_type)}">${esc(e.event_type)}</td>` +
+                            `<td style="padding:2px 8px;color:var(--text-muted,#888)">${esc(e.anim_name)}</td>` +
+                            `<td style="padding:2px 8px;color:var(--text-muted,#888)">${esc(e.params)}</td></tr>`
+                        ).join("")}</tbody>
+                    </table>${evts.length > 500
+                        ? `<div style="padding:6px 8px;font-size:11px;color:var(--text-muted,#888);font-family:monospace">… ${evts.length - 500} more rows</div>`
+                        : ""}`;
+                } else {
+                    // Fallback: show message on canvas
+                    actx.fillStyle = "#4a5568";
+                    actx.font = "13px monospace";
+                    actx.textAlign = "center";
+                    actx.fillText("Could not parse .anievent", 256, 36);
+                    const hexPeek = Array.from(prev.raw_bytes.slice(0, 48))
+                        .map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+                    actx.fillStyle = "#64748b";
+                    actx.font = "9px monospace";
+                    (hexPeek.match(/.{1,24}/g) ?? []).forEach((w, i) => actx.fillText(w, 256, 52 + i * 12));
+                    aniInfo.textContent = `${prev.raw_bytes.length.toLocaleString()} bytes  ·  no events parsed`;
+                }
+            }
+        } else if (prev.file_type === "mml") {
+            visual.className = "preview-tab-content active";
+            visual.style.cssText = "display:flex;flex-direction:column;overflow:hidden;padding:0";
+            const mmlText = prev.content_text || "";
+            visual.innerHTML = this.mmlHighlight(mmlText) + this.mmlPlayerHtml();
+            this.initMmlPlayer(mmlText);
         } else if (prev.content_text) {
-            const isXml = ext === "xml" || ext === "set" || ext === "csh" || ext === "area" || ext === "rgn" || ext === "compiled";
+            const isXml = ext === "xml" || ext === "csh" || ext === "rgn" || ext === "compiled";
             if (isXml) {
                 visual.className = "preview-tab-content active xml-view";
                 visual.innerHTML = this.xmlHighlight(prev.content_text);
