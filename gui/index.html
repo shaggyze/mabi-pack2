@@ -521,12 +521,240 @@
       <div id="settings" class="tab-content">
         <!-- Sub-tab bar -->
         <div class="settings-subtabs">
-          <button class="settings-stab active" data-stab="themes">🎨 Themes</button>
-          <button class="settings-stab" data-stab="launcher">🚀 Launcher</button>
           <button class="settings-stab" data-stab="autostart">⏱ Autostart</button>
-          <button class="settings-stab" data-stab="fileassoc">🔗 File Assoc</button>
           <button class="settings-stab" data-stab="engine">⚙️ Engine</button>
+          <button class="settings-stab" data-stab="fileassoc">🔗 File Assoc</button>
+          <button class="settings-stab" data-stab="launcher">🚀 Launcher</button>
           <button class="settings-stab" data-stab="patcher">🛠 Patcher</button>
+          <button class="settings-stab active" data-stab="themes">🎨 Themes</button>
+        </div>
+
+        <!-- Autostart sub-tab -->
+        <div id="stab-autostart" class="settings-stab-content">
+          <div class="settings-section">
+            <div class="sys-stat">
+              <span id="label_startup_extract">Auto extract</span>
+              <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_startup_switch">Switch to List tab on open</span>
+              <label class="switch"><input type="checkbox" id="settings-startup-switch"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_list_auto_expand">Auto-expand folders when filtering</span>
+              <label class="switch"><input type="checkbox" id="settings-list-auto-expand"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_audio_autoplay">Autoplay audio previews</span>
+              <label class="switch"><input type="checkbox" id="settings-audio-autoplay"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_audio_loop">Loop audio previews</span>
+              <label class="switch"><input type="checkbox" id="settings-audio-loop"><span class="slider"></span></label>
+            </div>
+            <div class="settings-radio-row">
+              <span id="label_list_auto_select">Auto-select on filter</span>
+              <div class="radio-group" id="list-auto-select-group">
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="none" id="select-none"> <span id="label_select_none">None</span></label>
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="first" id="select-first"> <span id="label_select_first">First</span></label>
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="all" id="select-all"> <span id="label_select_all">All</span></label>
+              </div>
+            </div>
+            <div class="form-group" style="margin-top:12px;">
+              <label id="label_sequence_ignore_list" data-tooltip="tooltip_sequence_ignore_list">Sequence Ignore List (one filename per line):</label>
+              <textarea id="settings-sequence-ignore" rows="3" style="width:100%;resize:vertical;font-family:monospace;font-size:12px;" placeholder="uotiara_00001.it"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Engine sub-tab -->
+        <div id="stab-engine" class="settings-stab-content">
+          <div class="settings-section">
+            <div class="form-group">
+              <div style="display:flex; gap:12px;">
+                <div style="flex:1">
+                  <label id="label_region_key_read">Region Key (Read):</label>
+                  <input type="text" id="settings-region-key" placeholder="@6QeTuOaDgJlZcBm#9" data-tooltip="tooltip_region_key_read" />
+                </div>
+                <div style="flex:1">
+                  <label id="label_region_key_write">Region Key (Write):</label>
+                  <input type="text" id="settings-write-salt" placeholder="})wWb4?-sVGHNoPKpc" data-tooltip="tooltip_region_key_write" />
+                </div>
+              </div>
+            </div>
+            <div class="form-group">
+              <label id="label_log">Log Level:</label>
+              <select id="settings-log">
+                <option value="info">Info</option>
+                <option value="warn">Warning</option>
+                <option value="error">Error</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label id="label_pack_v1_version">Legacy .pack format version:</label>
+              <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
+            </div>
+            <div class="sys-stat" style="margin-top:10px;">
+              <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
+              <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
+            </div>
+            <div style="margin-top:10px;">
+              <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
+              <div style="display:flex;gap:6px;align-items:center;margin-top:3px;">
+                <input type="text" id="config-path-display" readonly style="flex:1;font-size:0.75em;opacity:0.8;cursor:default;" />
+                <button id="btn_open_config_dir" class="tab-btn" style="white-space:nowrap;padding:4px 8px;font-size:0.75em;" data-tooltip="tooltip_open_config_dir">Open Folder</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;">
+              <button id="btn_wipe" class="tab-btn" style="flex:1" data-tooltip="tooltip_wipe">Wipe Salt History</button>
+              <button id="btn_reset_config" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_reset_config">Reset Settings</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- File Assoc sub-tab -->
+        <div id="stab-fileassoc" class="settings-stab-content">
+          <div class="settings-section">
+            <h4 id="set_shell" style="margin:0 0 10px 0;">Shell &amp; Registry</h4>
+            <div class="sys-stat">
+              <span id="label_assoc_it">Associate .it files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-it"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_pack">Associate .pack files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-pack"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_settings_assoc_it_full">Add 'Full Sequence' to Explorer context menu</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-it-full"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_dds">Associate .dds files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_pmg">Associate .pmg files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-pmg"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_xmlcompiled">Associate .xml.compiled files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-xmlcompiled"><span class="slider"></span></label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;">
+              <button id="btn_admin" class="tab-btn" style="flex:1" data-tooltip="tooltip_admin">Apply Registry (Admin)</button>
+              <button id="btn_wipe_assoc" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_wipe_assoc">Wipe Registry Associations</button>
+            </div>
+
+            <h4 id="set_conversion" style="margin:16px 0 10px 0;border-top:1px solid var(--border-glass);padding-top:12px;">Conversion Defaults</h4>
+            <div class="sys-stat">
+              <span id="label_settings_auto_png">Auto-convert .dds → .png on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-png"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_settings_auto_dds">Auto-convert .png → .dds on import</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_settings_auto_features">Auto-convert features.xml.compiled → .xml on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-features"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_settings_auto_pmg">Auto-convert .pmg → .obj on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-pmg"><span class="slider"></span></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Launcher sub-tab -->
+        <div id="stab-launcher" class="settings-stab-content">
+          <div class="settings-section">
+            <!-- Profile manager (moved from Launcher tab) -->
+            <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
+              <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
+              <div class="profile-selector-row">
+                <select id="launcher-profile-select" class="form-input profile-select">
+                  <option value="">— No profiles saved —</option>
+                </select>
+                <button class="tab-btn" id="btn-profile-new" title="New profile">+</button>
+                <button class="tab-btn" id="btn-profile-delete" title="Delete profile">🗑</button>
+              </div>
+              <div id="launcher-profile-editor" class="hidden">
+                <div class="form-group">
+                  <label id="launcher-profile-name-label-text">Profile Name</label>
+                  <input type="text" id="launcher-profile-name" class="form-input" placeholder="Main Account" />
+                </div>
+                <div class="form-group">
+                  <label id="launcher-profile-client-label-text">Mabinogi Folder</label>
+                  <div class="input-row">
+                    <input type="text" id="launcher-profile-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
+                    <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
+                  </div>
+                </div>
+                <div class="form-group form-row">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="launcher-profile-autologin" />
+                    <span id="launcher-profile-autologin-text">Auto-login with saved session</span>
+                  </label>
+                </div>
+                <div class="form-actions">
+                  <button class="tab-btn primary" id="btn-profile-save">Save Profile</button>
+                  <button class="tab-btn" id="btn-profile-cancel">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <!-- Update check -->
+            <div class="sys-stat" style="margin-top:8px;">
+              <span id="launcher-check-update-label">Game Update Check</span>
+              <button class="tab-btn" id="btn-launcher-check-update" data-tooltip="tooltip_check_update">Check Now</button>
+            </div>
+            <div id="launcher-update-status" class="launcher-update-status hidden" style="margin-top:6px;"></div>
+
+            <!-- Kanan Mods -->
+            <div class="card" id="kanan-mods-card" style="margin-top:12px;">
+              <div class="card-header">Kanan Mods (LibLoader)</div>
+              <div class="form-group" style="margin-bottom:6px;">
+                <label style="font-size:12px;opacity:.75;">Loader.cfg path</label>
+                <div class="input-row">
+                  <input type="text" id="kanan-cfg-path" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata\Loader.cfg" readonly style="font-size:12px;" />
+                  <button class="tab-btn" id="btn-kanan-browse">BROWSE</button>
+                </div>
+              </div>
+              <div id="kanan-mods-list" style="margin-top:4px;max-height:220px;overflow-y:auto;"></div>
+              <div class="form-actions" style="margin-top:8px;">
+                <button class="tab-btn primary hidden" id="btn-kanan-save">Save Changes</button>
+              </div>
+              <div id="kanan-status" class="hidden" style="font-size:12px;margin-top:4px;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Patcher sub-tab -->
+        <div id="stab-patcher" class="settings-stab-content">
+          <div class="settings-section">
+  <h4>Game Installation</h4>
+  <div class="form-group" style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="patcher-game-path" class="form-input" style="flex:1" placeholder="C:\Nexon\Mabinogi">
+    <button class="tab-btn" id="btn-patcher-browse">Browse</button>
+  </div>
+  <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+    <button class="tab-btn" id="btn-patcher-verify">Verify Files</button>
+    <button class="tab-btn" id="btn-patcher-repair">Full Repair</button>
+    <button class="tab-btn" id="btn-patcher-update">Download Updates</button>
+  </div>
+  <div id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;white-space:pre-wrap"></div>
+
+  <h4 style="margin-top:16px;border-top:1px solid var(--border-glass);padding-top:12px">Custom Server (hyddwn)</h4>
+  <div class="sys-stat">
+    <span id="label_hyddwn_enable">Enable hyddwn proxy</span>
+    <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
+  </div>
+  <div class="form-group" id="patcher-hyddwn-row" style="display:none;margin-top:6px">
+    <label style="font-size:0.8rem;color:var(--text-muted)">Server URL</label>
+    <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
+  </div>
+          </div>
         </div>
 
         <!-- Themes sub-tab -->
@@ -654,234 +882,6 @@
           </div>
         </div>
 
-        <!-- Launcher sub-tab -->
-        <div id="stab-launcher" class="settings-stab-content">
-          <div class="settings-section">
-            <!-- Profile manager (moved from Launcher tab) -->
-            <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
-              <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
-              <div class="profile-selector-row">
-                <select id="launcher-profile-select" class="form-input profile-select">
-                  <option value="">— No profiles saved —</option>
-                </select>
-                <button class="tab-btn" id="btn-profile-new" title="New profile">+</button>
-                <button class="tab-btn" id="btn-profile-delete" title="Delete profile">🗑</button>
-              </div>
-              <div id="launcher-profile-editor" class="hidden">
-                <div class="form-group">
-                  <label id="launcher-profile-name-label-text">Profile Name</label>
-                  <input type="text" id="launcher-profile-name" class="form-input" placeholder="Main Account" />
-                </div>
-                <div class="form-group">
-                  <label id="launcher-profile-client-label-text">Mabinogi Folder</label>
-                  <div class="input-row">
-                    <input type="text" id="launcher-profile-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
-                    <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
-                  </div>
-                </div>
-                <div class="form-group form-row">
-                  <label class="checkbox-label">
-                    <input type="checkbox" id="launcher-profile-autologin" />
-                    <span id="launcher-profile-autologin-text">Auto-login with saved session</span>
-                  </label>
-                </div>
-                <div class="form-actions">
-                  <button class="tab-btn primary" id="btn-profile-save">Save Profile</button>
-                  <button class="tab-btn" id="btn-profile-cancel">Cancel</button>
-                </div>
-              </div>
-            </div>
-            <!-- Update check -->
-            <div class="sys-stat" style="margin-top:8px;">
-              <span id="launcher-check-update-label">Game Update Check</span>
-              <button class="tab-btn" id="btn-launcher-check-update" data-tooltip="tooltip_check_update">Check Now</button>
-            </div>
-            <div id="launcher-update-status" class="launcher-update-status hidden" style="margin-top:6px;"></div>
-
-            <!-- Kanan Mods -->
-            <div class="card" id="kanan-mods-card" style="margin-top:12px;">
-              <div class="card-header">Kanan Mods (LibLoader)</div>
-              <div class="form-group" style="margin-bottom:6px;">
-                <label style="font-size:12px;opacity:.75;">Loader.cfg path</label>
-                <div class="input-row">
-                  <input type="text" id="kanan-cfg-path" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata\Loader.cfg" readonly style="font-size:12px;" />
-                  <button class="tab-btn" id="btn-kanan-browse">BROWSE</button>
-                </div>
-              </div>
-              <div id="kanan-mods-list" style="margin-top:4px;max-height:220px;overflow-y:auto;"></div>
-              <div class="form-actions" style="margin-top:8px;">
-                <button class="tab-btn primary hidden" id="btn-kanan-save">Save Changes</button>
-              </div>
-              <div id="kanan-status" class="hidden" style="font-size:12px;margin-top:4px;"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Autostart sub-tab -->
-        <div id="stab-autostart" class="settings-stab-content">
-          <div class="settings-section">
-            <div class="sys-stat">
-              <span id="label_startup_extract">Auto extract</span>
-              <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_startup_switch">Switch to List tab on open</span>
-              <label class="switch"><input type="checkbox" id="settings-startup-switch"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_list_auto_expand">Auto-expand folders when filtering</span>
-              <label class="switch"><input type="checkbox" id="settings-list-auto-expand"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_audio_autoplay">Autoplay audio previews</span>
-              <label class="switch"><input type="checkbox" id="settings-audio-autoplay"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_audio_loop">Loop audio previews</span>
-              <label class="switch"><input type="checkbox" id="settings-audio-loop"><span class="slider"></span></label>
-            </div>
-            <div class="settings-radio-row">
-              <span id="label_list_auto_select">Auto-select on filter</span>
-              <div class="radio-group" id="list-auto-select-group">
-                <label class="radio-label"><input type="radio" name="list-auto-select" value="none" id="select-none"> <span id="label_select_none">None</span></label>
-                <label class="radio-label"><input type="radio" name="list-auto-select" value="first" id="select-first"> <span id="label_select_first">First</span></label>
-                <label class="radio-label"><input type="radio" name="list-auto-select" value="all" id="select-all"> <span id="label_select_all">All</span></label>
-              </div>
-            </div>
-            <div class="form-group" style="margin-top:12px;">
-              <label id="label_sequence_ignore_list" data-tooltip="tooltip_sequence_ignore_list">Sequence Ignore List (one filename per line):</label>
-              <textarea id="settings-sequence-ignore" rows="3" style="width:100%;resize:vertical;font-family:monospace;font-size:12px;" placeholder="uotiara_00001.it"></textarea>
-            </div>
-          </div>
-        </div>
-
-        <!-- File Assoc sub-tab -->
-        <div id="stab-fileassoc" class="settings-stab-content">
-          <div class="settings-section">
-            <h4 id="set_shell" style="margin:0 0 10px 0;">Shell &amp; Registry</h4>
-            <div class="sys-stat">
-              <span id="label_assoc_it">Associate .it files</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-it"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_assoc_pack">Associate .pack files</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-pack"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_settings_assoc_it_full">Add 'Full Sequence' to Explorer context menu</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-it-full"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_assoc_dds">Associate .dds files</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-dds"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_assoc_pmg">Associate .pmg files</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-pmg"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_assoc_xmlcompiled">Associate .xml.compiled files</span>
-              <label class="switch"><input type="checkbox" id="settings-assoc-xmlcompiled"><span class="slider"></span></label>
-            </div>
-            <div style="display:flex;gap:8px;margin-top:12px;">
-              <button id="btn_admin" class="tab-btn" style="flex:1" data-tooltip="tooltip_admin">Apply Registry (Admin)</button>
-              <button id="btn_wipe_assoc" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_wipe_assoc">Wipe Registry Associations</button>
-            </div>
-
-            <h4 id="set_conversion" style="margin:16px 0 10px 0;border-top:1px solid var(--border-glass);padding-top:12px;">Conversion Defaults</h4>
-            <div class="sys-stat">
-              <span id="label_settings_auto_png">Auto-convert .dds → .png on extract</span>
-              <label class="switch"><input type="checkbox" id="settings-auto-png"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label_settings_auto_dds">Auto-convert .png → .dds on import</span>
-              <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span data-i18n="label_settings_auto_features">Auto-convert features.xml.compiled → .xml on extract</span>
-              <label class="switch"><input type="checkbox" id="settings-auto-features"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span data-i18n="label_settings_auto_pmg">Auto-convert .pmg → .obj on extract</span>
-              <label class="switch"><input type="checkbox" id="settings-auto-pmg"><span class="slider"></span></label>
-            </div>
-          </div>
-        </div>
-
-        <!-- Engine sub-tab -->
-        <div id="stab-engine" class="settings-stab-content">
-          <div class="settings-section">
-            <div class="form-group">
-              <div style="display:flex; gap:12px;">
-                <div style="flex:1">
-                  <label id="label_region_key_read">Region Key (Read):</label>
-                  <input type="text" id="settings-region-key" placeholder="@6QeTuOaDgJlZcBm#9" data-tooltip="tooltip_region_key_read" />
-                </div>
-                <div style="flex:1">
-                  <label id="label_region_key_write">Region Key (Write):</label>
-                  <input type="text" id="settings-write-salt" placeholder="})wWb4?-sVGHNoPKpc" data-tooltip="tooltip_region_key_write" />
-                </div>
-              </div>
-            </div>
-            <div class="form-group">
-              <label id="label_log">Log Level:</label>
-              <select id="settings-log">
-                <option value="info">Info</option>
-                <option value="warn">Warning</option>
-                <option value="error">Error</option>
-                <option value="debug">Debug</option>
-                <option value="trace">Trace</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label id="label_pack_v1_version">Legacy .pack format version:</label>
-              <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
-            </div>
-            <div class="sys-stat" style="margin-top:10px;">
-              <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
-              <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
-            </div>
-            <div style="margin-top:10px;">
-              <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
-              <div style="display:flex;gap:6px;align-items:center;margin-top:3px;">
-                <input type="text" id="config-path-display" readonly style="flex:1;font-size:0.75em;opacity:0.8;cursor:default;" />
-                <button id="btn_open_config_dir" class="tab-btn" style="white-space:nowrap;padding:4px 8px;font-size:0.75em;" data-tooltip="tooltip_open_config_dir">Open Folder</button>
-              </div>
-            </div>
-            <div style="display:flex;gap:8px;margin-top:12px;">
-              <button id="btn_wipe" class="tab-btn" style="flex:1" data-tooltip="tooltip_wipe">Wipe Salt History</button>
-              <button id="btn_reset_config" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_reset_config">Reset Settings</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Patcher sub-tab -->
-        <div id="stab-patcher" class="settings-stab-content">
-          <div class="settings-section">
-  <h4>Game Installation</h4>
-  <div class="form-group" style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="patcher-game-path" class="form-input" style="flex:1" placeholder="C:\Nexon\Mabinogi">
-    <button class="tab-btn" id="btn-patcher-browse">Browse</button>
-  </div>
-  <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
-    <button class="tab-btn" id="btn-patcher-verify">Verify Files</button>
-    <button class="tab-btn" id="btn-patcher-repair">Full Repair</button>
-    <button class="tab-btn" id="btn-patcher-update">Download Updates</button>
-  </div>
-  <div id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;white-space:pre-wrap"></div>
-
-  <h4 style="margin-top:16px;border-top:1px solid var(--border-glass);padding-top:12px">Custom Server (hyddwn)</h4>
-  <div class="sys-stat">
-    <span id="label_hyddwn_enable">Enable hyddwn proxy</span>
-    <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
-  </div>
-  <div class="form-group" id="patcher-hyddwn-row" style="display:none;margin-top:6px">
-    <label style="font-size:0.8rem;color:var(--text-muted)">Server URL</label>
-    <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
-  </div>
-
-          </div>
-        </div>
       </div>
 
       <div class="log-container">
