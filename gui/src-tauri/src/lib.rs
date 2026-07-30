@@ -88,6 +88,8 @@ fn default_write_salt() -> String { "})wWb4?-sVGHNoPKpc".to_string() }
 fn default_wrap_mode() -> String { "ask".to_string() }
 fn default_pack_v1_version() -> u32 { 999 }
 
+fn default_hyddwn_url() -> String { "http://127.0.0.1:11000".to_string() }
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
     theme: String,
@@ -140,6 +142,12 @@ struct Config {
     custom_themes: serde_json::Value,
     #[serde(default)]
     kanan_cfg_path: String,
+    #[serde(default)]
+    patcher_game_path: String,
+    #[serde(default)]
+    patcher_hyddwn_enabled: bool,
+    #[serde(default = "default_hyddwn_url")]
+    patcher_hyddwn_url: String,
 }
 
 impl Default for Config {
@@ -178,6 +186,9 @@ impl Default for Config {
             theme_overrides: serde_json::Value::Object(serde_json::Map::new()),
             custom_themes: serde_json::Value::Object(serde_json::Map::new()),
             kanan_cfg_path: String::new(),
+            patcher_game_path: String::new(),
+            patcher_hyddwn_enabled: false,
+            patcher_hyddwn_url: default_hyddwn_url(),
         }
     }
 }
