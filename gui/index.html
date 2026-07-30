@@ -84,26 +84,46 @@
       <div id="dashboard" class="tab-content active">
         <div class="dashboard-grid">
           <div class="dash-card dash-card-gauge">
-            <h3 id="dash-sys-title">System</h3>
+            <h3 id="dash-sys-title" data-i18n="dash_sys_title">System</h3>
             <div class="gauges-row">
               <div class="gauge-wrap">
                 <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
                   <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
-                  <path class="gauge-fill" id="cpu-arc" d="M10,65 A50,50 0 0,1 10,65" stroke-dasharray="0 157"/>
+                  <path class="gauge-fill" id="cpu-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
                 </svg>
                 <div class="gauge-label-wrap">
-                  <span id="lbl_cpu" class="gauge-name">CPU</span>
+                  <span id="lbl_cpu" class="gauge-name" data-i18n="lbl_cpu">CPU</span>
                   <span id="cpu-val" class="gauge-val">0%</span>
                 </div>
               </div>
               <div class="gauge-wrap">
                 <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
                   <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
-                  <path class="gauge-fill" id="mem-arc" d="M10,65 A50,50 0 0,1 10,65" stroke-dasharray="0 157"/>
+                  <path class="gauge-fill" id="mem-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
                 </svg>
                 <div class="gauge-label-wrap">
-                  <span id="lbl_mem" class="gauge-name">RAM</span>
+                  <span id="lbl_mem" class="gauge-name" data-i18n="lbl_mem">RAM</span>
                   <span id="mem-val" class="gauge-val">0 MB</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="disk-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span class="gauge-name" data-i18n="lbl_disk">HDD</span>
+                  <span id="disk-val" class="gauge-val">0 GB</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="net-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span class="gauge-name" data-i18n="lbl_net">NET</span>
+                  <span id="net-val" class="gauge-val">0 KB/s</span>
                 </div>
               </div>
             </div>
@@ -135,7 +155,6 @@
           <div class="mods-actions">
             <button class="tab-btn" id="btn-open-mods-dir" data-tooltip="tooltip_open_mods_dir">Open Folder</button>
             <button class="tab-btn" id="btn-new-mod-template" data-tooltip="tooltip_new_mod_template">New .mod Template</button>
-            <button class="tab-btn" id="btn-ini-to-mod" data-tooltip="tooltip_ini_to_mod">Import uotiara.nsi</button>
           </div>
         </div>
       </div>
@@ -149,11 +168,14 @@
               <button class="tab-btn" id="btn-jobs-clear-done" style="margin-left:auto;font-size:11px;padding:2px 8px;" id="btn-jobs-clear">Clear Done</button>
             </div>
             <div class="jobs-add-row">
-              <select id="jobs-type-select" class="form-input" style="max-width:120px;">
-                <option value="extract">Extract</option>
-                <option value="pack">Pack</option>
+              <select id="jobs-type-select" class="form-input" style="max-width:130px;">
+                <option value="extract" data-i18n="job_type_extract">Extract</option>
+                <option value="pack" data-i18n="job_type_pack">Pack</option>
+                <option value="differ" data-i18n="job_type_differ">Differ</option>
+                <option value="merge" data-i18n="job_type_merge">Merge</option>
+                <option value="apply-mod" data-i18n="job_type_apply_mod">Apply Mod</option>
               </select>
-              <input type="text" id="jobs-input" class="form-input" placeholder="Archive or folder path" />
+              <input type="text" id="jobs-input" class="form-input" placeholder="Input path" />
               <button class="tab-btn" id="btn-jobs-browse-input" data-tooltip="tooltip_browse">…</button>
               <input type="text" id="jobs-output" class="form-input" placeholder="Output path" />
               <button class="tab-btn" id="btn-jobs-browse-output" data-tooltip="tooltip_browse">…</button>
@@ -456,11 +478,6 @@
             <button id="btn-vfs-reset" class="tab-btn" style="color:var(--accent-warn,#f90)" data-tooltip="tooltip_vfs_reset">RESET</button>
         </div>
 
-        <!-- Context menu (shared) -->
-        <div id="tree-ctx-menu" class="ctx-menu hidden">
-            <div class="ctx-item" id="ctx-rename">Rename</div>
-            <div class="ctx-item" id="ctx-delete">Delete</div>
-        </div>
       </div>
 
       <!-- Differ Tab -->
@@ -509,6 +526,7 @@
           <button class="settings-stab" data-stab="autostart">⏱ Autostart</button>
           <button class="settings-stab" data-stab="fileassoc">🔗 File Assoc</button>
           <button class="settings-stab" data-stab="engine">⚙️ Engine</button>
+          <button class="settings-stab" data-stab="patcher">🛠 Patcher</button>
         </div>
 
         <!-- Themes sub-tab -->
@@ -540,6 +558,13 @@
                 <option value="sunset-light">Sunset (Light)</option>
                 <option value="cream-dark">Cream (Dark)</option>
                 <option value="cream-light">Cream (Light)</option>
+                <optgroup label="— Terminal —">
+                  <option value="matrix-dark">Matrix (Dark)</option>
+                  <option value="terminal-dark">Terminal Amber (Dark)</option>
+                  <option value="cyber-dark">Cyber / Neon (Dark)</option>
+                  <option value="cyber-light">Cyber / Neon (Light)</option>
+                  <option value="neon-dark">Neon (Dark)</option>
+                </optgroup>
               </select>
             </div>
 
@@ -829,6 +854,41 @@
             </div>
           </div>
         </div>
+
+        <!-- Patcher sub-tab -->
+        <div id="stab-patcher" class="settings-stab-content">
+          <div class="settings-section">
+  <h4>Game Installation</h4>
+  <div class="form-group" style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="patcher-game-path" class="form-input" style="flex:1" placeholder="C:\Nexon\Mabinogi">
+    <button class="tab-btn" id="btn-patcher-browse">Browse</button>
+  </div>
+  <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+    <button class="tab-btn" id="btn-patcher-verify">Verify Files</button>
+    <button class="tab-btn" id="btn-patcher-repair">Full Repair</button>
+    <button class="tab-btn" id="btn-patcher-update">Download Updates</button>
+  </div>
+  <div id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;white-space:pre-wrap"></div>
+
+  <h4 style="margin-top:16px;border-top:1px solid var(--border-glass);padding-top:12px">Custom Server (hyddwn)</h4>
+  <div class="sys-stat">
+    <span id="label_hyddwn_enable">Enable hyddwn proxy</span>
+    <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
+  </div>
+  <div class="form-group" id="patcher-hyddwn-row" style="display:none;margin-top:6px">
+    <label style="font-size:0.8rem;color:var(--text-muted)">Server URL</label>
+    <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
+  </div>
+
+  <h4 style="margin-top:16px;border-top:1px solid var(--border-glass);padding-top:12px">Kanan Mod Loader</h4>
+  <div class="form-group" style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="patcher-kanan-path" class="form-input" style="flex:1" placeholder="C:\Nexon\Mabinogi\loader\Loader.cfg">
+    <button class="tab-btn" id="btn-patcher-kanan-browse">Browse</button>
+  </div>
+  <div id="patcher-kanan-list" class="kanan-mods-list" style="margin-top:8px;max-height:200px;overflow-y:auto"></div>
+  <button class="tab-btn" id="btn-patcher-kanan-save" style="margin-top:6px">Save Kanan Mods</button>
+          </div>
+        </div>
       </div>
 
       <div class="log-container">
@@ -847,9 +907,14 @@
     <div class="menu-item" id="menu-extract"><span id="ctx_extract">Extract</span></div>
     <div class="menu-item" id="menu-copy-name"><span id="ctx_copy_name">Copy Name</span></div>
     <div class="menu-item" id="menu-copy-key"><span id="ctx_copy_key">Copy Key</span></div>
+    <div class="menu-divider" id="menu-divider-rename"></div>
+    <div class="menu-item" id="menu-rename"><span id="ctx_rename">Rename</span></div>
+    <div class="menu-item" id="menu-delete"><span id="ctx_delete">Delete</span></div>
     <div class="menu-divider"></div>
     <div class="menu-item" id="menu-conv-png"><span id="ctx_conv_png">Convert to PNG</span></div>
     <div class="menu-item" id="menu-conv-dds"><span id="ctx_conv_dds">Convert to DDS</span></div>
+    <div class="menu-item" id="menu-conv-xml"><span id="ctx_conv_xml">Decompile to XML</span></div>
+    <div class="menu-item" id="menu-conv-obj"><span id="ctx_conv_obj">Export to OBJ</span></div>
   </div>
 
   <!-- VFS Conflict Resolution Dialog -->

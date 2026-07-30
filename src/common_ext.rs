@@ -128,6 +128,257 @@ pub fn get_preview_base64(archive_path: &str, entry_name: &str, key: Option<Stri
     get_preview_base64_from_data(entry_name, &data)
 }
 
+// ── Preview helpers (ported from gui/src-tauri/src/lib.rs so the REST API's
+// /api/v1/preview endpoint can offer the same PMG/RGN/audio/text preview
+// fidelity as the desktop GUI — kept as independent copies there on purpose,
+// same convention as handle_mod_apply vs. apply_mod elsewhere in this repo) ──
+
+/// Decode arbitrary game-text bytes: try UTF-8, then common game encodings
+/// (Shift-JIS/EUC-KR/Big5/Windows-1252), then fall back to Latin-1.
+pub fn decode_text_bytes(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    let encodings: &[&encoding_rs::Encoding] = &[
+        encoding_rs::SHIFT_JIS,
+        encoding_rs::EUC_KR,
+        encoding_rs::BIG5,
+        encoding_rs::WINDOWS_1252,
+    ];
+    for enc in encodings {
+        let (cow, _, had_errors) = enc.decode(bytes);
+        if !had_errors {
+            return cow.into_owned();
+        }
+    }
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// Decompile a `features.xml.compiled` binary blob back into readable XML
+/// (best-effort — returns None if the data doesn't match the expected layout).
+pub fn try_decode_xml_compiled(data: &[u8]) -> Option<String> {
+    fn r16(d: &[u8], p: usize) -> Option<u16> {
+        if p + 2 > d.len() { return None; }
+        Some(u16::from_le_bytes([d[p], d[p + 1]]))
+    }
+    fn r32(d: &[u8], p: usize) -> Option<u32> {
+        if p + 4 > d.len() { return None; }
+        Some(u32::from_le_bytes([d[p], d[p + 1], d[p + 2], d[p + 3]]))
+    }
+    fn xdec(d: &[u8], pos: usize, len: usize) -> Option<String> {
+        if pos + len > d.len() { return None; }
+        let ok = d[pos..pos + len].iter().all(|&b| {
+            let c = b ^ 0x80;
+            c >= 0x20 && c <= 0x7E
+        });
+        if len > 0 && !ok { return None; }
+        Some(d[pos..pos + len].iter().map(|&b| (b ^ 0x80) as char).collect())
+    }
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    let mut pos = 0usize;
+    let server_count = r16(data, pos)? as usize;
+    pos += 2;
+    if server_count == 0 || server_count > 200 { return None; }
+
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<features_compiled>\n");
+    xml.push_str(&format!("  <servers count=\"{}\">\n", server_count));
+
+    for _ in 0..server_count {
+        let nl = r16(data, pos)? as usize; pos += 2;
+        let name = xdec(data, pos, nl)?; pos += nl;
+        let rl = r16(data, pos)? as usize; pos += 2;
+        let region = xdec(data, pos, rl)?; pos += rl;
+        let sid = r16(data, pos)?; pos += 2;
+        if pos >= data.len() { return None; }
+        let ch = data[pos]; pos += 1;
+        xml.push_str(&format!(
+            "    <server name=\"{}\" region=\"{}\" server_id=\"{}\" channel=\"{}\"/>\n",
+            esc(&name), esc(&region), sid, ch
+        ));
+    }
+    xml.push_str("  </servers>\n");
+
+    let feature_count = r16(data, pos)? as usize;
+    pos += 2;
+    if feature_count > 100_000 { return None; }
+
+    xml.push_str(&format!("  <features count=\"{}\">\n", feature_count));
+
+    const LEN_THRESHOLD: usize = 500;
+    for _ in 0..feature_count {
+        let hash = r32(data, pos)?;
+        pos += 4;
+        let mut conds: Vec<String> = Vec::new();
+        loop {
+            if pos + 2 > data.len() { break; }
+            let clen = r16(data, pos)? as usize;
+            if clen > LEN_THRESHOLD { break; }
+            if clen > 0 {
+                if pos + 2 + clen > data.len() { break; }
+                let printable = data[pos + 2..pos + 2 + clen].iter().all(|&b| {
+                    let c = b ^ 0x80;
+                    c >= 0x20 && c <= 0x7E
+                });
+                if !printable { break; }
+            }
+            pos += 2;
+            let s: String = data[pos..pos + clen].iter().map(|&b| (b ^ 0x80) as char).collect();
+            pos += clen;
+            conds.push(s);
+        }
+        xml.push_str(&format!("    <feature hash=\"{:#010x}\">\n", hash));
+        for (i, c) in conds.iter().enumerate() {
+            if !c.is_empty() {
+                xml.push_str(&format!("      <cond index=\"{}\">{}</cond>\n", i, esc(c)));
+            }
+        }
+        xml.push_str("    </feature>\n");
+    }
+    xml.push_str("  </features>\n</features_compiled>\n");
+    Some(xml)
+}
+
+/// Is this WAV file's fmt chunk IMA ADPCM (format tag 0x0011)?
+pub fn is_adpcm_wav(data: &[u8]) -> bool {
+    if data.len() < 12 { return false; }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return false; }
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let csz = u32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]) as usize;
+        if &data[pos..pos+4] == b"fmt " && pos + 10 <= data.len() {
+            return u16::from_le_bytes([data[pos+8], data[pos+9]]) == 0x0011;
+        }
+        pos = pos.saturating_add(8 + ((csz + 1) & !1));
+    }
+    false
+}
+
+fn decode_adpcm_nibble(nibble: u8, predictor: &mut i32, step_index: &mut i32) -> i16 {
+    const STEP_TABLE: [i32; 89] = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
+    const INDEX_TABLE: [i32; 16] = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+    let step = STEP_TABLE[(*step_index).clamp(0, 88) as usize];
+    let mut diff = step >> 3;
+    if nibble & 4 != 0 { diff += step; }
+    if nibble & 2 != 0 { diff += step >> 1; }
+    if nibble & 1 != 0 { diff += step >> 2; }
+    if nibble & 8 != 0 { diff = -diff; }
+    *predictor = (*predictor + diff).clamp(-32768, 32767);
+    *step_index = (*step_index + INDEX_TABLE[(nibble & 0xF) as usize]).clamp(0, 88);
+    *predictor as i16
+}
+
+/// Decodes a Microsoft IMA ADPCM WAV (fmt format 0x0011) to 16-bit PCM WAV.
+/// Scans RIFF chunks so it handles files with JUNK/INFO/fact chunks before data.
+/// Returns None if the input is not IMA ADPCM or is malformed.
+pub fn decode_ima_adpcm_wav(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 20 { return None; }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+
+    let mut pos = 12usize;
+    let mut fmt_off: Option<usize> = None;
+    let mut data_offset: usize = 0;
+    let mut data_size:   usize = 0;
+    while pos + 8 <= data.len() {
+        let tag = &data[pos..pos+4];
+        let csz = u32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]) as usize;
+        let body = pos + 8;
+        if tag == b"fmt " && fmt_off.is_none() { fmt_off = Some(body); }
+        if tag == b"data" && data_size == 0    {
+            data_offset = body;
+            data_size   = csz.min(data.len().saturating_sub(body));
+        }
+        pos = pos.checked_add(8 + ((csz + 1) & !1))?;
+    }
+
+    let fmt = fmt_off?;
+    if fmt + 14 > data.len() || data_size == 0 { return None; }
+    if u16::from_le_bytes([data[fmt],   data[fmt+1]])  != 0x0011 { return None; }
+    let channels    = u16::from_le_bytes([data[fmt+2],  data[fmt+3]])  as usize;
+    let sample_rate = u32::from_le_bytes([data[fmt+4],  data[fmt+5],  data[fmt+6],  data[fmt+7]]);
+    let block_align = u16::from_le_bytes([data[fmt+12], data[fmt+13]]) as usize;
+    if channels == 0 || block_align < 4 * channels { return None; }
+
+    let compressed = &data[data_offset .. data_offset + data_size];
+    let mut pcm: Vec<i16> = Vec::new();
+
+    for block in compressed.chunks(block_align) {
+        if block.len() < 4 * channels { break; }
+        let mut predictors = vec![0i32; channels];
+        let mut step_idx   = vec![0i32; channels];
+        for c in 0..channels {
+            let b = c * 4;
+            predictors[c] = i16::from_le_bytes([block[b], block[b+1]]) as i32;
+            step_idx[c]   = (block[b+2] as i32).clamp(0, 88);
+        }
+        for c in 0..channels { pcm.push(predictors[c] as i16); }
+
+        let payload = &block[4 * channels..];
+        if channels == 1 {
+            for &byte in payload {
+                pcm.push(decode_adpcm_nibble(byte & 0xF, &mut predictors[0], &mut step_idx[0]));
+                pcm.push(decode_adpcm_nibble(byte >> 4,  &mut predictors[0], &mut step_idx[0]));
+            }
+        } else {
+            let group = 4;
+            let mut i = 0;
+            while i + group * channels <= payload.len() {
+                let mut bufs: Vec<Vec<i16>> = vec![Vec::with_capacity(8); channels];
+                for c in 0..channels {
+                    for &byte in &payload[i + c*group .. i + c*group + group] {
+                        bufs[c].push(decode_adpcm_nibble(byte & 0xF, &mut predictors[c], &mut step_idx[c]));
+                        bufs[c].push(decode_adpcm_nibble(byte >> 4,  &mut predictors[c], &mut step_idx[c]));
+                    }
+                }
+                let n = bufs[0].len();
+                for s in 0..n { for c in 0..channels { pcm.push(bufs[c][s]); } }
+                i += group * channels;
+            }
+        }
+    }
+
+    if pcm.is_empty() { return None; }
+
+    let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|&s| s.to_le_bytes()).collect();
+    let data_len  = pcm_bytes.len() as u32;
+    let byte_rate = sample_rate * channels as u32 * 2;
+    let blk_out   = (channels * 2) as u16;
+    let mut wav = Vec::with_capacity(44 + pcm_bytes.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&(channels as u16).to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&blk_out.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&pcm_bytes);
+    Some(wav)
+}
+
+/// Converts a triangle strip index list to a triangle list (for PMG geometry
+/// export/preview). Degenerate triangles (repeated indices) are skipped.
+pub fn strip_to_triangles(strip: &[u16]) -> Vec<u16> {
+    let mut tris = Vec::new();
+    for i in 0..strip.len().saturating_sub(2) {
+        let (a, b, c) = (strip[i], strip[i + 1], strip[i + 2]);
+        if a == b || b == c || a == c { continue; }
+        if i % 2 == 0 {
+            tris.extend_from_slice(&[a, b, c]);
+        } else {
+            tris.extend_from_slice(&[b, a, c]);
+        }
+    }
+    tris
+}
+
 pub fn run_advanced_list(
     fname_str: &str,
     cli_skey: Option<String>,
