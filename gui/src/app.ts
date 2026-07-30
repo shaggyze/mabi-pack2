@@ -843,11 +843,6 @@ class App {
         if (hyddwnRow) hyddwnRow.style.display = this.config.patcher_hyddwn_enabled ? "flex" : "none";
         const hyddwnUrlEl = document.getElementById("patcher-hyddwn-url") as HTMLInputElement | null;
         if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
-        if (this.config.kanan_cfg_path) {
-            const kp = document.getElementById("patcher-kanan-path") as HTMLInputElement | null;
-            if (kp) kp.value = this.config.kanan_cfg_path;
-        }
-
         document.getElementById("btn-patcher-browse")?.addEventListener("click", async () => {
             const chosen = await open({ title: "Select Mabinogi folder" });
             if (!chosen) return;
@@ -918,15 +913,6 @@ class App {
             this.saveConfig();
         });
 
-        document.getElementById("btn-patcher-kanan-browse")?.addEventListener("click", async () => {
-            const chosen = await open({ title: "Select Loader.cfg", filters: [{ name: "Config", extensions: ["cfg"] }] });
-            if (!chosen) return;
-            const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
-            const kp = document.getElementById("patcher-kanan-path") as HTMLInputElement | null;
-            if (kp) kp.value = p;
-            this.config.kanan_cfg_path = p;
-            this.saveConfig();
-        });
     }
 
 
