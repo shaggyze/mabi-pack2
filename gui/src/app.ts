@@ -97,6 +97,9 @@ interface Config {
     theme_overrides: ThemeOverrides;
     custom_themes: Record<string, ThemeOverrides>;
     kanan_cfg_path: string;
+    patcher_game_path: string;
+    patcher_hyddwn_enabled: boolean;
+    patcher_hyddwn_url: string;
 }
 
 interface PreviewData {
@@ -161,7 +164,10 @@ class App {
         sequence_ignore_list: [],
         theme_overrides: {},
         custom_themes: {},
-        kanan_cfg_path: ""
+        kanan_cfg_path: "",
+        patcher_game_path: "",
+        patcher_hyddwn_enabled: false,
+        patcher_hyddwn_url: "http://127.0.0.1:11000"
     };
 
     private loadedEntries: AggregateEntry[] = [];
@@ -773,7 +779,14 @@ class App {
             this.config.custom_themes[name] = { ...this.config.theme_overrides };
             this.saveConfig();
             this.syncCustomizerUI();
-            if (nameEl) nameEl.value = '';
+            // Select the newly saved theme in the dropdown and show feedback
+            const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
+            if (sel) sel.value = name;
+            if (nameEl) {
+                nameEl.value = '';
+                nameEl.placeholder = `Saved: ${name}`;
+                setTimeout(() => { nameEl.placeholder = 'My Theme Name'; }, 2000);
+            }
         });
 
         document.getElementById('btn-theme-load')?.addEventListener('click', () => {
@@ -816,13 +829,39 @@ class App {
             if (el) { el.textContent = msg; el.style.color = ok === false ? "var(--accent-neon)" : ok ? "var(--accent-cyan)" : "var(--text-muted)"; }
         };
 
-        const getGamePath = () => (document.getElementById("patcher-game-path") as HTMLInputElement)?.value?.trim() ?? "";
+        const gamePathEl = () => document.getElementById("patcher-game-path") as HTMLInputElement | null;
+        const getGamePath = () => gamePathEl()?.value?.trim() ?? "";
+
+        // Restore saved values on init
+        if (this.config.patcher_game_path) {
+            const el = gamePathEl();
+            if (el) el.value = this.config.patcher_game_path;
+        }
+        const hyddwnChk = document.getElementById("patcher-hyddwn-enable") as HTMLInputElement | null;
+        const hyddwnRow = document.getElementById("patcher-hyddwn-row");
+        if (hyddwnChk) hyddwnChk.checked = this.config.patcher_hyddwn_enabled;
+        if (hyddwnRow) hyddwnRow.style.display = this.config.patcher_hyddwn_enabled ? "flex" : "none";
+        const hyddwnUrlEl = document.getElementById("patcher-hyddwn-url") as HTMLInputElement | null;
+        if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
+        if (this.config.kanan_cfg_path) {
+            const kp = document.getElementById("patcher-kanan-path") as HTMLInputElement | null;
+            if (kp) kp.value = this.config.kanan_cfg_path;
+        }
 
         document.getElementById("btn-patcher-browse")?.addEventListener("click", async () => {
             const chosen = await open({ title: "Select Mabinogi folder" });
             if (!chosen) return;
             const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
-            (document.getElementById("patcher-game-path") as HTMLInputElement).value = p;
+            const el = gamePathEl();
+            if (el) el.value = p;
+            this.config.patcher_game_path = p;
+            this.saveConfig();
+        });
+
+        // Save game path on blur (user typed it manually)
+        gamePathEl()?.addEventListener("blur", () => {
+            this.config.patcher_game_path = getGamePath();
+            this.saveConfig();
         });
 
         document.getElementById("btn-patcher-verify")?.addEventListener("click", async () => {
@@ -867,17 +906,26 @@ class App {
             } catch(e) { setText(`Failed: ${e}`, false); }
         });
 
-        const hyddwnChk = document.getElementById("patcher-hyddwn-enable") as HTMLInputElement | null;
-        const hyddwnRow = document.getElementById("patcher-hyddwn-row");
         hyddwnChk?.addEventListener("change", () => {
-            if (hyddwnRow) hyddwnRow.style.display = hyddwnChk.checked ? "flex" : "none";
+            const enabled = hyddwnChk.checked;
+            if (hyddwnRow) hyddwnRow.style.display = enabled ? "flex" : "none";
+            this.config.patcher_hyddwn_enabled = enabled;
+            this.saveConfig();
+        });
+
+        hyddwnUrlEl?.addEventListener("blur", () => {
+            this.config.patcher_hyddwn_url = hyddwnUrlEl.value.trim() || "http://127.0.0.1:11000";
+            this.saveConfig();
         });
 
         document.getElementById("btn-patcher-kanan-browse")?.addEventListener("click", async () => {
             const chosen = await open({ title: "Select Loader.cfg", filters: [{ name: "Config", extensions: ["cfg"] }] });
             if (!chosen) return;
             const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
-            (document.getElementById("patcher-kanan-path") as HTMLInputElement).value = p;
+            const kp = document.getElementById("patcher-kanan-path") as HTMLInputElement | null;
+            if (kp) kp.value = p;
+            this.config.kanan_cfg_path = p;
+            this.saveConfig();
         });
     }
 
