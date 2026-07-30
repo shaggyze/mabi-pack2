@@ -54,6 +54,7 @@ export const PLANS: Category[] = [
       { id: "preview-mml",        title: "MML audio playback (PSGConverter port)",           done: true,  priority: "low" },
       { id: "preview-anievent",   title: ".anievent animation event timeline",               done: true,  priority: "low" },
       { id: "preview-pmg-3d-ref", title: ".pmg + propdb.xml 3D refinement (material/skin)", done: true,  priority: "medium" },
+      { id: "preview-ctx-convert", title: "Right-click convert: .xml.compiled→XML, .pmg→OBJ, .dds→PNG", done: true, priority: "medium" },
     ],
   },
   {
@@ -67,7 +68,7 @@ export const PLANS: Category[] = [
       { id: "mod-features",  title: "Apply feature flag toggles from .mod",              done: true,  priority: "high" },
       { id: "mod-from-ini",  title: "Import mods from uotiaralist.ini in .mod file",     done: true,  priority: "medium" },
       { id: "mod-browser",   title: "In-app mod browser (reads .mod from mods/ folder)", done: true,  priority: "medium" },
-      { id: "mod-webui",     title: "WebUI mod browsing + install-from-web",             done: false, priority: "low" },
+      { id: "mod-webui",     title: "WebUI mod browsing + install-from-web",             done: true,  priority: "low" },
     ],
   },
   {
@@ -107,6 +108,20 @@ export const PLANS: Category[] = [
       { id: "research-propdb",   title: "PropDB.xml client-key extraction from Client.exe",done: true,  priority: "high" },
       { id: "research-white",    title: "Whitecipher watchdog-neutralization (Auryn fix)", done: false, priority: "low" },
       { id: "research-nps64",    title: "Re-offset nps64.dll proxy jmp targets",           done: false, priority: "low" },
+    ],
+  },
+  {
+    id: "patcher",
+    title: "Patcher & Repair",
+    icon: "🛠",
+    tasks: [
+      { id: "patcher-tab",     title: "Patcher settings tab (game path, verify, repair)",          done: true,  priority: "high" },
+      { id: "patcher-verify",  title: "verify_game_files: check sizes vs version.dat",             done: true,  priority: "high" },
+      { id: "patcher-repair",  title: "repair_game_files: MabiTDown /repair or report mismatches", done: true,  priority: "high" },
+      { id: "patcher-hyddwn",  title: "hyddwn custom server proxy toggle in patcher tab",          done: true,  priority: "medium" },
+      { id: "patcher-kanan2",  title: "Kanan mods panel in Patcher tab",                           done: true,  priority: "medium" },
+      { id: "patcher-nsi-rm",  title: "Remove .nsi import button (done)",                          done: true,  priority: "high" },
+      { id: "patcher-webui",   title: "Mod WebUI: local+online toggle with install-from-web",      done: true,  priority: "low" },
     ],
   },
 ];

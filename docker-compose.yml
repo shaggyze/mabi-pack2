@@ -14,8 +14,12 @@ services:
       MABI_HOST: "0.0.0.0"
       MABI_PORT: "7331"
       RUST_LOG: "info"
+      # Required — the server refuses to serve any non-loopback bind (this
+      # one, since it's 0.0.0.0) without a token. Set this via a `.env` file
+      # or `MABI_API_TOKEN=... docker compose up`, don't hardcode it here.
+      MABI_API_TOKEN: "${MABI_API_TOKEN:?set MABI_API_TOKEN before starting}"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:7331/api/v1/status"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer ${MABI_API_TOKEN}", "http://localhost:7331/api/v1/status"]
       interval: 30s
       timeout: 5s
       retries: 3

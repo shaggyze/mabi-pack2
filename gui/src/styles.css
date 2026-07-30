@@ -128,6 +128,45 @@
   --grad-body: linear-gradient(to bottom, #ffffff, #fafafa);
 }
 
+/* 13. Matrix */
+.theme-matrix-dark {
+  --bg-deep: #000a00; --bg-sidebar: #001100; --bg-surface: rgba(0,20,0,0.7);
+  --bg-input: #001a00; --bg-terminal: #000a00; --accent-cyan: #00ff41;
+  --accent-blue: #00cc33; --accent-neon: #00ff41; --text-primary: #ccffcc;
+  --text-muted: #33aa33; --border-glass: rgba(0,255,65,0.3);
+}
+
+/* 14. Terminal (amber CRT) */
+.theme-terminal-dark {
+  --bg-deep: #0c0800; --bg-sidebar: #160e00; --bg-surface: rgba(22,14,0,0.7);
+  --bg-input: #1f1500; --bg-terminal: #0c0800; --accent-cyan: #ffb300;
+  --accent-blue: #ff8c00; --accent-neon: #ffb300; --text-primary: #ffe082;
+  --text-muted: #cc8800; --border-glass: rgba(255,179,0,0.3);
+}
+
+/* 15. Cyber / Neon-fog */
+.theme-cyber-dark {
+  --bg-deep: #0d0d1a; --bg-sidebar: #12122a; --bg-surface: rgba(18,18,42,0.7);
+  --bg-input: #1a1a35; --bg-terminal: #0d0d1a; --accent-cyan: #00e5ff;
+  --accent-blue: #d500f9; --accent-neon: #00e5ff; --text-primary: #e0e0ff;
+  --text-muted: #7070aa; --border-glass: rgba(0,229,255,0.3);
+}
+.theme-cyber-light {
+  --bg-deep: #f0f0ff; --bg-sidebar: #ffffff; --bg-surface: rgba(255,255,255,0.6);
+  --bg-input: #ffffff; --bg-terminal: #e8e8ff; --accent-cyan: #0091ea;
+  --accent-blue: #aa00ff; --accent-neon: #0091ea; --text-primary: #1a1a3a;
+  --text-muted: #5050aa; --border-glass: rgba(0,145,234,0.2);
+  --grad-body: linear-gradient(to bottom, #ffffff, #f0f0ff);
+}
+
+/* 16. Neon */
+.theme-neon-dark {
+  --bg-deep: #0a0018; --bg-sidebar: #0f0022; --bg-surface: rgba(15,0,34,0.7);
+  --bg-input: #160030; --bg-terminal: #0a0018; --accent-cyan: #ff00ff;
+  --accent-blue: #00ffff; --accent-neon: #ff00ff; --text-primary: #ffe0ff;
+  --text-muted: #aa44aa; --border-glass: rgba(255,0,255,0.3);
+}
+
 /* Convert buttons — themed via CSS vars */
 button#ctxConvIt, button#ctxConvPack {
     background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue)) !important;
@@ -782,8 +821,11 @@ input:checked + .slider:before { transform: translateX(20px); }
 .job-row.done { border-color: rgba(34,197,94,.2); opacity: .75; }
 .job-row.error { border-color: rgba(239,68,68,.3); }
 .job-header { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.job-type-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(99,102,241,.25); text-transform: uppercase; letter-spacing: .5px; }
+.job-type-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(99,102,241,.25); text-transform: uppercase; letter-spacing: .5px; color: var(--text-primary); }
 .job-type-badge.pack { background: rgba(168,85,247,.25); }
+.job-type-badge.differ { background: rgba(251,191,36,.2); color: #fbbf24; }
+.job-type-badge.merge { background: rgba(34,197,94,.2); color: #4ade80; }
+.job-type-badge.apply-mod { background: rgba(14,165,233,.2); color: #38bdf8; }
 .job-path { flex: 1; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-status { font-size: 11px; opacity: .55; }
 .job-actions { display: flex; gap: 4px; }

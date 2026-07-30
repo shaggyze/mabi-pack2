@@ -132,6 +132,37 @@ The side panel auto-previews selected files based on type:
 ### Localization
 Switch language in Settings → Locale. Supported: **English**, **繁體中文**, **日本語**, **한국어**.
 
+---
+
+## REST API, WebUI, and MCP mission control
+
+`mabi-pack2 serve` (aka `mabi-patcher serve`) runs a headless HTTP server
+exposing pack/extract/list/mod-apply/launcher operations, and — once
+`gui/dist` is built (`npm run build` in `gui/`) — serves the WebUI (the same
+frontend as the desktop app, pointed at this REST API instead of Tauri IPC)
+from the same port:
+
+```bash
+mabi-pack2 serve --port 7331          # loopback only by default
+mabi-pack2 serve --host 0.0.0.0 --port 7331   # LAN/Docker — requires MABI_API_TOKEN
+```
+
+Then open `http://127.0.0.1:7331/`. Full route list, auth model
+(loopback always open; non-loopback requires `MABI_API_TOKEN` as a bearer
+token; same-origin enforcement blocks drive-by cross-origin requests from
+other websites regardless of bind address), and the phased build plan are
+in `.gemini/MISSION_CONTROL_PLAN.md`.
+
+**Docker:** `docker compose up` after setting `MABI_API_TOKEN` (required —
+the container binds `0.0.0.0`). Builds and serves the WebUI alongside the
+API automatically.
+
+**MCP server:** `mcp_server/mission_control.py` exposes the same
+operations as MCP tools (plus `launch_game`/`test_mod_for_crash`, which
+replace the `mabi-mod-tester` Claude Code skill's screen-automation launch
+step with real Nexon auth) for use from Claude Code or any MCP client — see
+`mcp_server/README.md`.
+
 ## Credits
 - Based on original utilities by regomne.
 - Enhanced and maintained by ShaggyZE.

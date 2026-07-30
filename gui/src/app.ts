@@ -1,13 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
-import { open, save, ask, message } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { listen } from "@tauri-apps/api/event";
+import { invoke } from "./platform/invoke";
+import { open, save, ask, message } from "./platform/dialog";
+import { writeTextFile } from "./platform/fs";
+import { listen } from "./platform/event";
 import { locales as TRANSLATIONS } from "./locales";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
 
 interface JobEntry {
     id: number;
-    type: "extract" | "pack";
+    type: "extract" | "pack" | "differ" | "merge" | "apply-mod";
     input: string;
     output: string;
     key?: string;
@@ -317,6 +317,7 @@ class App {
         this.setupLauncher();
         this.setupFeaturesEditor();
         this.setupThemeCustomizer();
+        this.setupPatcherTab();
         this.setupForms();
         this.setupEventListen();
 
@@ -391,13 +392,22 @@ class App {
             "label_settings_auto_png", "label_settings_auto_dds",
             "label_audio_autoplay", "label_audio_autoplay_inline", "label_audio_loop",
             "ctx_extract", "ctx_copy_name", "ctx_copy_key", "ctx_conv_png", "ctx_conv_dds",
+            "ctx_conv_xml", "ctx_conv_obj", "ctx_rename", "ctx_delete",
             "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config",
-            "dash_mods_title"
+            "dash_mods_title", "lbl_cpu", "lbl_mem",
+            "label_hyddwn_enable", "label_patcher_verify", "label_patcher_repair",
         ];
         ids.forEach(id => {
             document.querySelectorAll<HTMLElement>(`[id="${id}"]`).forEach(el => {
                 el.textContent = this.t(id);
             });
+        });
+
+        // Translate any element with data-i18n attribute
+        document.querySelectorAll<HTMLElement>("[data-i18n]").forEach(el => {
+            const key = el.dataset.i18n!;
+            const val = this.t(key);
+            if (val && val !== key) el.textContent = val;
         });
 
         // Empty file tree placeholder
@@ -594,6 +604,7 @@ class App {
         document.body.className = cls;
         localStorage.setItem("mabi_theme", this.config.theme);
         this.applyThemeOverrides();
+        this.syncCustomizerUI();
     }
 
     private applyThemeOverrides() {
@@ -671,7 +682,7 @@ class App {
         setColor('tc-bg-deep',       o.bg_deep,          '--bg-deep');
         setColor('tc-bg-sidebar',    o.bg_sidebar,       '--bg-sidebar');
         setColor('tc-bg-input',      o.bg_input,         '--bg-input');
-        setColor('tc-bg-surface',    o.bg_surface_color, '--bg-deep');
+        setColor('tc-bg-surface',    o.bg_surface_color, '--bg-surface');
         setColor('tc-border-color',  o.border_color,     '--accent-cyan');
         setColor('tc-accent-cyan',   o.accent_cyan,      '--accent-cyan');
         setColor('tc-accent-blue',   o.accent_blue,      '--accent-blue');
@@ -798,17 +809,106 @@ class App {
         arc.style.stroke = `hsl(${hue},80%,55%)`;
     }
 
+    private setupPatcherTab() {
+        const statusEl = () => document.getElementById("patcher-status");
+        const setText = (msg: string, ok?: boolean) => {
+            const el = statusEl();
+            if (el) { el.textContent = msg; el.style.color = ok === false ? "var(--accent-neon)" : ok ? "var(--accent-cyan)" : "var(--text-muted)"; }
+        };
+
+        const getGamePath = () => (document.getElementById("patcher-game-path") as HTMLInputElement)?.value?.trim() ?? "";
+
+        document.getElementById("btn-patcher-browse")?.addEventListener("click", async () => {
+            const chosen = await open({ title: "Select Mabinogi folder" });
+            if (!chosen) return;
+            const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
+            (document.getElementById("patcher-game-path") as HTMLInputElement).value = p;
+        });
+
+        document.getElementById("btn-patcher-verify")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            setText("Verifying...");
+            try {
+                const res = await invoke("verify_game_files", { gamePath: gp }) as { ok: boolean; missing: string[]; mismatched: string[] };
+                if (res.ok) {
+                    setText("All files OK.", true);
+                } else {
+                    const lines = [
+                        res.missing.length ? `Missing (${res.missing.length}): ${res.missing.slice(0,5).join(", ")}${res.missing.length>5?"...":""}` : "",
+                        res.mismatched.length ? `Size mismatch (${res.mismatched.length}): ${res.mismatched.slice(0,5).join(", ")}${res.mismatched.length>5?"...":""}` : "",
+                    ].filter(Boolean).join(" | ");
+                    setText(lines, false);
+                }
+            } catch(e) { setText(`Error: ${e}`, false); }
+        });
+
+        document.getElementById("btn-patcher-repair")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            setText("Launching repair...");
+            try {
+                const res = await invoke("repair_game_files", { gamePath: gp }) as any;
+                if (res.action === "mabitydown_launched") {
+                    setText("MabiTDown.exe launched for repair.", true);
+                } else {
+                    const total = (res.missing?.length ?? 0) + (res.corrupt?.length ?? 0);
+                    setText(total === 0 ? "No issues found." : `Found ${total} issue(s). Run Nexon Launcher to repair.`, total === 0);
+                }
+            } catch(e) { setText(`Repair error: ${e}`, false); }
+        });
+
+        document.getElementById("btn-patcher-update")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            try {
+                await invoke("execute_terminal_command", { command: `"${gp}\\MabiTDown.exe"` });
+                setText("MabiTDown.exe launched.", true);
+            } catch(e) { setText(`Failed: ${e}`, false); }
+        });
+
+        const hyddwnChk = document.getElementById("patcher-hyddwn-enable") as HTMLInputElement | null;
+        const hyddwnRow = document.getElementById("patcher-hyddwn-row");
+        hyddwnChk?.addEventListener("change", () => {
+            if (hyddwnRow) hyddwnRow.style.display = hyddwnChk.checked ? "flex" : "none";
+        });
+
+        document.getElementById("btn-patcher-kanan-browse")?.addEventListener("click", async () => {
+            const chosen = await open({ title: "Select Loader.cfg", filters: [{ name: "Config", extensions: ["cfg"] }] });
+            if (!chosen) return;
+            const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
+            (document.getElementById("patcher-kanan-path") as HTMLInputElement).value = p;
+        });
+    }
+
+
     private setupDashboard() {
         const pollStats = async () => {
             try {
-                const info = await invoke("get_system_info") as { cpu_usage: number, memory_used_mb: number, memory_total_mb: number };
-                const cpuVal = document.getElementById("cpu-val");
-                const memVal = document.getElementById("mem-val");
+                const info = await invoke("get_system_info") as {
+                    cpu_usage: number; memory_used_mb: number; memory_total_mb: number;
+                    net_down_kbps: number; net_up_kbps: number; net_link_max_kbps: number;
+                    disk_used_gb: number; disk_total_gb: number;
+                };
+                const set = (id: string, text: string) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+
                 this.setGauge("cpu-arc", info.cpu_usage);
-                if (cpuVal) cpuVal.textContent = `${info.cpu_usage.toFixed(1)}%`;
+                set("cpu-val", `${info.cpu_usage.toFixed(1)}%`);
+
                 const memPct = info.memory_total_mb > 0 ? (info.memory_used_mb / info.memory_total_mb) * 100 : 0;
                 this.setGauge("mem-arc", memPct);
-                if (memVal) memVal.textContent = `${info.memory_used_mb} MB / ${info.memory_total_mb} MB`;
+                set("mem-val", `${info.memory_used_mb} / ${info.memory_total_mb} MB`);
+
+                const diskPct = info.disk_total_gb > 0 ? (info.disk_used_gb / info.disk_total_gb) * 100 : 0;
+                this.setGauge("disk-arc", diskPct);
+                set("disk-val", `${info.disk_used_gb.toFixed(0)} / ${info.disk_total_gb.toFixed(0)} GB`);
+
+                const totalNetKbps = info.net_down_kbps + info.net_up_kbps;
+                const linkMax = info.net_link_max_kbps > 0 ? info.net_link_max_kbps : 100_000;
+                const netPct = Math.min(100, (totalNetKbps / linkMax) * 100);
+                this.setGauge("net-arc", netPct);
+                const fmt = (kbps: number) => kbps >= 1024 ? `${(kbps/1024).toFixed(1)} MB/s` : `${kbps} KB/s`;
+                set("net-val", `↓${fmt(info.net_down_kbps)} ↑${fmt(info.net_up_kbps)}`);
             } catch (_) {}
         };
         setTimeout(() => { pollStats(); setInterval(pollStats, 2000); }, 1800);
@@ -865,7 +965,7 @@ class App {
 
     private async applyModFromDashboard(modFilePath: string) {
         try {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const archivePath = await open({
                 title: "Select target .it or .pack archive",
                 filters: [{ name: "Archive", extensions: ["it", "pack"] }],
@@ -900,32 +1000,14 @@ class App {
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
             } catch (_) {}
         });
-        document.getElementById("btn-ini-to-mod")?.addEventListener("click", async () => {
-            try {
-                const { open } = await import("@tauri-apps/plugin-dialog");
-                const nsiPath = await open({ title: "Select uotiara.nsi", filters: [{ name: "NSIS Script", extensions: ["nsi"] }] });
-                if (!nsiPath) return;
-                const nsiStr = typeof nsiPath === "string" ? nsiPath : (nsiPath as any).path ?? nsiPath[0];
-                const idStr = prompt("Enter MOD IDs to include (comma-separated, e.g. 85,86,288):");
-                if (!idStr) return;
-                const selectedIds = idStr.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-                const toml = await invoke("nsi_to_mod", { nsiPath: nsiStr, selectedIds }) as string;
-                const dir = await invoke("get_mods_dir") as string;
-                const dest = dir + "\\from_nsi.mod";
-                await writeTextFile(dest, toml);
-                await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
-            } catch (err) { alert("nsi_to_mod failed: " + err); }
-        });
     }
 
     // ── VFS editing ─────────────────────────────────────────────────────────────
 
     private vfsPending: Array<{op: string; [k: string]: string}> = [];
-    private vfsCtxTarget: string = "";
 
     private setupVfsEditing() {
         const tree = document.getElementById("file-tree")!;
-        const ctxMenu = document.getElementById("tree-ctx-menu")!;
         const toolbar = document.getElementById("vfs-toolbar")!;
 
         // Drag-over: highlight drop target
@@ -963,37 +1045,27 @@ class App {
             if (resolved.length > 0) this.renderVfsPending();
         });
 
-        // Right-click on tree items → context menu
+        // Right-click on tree items → unified context menu
         tree.addEventListener("contextmenu", (e) => {
             if (!this.currentArchive) return;
             const row = (e.target as HTMLElement).closest<HTMLElement>(".tree-item, .tree-row");
-            if (!row) { ctxMenu.classList.add("hidden"); return; }
+            if (!row) return;
             e.preventDefault();
-            this.vfsCtxTarget = row.dataset.path ?? "";
-            ctxMenu.style.left = e.clientX + "px";
-            ctxMenu.style.top  = e.clientY + "px";
-            ctxMenu.classList.remove("hidden");
-        });
-        document.addEventListener("click", () => ctxMenu.classList.add("hidden"));
-
-        document.getElementById("ctx-rename")?.addEventListener("click", () => {
-            if (!this.vfsCtxTarget) return;
-            const newName = prompt("New path (relative to archive root):", this.vfsCtxTarget);
-            if (!newName || newName === this.vfsCtxTarget) return;
-            this.vfsPending.push({ op: "rename", from: this.vfsCtxTarget, to: newName });
-            this.renderVfsPending();
-        });
-        document.getElementById("ctx-delete")?.addEventListener("click", () => {
-            if (!this.vfsCtxTarget) return;
-            this.vfsPending.push({ op: "delete", path: this.vfsCtxTarget });
-            this.renderVfsPending();
+            const path = row.dataset.path ?? "";
+            // Build a synthetic entry so showContextMenu can work
+            const syntheticEntry = this.loadedEntries.find(en => en.name === path) ?? {
+                name: path, source_archive: this.currentArchive, salt_used: "",
+                entries_salt_used: "", original_size: 0, raw_size: 0,
+                offset: 0, checksum: 0, flags: 0, key: [], iv0: 0, h_off: 0, mode: ""
+            } as AggregateEntry;
+            this.showContextMenu(e, syntheticEntry);
         });
 
         // Merge archive button
         document.getElementById("btn-vfs-merge")?.addEventListener("click", async () => {
             if (!this.currentArchive) return;
             try {
-                const { open } = await import("@tauri-apps/plugin-dialog");
+                const { open } = await import("./platform/dialog");
                 const chosen = await open({ filters: [{ name: "Archive", extensions: ["it", "pack"] }] });
                 if (!chosen) return;
                 const srcPath = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
@@ -1215,28 +1287,60 @@ class App {
         document.getElementById("btn-jobs-run-all")?.addEventListener("click", () => this.jobsRunAll());
         document.getElementById("btn-jobs-clear-done")?.addEventListener("click", () => this.jobsClearDone());
 
+        const updateJobHints = (type: string) => {
+            const inp = document.getElementById("jobs-input") as HTMLInputElement;
+            const out = document.getElementById("jobs-output") as HTMLInputElement;
+            const hints: Record<string, [string, string]> = {
+                "extract":   ["Archive (.it / .pack)", "Output folder"],
+                "pack":      ["Source folder",         "Output archive (.it)"],
+                "differ":    ["Base archive (.it)",    "Modified archive (.it)"],
+                "merge":     ["Source folder",         "Output archive (.it)"],
+                "apply-mod": [".mod file path",        "Target archive (.it)"],
+            };
+            const [h1, h2] = hints[type] ?? ["Input path", "Output path"];
+            if (inp) inp.placeholder = h1;
+            if (out) out.placeholder = h2;
+        };
+        const typeSelect = document.getElementById("jobs-type-select") as HTMLSelectElement;
+        typeSelect?.addEventListener("change", () => updateJobHints(typeSelect.value));
+        updateJobHints(typeSelect?.value ?? "extract");
+
         document.getElementById("btn-jobs-browse-input")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value;
-            const selected = type === "extract"
-                ? await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] })
-                : await open({ directory: true });
+            const archiveFilter = { name: "Archives", extensions: ["it", "pack"] };
+            const modFilter = { name: "Mod files", extensions: ["mod"] };
+            let selected: string | string[] | null = null;
+            if (type === "extract" || type === "differ") {
+                selected = await open({ filters: [archiveFilter] });
+            } else if (type === "apply-mod") {
+                selected = await open({ filters: [modFilter] });
+            } else {
+                selected = await open({ directory: true });
+            }
             if (selected && !Array.isArray(selected)) {
                 (document.getElementById("jobs-input") as HTMLInputElement).value = selected as string;
             }
         });
 
         document.getElementById("btn-jobs-browse-output")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
-            const selected = await open({ directory: true });
-            if (selected && !Array.isArray(selected)) {
-                (document.getElementById("jobs-output") as HTMLInputElement).value = selected as string;
+            const { open, save } = await import("./platform/dialog");
+            const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value;
+            let path: string | null = null;
+            if (type === "pack" || type === "merge") {
+                path = await save({ filters: [{ name: "Archives", extensions: ["it"] }] });
+            } else if (type === "differ") {
+                path = await save({ filters: [{ name: "Patch", extensions: ["patch"] }] });
+            } else {
+                const sel = await open({ directory: true });
+                path = (sel && !Array.isArray(sel)) ? sel as string : null;
             }
+            if (path) (document.getElementById("jobs-output") as HTMLInputElement).value = path;
         });
     }
 
     private jobsAdd() {
-        const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value as "extract" | "pack";
+        const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value as JobEntry["type"];
         const input = (document.getElementById("jobs-input") as HTMLInputElement).value.trim();
         const output = (document.getElementById("jobs-output") as HTMLInputElement).value.trim();
         const key = (document.getElementById("jobs-key") as HTMLInputElement).value.trim() || undefined;
@@ -1269,13 +1373,15 @@ class App {
         const row = document.createElement("div");
         row.className = "job-row";
         row.id = `job-${job.id}`;
+        const typeLabel = this.t(`job_type_${job.type.replace("-","_")}`) || job.type;
+        const fname = job.input.split(/[\\/]/).pop() ?? job.input;
         row.innerHTML = `
             <div class="job-header">
-                <span class="job-type-badge ${job.type}">${job.type}</span>
-                <span class="job-path" title="${job.input}">${job.input}</span>
-                <span class="job-status" id="job-status-${job.id}">pending</span>
+                <span class="job-type-badge ${job.type}">${typeLabel}</span>
+                <span class="job-path" title="${job.input}">${fname}</span>
+                <span class="job-status" id="job-status-${job.id}">${this.t("status_pending") || "pending"}</span>
                 <div class="job-actions">
-                    <button class="tab-btn" data-job-run="${job.id}">Run</button>
+                    <button class="tab-btn" data-job-run="${job.id}">${this.t("btn_run") || "Run"}</button>
                     <button class="tab-btn" data-job-remove="${job.id}">✕</button>
                 </div>
             </div>
@@ -1311,22 +1417,33 @@ class App {
         };
 
         try {
-            const { listen } = await import("@tauri-apps/api/event");
+            const { listen } = await import("./platform/event");
             const unlisten = await listen("progress", (e) => progressHandler(e.payload));
 
             if (job.type === "extract") {
                 await invoke("extract_pack_to", {
-                    input: job.input,
-                    output: job.output,
-                    key: job.key || null,
-                    filters: [] as string[],
+                    input: job.input, output: job.output,
+                    key: job.key || null, filters: [] as string[],
                 });
-            } else {
+            } else if (job.type === "pack" || job.type === "merge") {
                 await invoke("create_archive", {
-                    input: job.input,
-                    output: job.output,
-                    key: job.key || "",
-                    wrapData: false,
+                    input: job.input, output: job.output,
+                    key: job.key || "", wrapData: false,
+                });
+            } else if (job.type === "differ") {
+                // input = base archive, output = modified archive, patch = base + ".patch"
+                const patchOut = job.input.replace(/\.(it|pack)$/i, ".patch");
+                await invoke("create_patch", {
+                    base: job.input, modified: job.output,
+                    output: patchOut, key: job.key || "",
+                });
+            } else if (job.type === "apply-mod") {
+                // job.input is a path to a .mod file; apply_mod needs its raw
+                // TOML text (mod_toml), not a path — load it first.
+                const modToml = await invoke("load_mod_file", { path: job.input }) as string;
+                await invoke("apply_mod", {
+                    modToml, archive: job.output,
+                    key: job.key || null,
                 });
             }
 
@@ -1394,7 +1511,7 @@ class App {
 
     private setupFeaturesEditor() {
         document.getElementById("btn-features-browse")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const file = await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] });
             if (file && !Array.isArray(file)) {
                 (document.getElementById("features-archive") as HTMLInputElement).value = file as string;
@@ -1650,14 +1767,14 @@ class App {
 
         // Browse buttons
         document.getElementById("btn-launcher-browse")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const dir = await open({ directory: true });
             if (dir && !Array.isArray(dir)) {
                 (document.getElementById("launcher-client-dir") as HTMLInputElement).value = dir as string;
             }
         });
         document.getElementById("btn-profile-browse")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const dir = await open({ directory: true });
             if (dir && !Array.isArray(dir)) {
                 (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = dir as string;
@@ -1672,7 +1789,7 @@ class App {
         }
 
         document.getElementById("btn-kanan-browse")?.addEventListener("click", async () => {
-            const { open } = await import("@tauri-apps/plugin-dialog");
+            const { open } = await import("./platform/dialog");
             const file = await open({
                 filters: [{ name: "Loader Config", extensions: ["cfg"] }],
                 title: "Select Kanan Loader.cfg"
@@ -2716,17 +2833,26 @@ class App {
         menu.style.left = `${ev.pageX}px`;
         menu.style.top = `${ev.pageY}px`;
 
-        const extractBtn = document.getElementById("menu-extract")!;
-        const copyNameBtn = document.getElementById("menu-copy-name")!;
-        const copyKeyBtn = document.getElementById("menu-copy-key")!;
-        const convPngBtn = document.getElementById("menu-conv-png")!;
-        const convDdsBtn = document.getElementById("menu-conv-dds")!;
-        
+        const extractBtn    = document.getElementById("menu-extract")!;
+        const copyNameBtn   = document.getElementById("menu-copy-name")!;
+        const copyKeyBtn    = document.getElementById("menu-copy-key")!;
+        const convPngBtn    = document.getElementById("menu-conv-png")!;
+        const convDdsBtn    = document.getElementById("menu-conv-dds")!;
+        const renameBtn     = document.getElementById("menu-rename")!;
+        const deleteBtn     = document.getElementById("menu-delete")!;
+        const renameDiv     = document.getElementById("menu-divider-rename")!;
+        const convXmlBtn    = document.getElementById("menu-conv-xml")!;
+        const convObjBtn    = document.getElementById("menu-conv-obj")!;
+
         const closeMenu = () => {
             menu.style.display = "none";
             document.removeEventListener("click", closeMenu);
+            document.removeEventListener("contextmenu", closeMenu as any);
         };
-        setTimeout(() => document.addEventListener("click", closeMenu), 10);
+        setTimeout(() => {
+            document.addEventListener("click", closeMenu);
+            document.addEventListener("contextmenu", closeMenu as any);
+        }, 10);
 
         extractBtn.onclick = async () => {
             const fileName = entry.name.split(/[\\/¥₩]/).pop() || "extracted_file";
@@ -2734,34 +2860,58 @@ class App {
             if (dest) {
                 const skey = (entry.salt_used === "N/A" || entry.salt_used === "Search/Default") ? null : entry.salt_used;
                 try {
-                    await invoke("extract_file_to", { 
-                        archive: entry.source_archive, 
-                        entry: entry.name, 
-                        dest: dest, 
-                        key: skey 
+                    await invoke("extract_file_to", {
+                        archive: entry.source_archive,
+                        entry: entry.name,
+                        dest: dest,
+                        key: skey
                     });
                     this.log(`Extracted: ${dest}`, "success");
                 } catch(e) { this.log(`Error: ${e}`, "error"); }
             }
         };
 
-        copyNameBtn.onclick = () => { 
-            navigator.clipboard.writeText(entry.name); 
-            this.log("Name copied to clipboard."); 
+        copyNameBtn.onclick = () => {
+            navigator.clipboard.writeText(entry.name);
+            this.log("Name copied to clipboard.");
         };
-        copyKeyBtn.onclick = () => { 
-            navigator.clipboard.writeText(entry.salt_used); 
-            this.log("Salt copied to clipboard."); 
+        copyKeyBtn.onclick = () => {
+            navigator.clipboard.writeText(entry.salt_used);
+            this.log("Salt copied to clipboard.");
         };
 
-        const isDds = entry.name.toLowerCase().endsWith(".dds");
-        const isPng = entry.name.toLowerCase().endsWith(".png");
+        // Rename / Delete — only when archive is loaded in edit mode
+        const canEdit = !!this.currentArchive;
+        renameDiv.style.display  = canEdit ? "block" : "none";
+        renameBtn.style.display  = canEdit ? "block" : "none";
+        deleteBtn.style.display  = canEdit ? "block" : "none";
+
+        renameBtn.onclick = () => {
+            const newName = prompt("New path (relative to archive root):", entry.name);
+            if (!newName || newName === entry.name) return;
+            this.vfsPending.push({ op: "rename", from: entry.name, to: newName });
+            this.renderVfsPending();
+        };
+        deleteBtn.onclick = () => {
+            this.vfsPending.push({ op: "delete", path: entry.name });
+            this.renderVfsPending();
+        };
+
+        // Conversion options — by file extension
+        const lname = entry.name.toLowerCase();
+        const isDds = lname.endsWith(".dds");
+        const isPng = lname.endsWith(".png");
+        const isXmlCompiled = lname.endsWith(".xml.compiled");
+        const isPmg = lname.endsWith(".pmg");
+
         convPngBtn.style.display = isDds ? "block" : "none";
         convDdsBtn.style.display = isPng ? "block" : "none";
-        
+        convXmlBtn.style.display = isXmlCompiled ? "block" : "none";
+        convObjBtn.style.display = isPmg ? "block" : "none";
+
         convPngBtn.onclick = async () => {
             try {
-                const out = await save({ defaultPath: entry.name.replace(".dds", ".png") });
+                const out = await save({ defaultPath: entry.name.replace(/\.dds$/i, ".png") });
                 if (out) {
                     await invoke("run_convert", { input: entry.source_archive, output: out, key: entry.salt_used, wrapData: false });
                     this.log(`Converted to PNG: ${out}`, "success");
@@ -2771,12 +2921,45 @@ class App {
 
         convDdsBtn.onclick = async () => {
             try {
-                const out = await save({ defaultPath: entry.name.replace(".png", ".dds") });
+                const out = await save({ defaultPath: entry.name.replace(/\.png$/i, ".dds") });
                 if (out) {
                     await invoke("run_convert", { input: entry.source_archive, output: out, key: entry.salt_used, wrapData: false });
                     this.log(`Converted to DDS: ${out}`, "success");
                 }
             } catch(e) { this.log(`Failed: ${e}`, "error"); }
+        };
+
+        convXmlBtn.onclick = async () => {
+            try {
+                const xml = await invoke("convert_xml_compiled", {
+                    archivePath: entry.source_archive,
+                    entryPath: entry.name,
+                    key: entry.salt_used || null,
+                }) as string;
+                // Show in a save dialog
+                const baseName = entry.name.replace(/\.compiled$/i, "");
+                const out = await save({ defaultPath: baseName });
+                if (out) {
+                    await writeTextFile(out, xml);
+                    this.log(`Decompiled to XML: ${out}`, "success");
+                }
+            } catch(e) { this.log(`Decompile failed: ${e}`, "error"); }
+        };
+
+        convObjBtn.onclick = async () => {
+            try {
+                const obj = await invoke("export_pmg_obj", {
+                    archivePath: entry.source_archive,
+                    entryPath: entry.name,
+                    key: entry.salt_used || null,
+                }) as string;
+                const baseName = entry.name.replace(/\.pmg$/i, ".obj");
+                const out = await save({ defaultPath: baseName });
+                if (out) {
+                    await writeTextFile(out, obj);
+                    this.log(`Exported OBJ: ${out}`, "success");
+                }
+            } catch(e) { this.log(`OBJ export failed: ${e}`, "error"); }
         };
     }
 

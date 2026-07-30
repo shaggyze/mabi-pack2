@@ -1013,6 +1013,7 @@ dependencies = [
  "cc",
  "chrono",
  "clap",
+ "encoding_rs",
  "env_logger",
  "flate2",
  "image",

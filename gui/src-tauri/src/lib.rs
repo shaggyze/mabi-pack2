@@ -1009,7 +1009,7 @@ async fn get_preview_ext(
                 preview.content_text = Some(format!("Image decode failed: {}", e));
             }
         }
-    } else if preview.file_type == "text" {
+    } else if preview.file_type == "text" || preview.file_type == "mml" {
         let text_slice = if raw_bytes.len() > MAX_HEX_BYTES {
             preview.truncated = true;
             &raw_bytes[..MAX_HEX_BYTES]
@@ -1017,6 +1017,16 @@ async fn get_preview_ext(
             &raw_bytes[..]
         };
         preview.content_text = Some(decode_text_bytes(text_slice));
+        if preview.file_type == "mml" { raw_bytes = Vec::new(); }
+    } else if preview.file_type == "set" {
+        preview.content_text = Some(match parse_set_header_inner(&raw_bytes) {
+            Ok(h) if h.is_xml => "XML-format .set file".to_string(),
+            Ok(h) => format!(
+                "Animation: {} frames, {} bones, {}ms duration\nMagic: {}  Version: {}",
+                h.frame_count, h.bone_count, h.duration_ms, h.magic, h.version
+            ),
+            Err(e) => format!("Unknown .set format: {}", e),
+        });
     } else if preview.file_type == "pmg" {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => {
@@ -1097,6 +1107,14 @@ pub struct PmgGeometry {
     texture_name: String,
     vertex_count: usize,
     face_count: usize,
+    /// Per-vertex RGB colors (r0,g0,b0, r1,g1,b1, …), normalized 0-1.
+    /// Empty when all vertices carry the default all-white (255,255,255) colour,
+    /// which means "no meaningful per-vertex tint" in most Mabinogi meshes.
+    vertex_colors: Vec<f32>,
+    /// Average of all per-vertex RGB colours, normalized 0-1.
+    /// Always present; gives a single representative diffuse tint even when
+    /// vertex_colors is empty.
+    avg_color: [f32; 3],
 }
 
 /// Converts a triangle strip index list to a triangle list.
@@ -1147,6 +1165,21 @@ fn parse_pmg_bytes(data: &[u8]) -> Result<PmgGeometry, String> {
         strip_to_triangles(&lod.strip_indices).iter().map(|&i| i as u32).collect()
     };
     let face_count = indices.len() / 3;
+
+    // Extract per-vertex BGRA colours and compute the average.
+    // "All white" (255,255,255) is the Mabinogi default meaning "no tint" —
+    // omit the per-vertex array in that case so the viewer uses the accent colour.
+    let all_white = lod.vertices.iter().all(|v| v.r == 255 && v.g == 255 && v.b == 255);
+    let (mut r_sum, mut g_sum, mut b_sum) = (0f32, 0f32, 0f32);
+    let mut vertex_colors: Vec<f32> = if all_white { Vec::new() } else { Vec::with_capacity(lod.vertices.len() * 3) };
+    for v in &lod.vertices {
+        let (r, g, b) = (v.r as f32 / 255.0, v.g as f32 / 255.0, v.b as f32 / 255.0);
+        r_sum += r; g_sum += g; b_sum += b;
+        if !all_white { vertex_colors.extend_from_slice(&[r, g, b]); }
+    }
+    let n = lod.vertices.len().max(1) as f32;
+    let avg_color = [r_sum / n, g_sum / n, b_sum / n];
+
     Ok(PmgGeometry {
         positions,
         normals: Vec::new(), // computed by Three.js computeVertexNormals()
@@ -1156,6 +1189,8 @@ fn parse_pmg_bytes(data: &[u8]) -> Result<PmgGeometry, String> {
         texture_name: lod.texture_name.clone(),
         vertex_count: lod.vertices.len(),
         face_count,
+        vertex_colors,
+        avg_color,
     })
 }
 
@@ -1165,8 +1200,8 @@ fn parse_pmg_geometry(bytes: Vec<u8>) -> Result<PmgGeometry, String> {
 }
 
 #[tauri::command]
-fn parse_rgn(bytes: Vec<u8>) -> Option<rgn_lib::RgnData> {
-    rgn_lib::parse_rgn(&bytes)
+fn parse_rgn(bytes: Vec<u8>) -> Result<rgn_lib::RgnData, String> {
+    rgn_lib::parse_rgn(&bytes).ok_or_else(|| "RGN parse failed — unrecognised format or version".to_string())
 }
 
 #[derive(Serialize)]
@@ -1804,7 +1839,7 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
                 preview.content_text = Some(format!("Image decode failed: {}", e));
             }
         }
-    } else if preview.file_type == "text" {
+    } else if preview.file_type == "text" || preview.file_type == "mml" {
         let text_slice = if raw_bytes.len() > MAX_HEX_BYTES {
             preview.truncated = true;
             &raw_bytes[..MAX_HEX_BYTES]
@@ -1812,6 +1847,16 @@ async fn preview_loose_file(path: String) -> Result<PreviewData, String> {
             &raw_bytes[..]
         };
         preview.content_text = Some(decode_text_bytes(text_slice));
+        if preview.file_type == "mml" { raw_bytes = Vec::new(); }
+    } else if preview.file_type == "set" {
+        preview.content_text = Some(match parse_set_header_inner(&raw_bytes) {
+            Ok(h) if h.is_xml => "XML-format .set file".to_string(),
+            Ok(h) => format!(
+                "Animation: {} frames, {} bones, {}ms duration\nMagic: {}  Version: {}",
+                h.frame_count, h.bone_count, h.duration_ms, h.magic, h.version
+            ),
+            Err(e) => format!("Unknown .set format: {}", e),
+        });
     } else if preview.file_type == "pmg" {
         match parse_pmg_bytes(&raw_bytes) {
             Ok(geo) => { preview.pmg_geometry = Some(geo); },
@@ -1931,13 +1976,12 @@ fn list_mod_files() -> Vec<ModInfo> {
         .collect()
 }
 
-/// Parse and return a single .mod file's metadata + content.
+/// Read a .mod file's raw TOML text (both apply_mod call sites pass this
+/// straight through to apply_mod's mod_toml param, which parses TOML — this
+/// must return the raw file content, not a JSON re-serialization of it).
 #[tauri::command]
 fn load_mod_file(path: String) -> Result<String, String> {
-    match mod_file::ModPackage::load(std::path::Path::new(&path)) {
-        Ok(pkg) => serde_json::to_string(&pkg).map_err(|e| e.to_string()),
-        Err(e)  => Err(e.to_string()),
-    }
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
 /// Return the blank .mod template string.
@@ -2592,6 +2636,164 @@ fn write_kanan_cfg(path: String, mods: Vec<KananMod>) -> Result<(), String> {
     }
     fs::write(&path, out.trim_end()).map_err(|e| format!("Cannot write {}: {}", path, e))
 }
+
+#[tauri::command]
+fn convert_xml_compiled(archive_path: String, entry_path: String, key: Option<String>) -> Result<String, String> {
+    let salts = mabi_pack2::load_salts();
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_feat_xml_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let clean = || { let _ = std::fs::remove_dir_all(&tmp_dir); };
+
+    let fname = std::path::Path::new(&entry_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| entry_path.clone());
+
+    mabi_pack2::extract::run_extract_with_key_search(
+        &archive_path, &tmp_dir.to_string_lossy(), key,
+        &salts, vec![fname.clone()], None, false, false, false, None,
+    ).map_err(|e| { clean(); e.to_string() })?;
+
+    let extracted = walkdir::WalkDir::new(&tmp_dir).into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().to_lowercase() == fname.to_lowercase())
+        .map(|e| e.into_path());
+
+    let data = match extracted {
+        Some(p) => std::fs::read(&p).map_err(|e| { clean(); e.to_string() })?,
+        None => { clean(); return Err(format!("{} not found in archive", fname)); }
+    };
+    clean();
+
+    let parsed = mabi_pack2::common_ext::parse_features_compiled(&data)
+        .ok_or_else(|| "Failed to parse features.xml.compiled".to_string())?;
+
+    // Emit as human-readable XML. FeatureEntry only carries hash/hash_hex/
+    // conditions (no name field) — a feature with no conditions listed is
+    // enabled by default; ["FALSE"] is how apply_mod/handle_features_save
+    // represent "disabled" (see their feature-toggle logic).
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<features>\n");
+    for f in &parsed.features {
+        let enabled = !f.conditions.iter().any(|c| c.eq_ignore_ascii_case("FALSE"));
+        if f.conditions.is_empty() {
+            xml.push_str(&format!("  <feature hash=\"{}\" enabled=\"{}\" />\n",
+                f.hash_hex, enabled));
+        } else {
+            xml.push_str(&format!("  <feature hash=\"{}\" enabled=\"{}\">\n",
+                f.hash_hex, enabled));
+            for c in &f.conditions {
+                xml.push_str(&format!("    <condition>{}</condition>\n", c));
+            }
+            xml.push_str("  </feature>\n");
+        }
+    }
+    xml.push_str("</features>\n");
+    Ok(xml)
+}
+
+#[tauri::command]
+fn export_pmg_obj(archive_path: String, entry_path: String, key: Option<String>) -> Result<String, String> {
+    let salts = mabi_pack2::load_salts();
+    let tmp_dir = std::env::temp_dir().join(format!("mabi_pmg_obj_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let clean = || { let _ = std::fs::remove_dir_all(&tmp_dir); };
+
+    let fname = std::path::Path::new(&entry_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| entry_path.clone());
+
+    mabi_pack2::extract::run_extract_with_key_search(
+        &archive_path, &tmp_dir.to_string_lossy(), key,
+        &salts, vec![fname.clone()], None, false, false, false, None,
+    ).map_err(|e| { clean(); e.to_string() })?;
+
+    let extracted = walkdir::WalkDir::new(&tmp_dir).into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().to_lowercase() == fname.to_lowercase())
+        .map(|e| e.into_path());
+
+    let data = match extracted {
+        Some(p) => std::fs::read(&p).map_err(|e| { clean(); e.to_string() })?,
+        None => { clean(); return Err(format!("{} not found in archive", fname)); }
+    };
+    clean();
+
+    let geo = parse_pmg_bytes(&data)?;
+    let mut obj = String::from("# Exported by mabi-patcher\n");
+    // `positions` is the flat local-space xyz array (see PmgGeometry / parse_pmg_bytes).
+    let verts: Vec<[f32;3]> = geo.positions.chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]]).collect();
+    for v in &verts {
+        obj.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
+    }
+    if geo.normals.len() == geo.positions.len() {
+        for n in geo.normals.chunks_exact(3) {
+            obj.push_str(&format!("vn {} {} {}\n", n[0], n[1], n[2]));
+        }
+    }
+    if geo.uvs.len() / 2 == geo.positions.len() / 3 {
+        for uv in geo.uvs.chunks_exact(2) {
+            obj.push_str(&format!("vt {} {}\n", uv[0], uv[1]));
+        }
+    }
+    for tri in geo.indices.chunks_exact(3) {
+        let (a,b,c) = (tri[0]+1, tri[1]+1, tri[2]+1);
+        if !geo.uvs.is_empty() && geo.normals.len() == geo.positions.len() {
+            obj.push_str(&format!("f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}\n", a, b, c));
+        } else if geo.normals.len() == geo.positions.len() {
+            obj.push_str(&format!("f {0}//{0} {1}//{1} {2}//{2}\n", a, b, c));
+        } else {
+            obj.push_str(&format!("f {} {} {}\n", a, b, c));
+        }
+    }
+    Ok(obj)
+}
+
+#[tauri::command]
+fn verify_game_files(game_path: String) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead, BufReader};
+    let version_dat = std::path::Path::new(&game_path).join("version.dat");
+    if !version_dat.exists() {
+        return Err("version.dat not found in game path".to_string());
+    }
+    let f = std::fs::File::open(&version_dat).map_err(|e| e.to_string())?;
+    let mut missing = Vec::<String>::new();
+    let mut mismatched = Vec::<String>::new();
+    for line in BufReader::new(f).lines().flatten() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 2 { continue; }
+        let rel = parts[0];
+        let expected_size: u64 = parts[1].trim().parse().unwrap_or(0);
+        let full = std::path::Path::new(&game_path).join(rel);
+        match std::fs::metadata(&full) {
+            Err(_) => missing.push(rel.to_string()),
+            Ok(m) if expected_size > 0 && m.len() != expected_size => {
+                mismatched.push(rel.to_string());
+            }
+            _ => {}
+        }
+    }
+    let ok = missing.is_empty() && mismatched.is_empty();
+    Ok(serde_json::json!({ "ok": ok, "missing": missing, "mismatched": mismatched }))
+}
+
+#[tauri::command]
+fn repair_game_files(game_path: String) -> Result<serde_json::Value, String> {
+    let mabdown = std::path::Path::new(&game_path).join("MabiTDown.exe");
+    if mabdown.exists() {
+        std::process::Command::new(&mabdown)
+            .arg("/repair")
+            .current_dir(&game_path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({ "action": "mabitydown_launched" }));
+    }
+    // Fall back to verify and report
+    verify_game_files(game_path)
+}
+
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2640,7 +2842,8 @@ pub fn run() {
             save_pending_changes, load_pending_changes,
             read_kanan_cfg, write_kanan_cfg,
             apply_mod,
-            get_mabi_version_local
+            get_mabi_version_local,
+            convert_xml_compiled, export_pmg_obj, verify_game_files, repair_game_files
         ])
 
         .run(tauri::generate_context!())
