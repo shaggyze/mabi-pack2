@@ -1727,6 +1727,8 @@ class App {
     private readonly LAUNCHER_SESSION_KEY = "nexon_session";
     private launcherProfiles: any[] = [];
     private activeProfileId: string | null = null;
+    private activeProfileLoginIp: string = "";
+    private activeProfileLoginPort: number = 0;
     private profileEditorMode: "new" | "edit" | null = null;
     private kananMods: Array<{ name: string; enabled: boolean }> = [];
 
@@ -1753,16 +1755,21 @@ class App {
             const statusEl = document.getElementById("launcher-update-status")!;
             statusEl.textContent = "Checking...";
             statusEl.className = "launcher-update-status";
+            statusEl.classList.remove("hidden");
             try {
-                // Local version from registry
-                const localInfo = await invoke("get_mabi_version_local") as { installed_version?: string } | null;
-                const localVer = localInfo?.installed_version ? parseInt(localInfo.installed_version, 10) : null;
-                // Remote version (requires session)
+                // Local version: registry HKCU + version.dat
+                const localInfo = await invoke("get_mabi_version_local") as { installed_version?: string; client_dir?: string } | null;
+                const localVerStr = localInfo?.installed_version;
+                const localVer = localVerStr ? parseInt(localVerStr, 10) : null;
+                // Remote version: public Nexon API (no login needed)
                 let remoteVer: number | null = null;
-                if (this.launcherSession) {
-                    try {
-                        remoteVer = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
-                    } catch (_) {}
+                try {
+                    const remoteInfo = await invoke("get_mabi_version_remote") as { remote_version?: number } | null;
+                    remoteVer = remoteInfo?.remote_version ?? null;
+                } catch (_) {}
+                // Fall back to session-based remote if public API failed
+                if (!remoteVer && this.launcherSession) {
+                    try { remoteVer = await invoke("launcher_get_version", { session: this.launcherSession }) as number; } catch (_) {}
                 }
                 if (localVer && remoteVer) {
                     if (remoteVer > localVer) {
@@ -1777,27 +1784,55 @@ class App {
                         statusEl.className = "launcher-update-status up-to-date";
                     }
                 } else if (localVer) {
-                    statusEl.textContent = `Local: v${localVer} (login to check remote version)`;
+                    const remoteStr = remoteVer ? ` / remote v${remoteVer}` : " (remote unavailable)";
+                    statusEl.textContent = `Local v${localVer}${remoteStr}`;
+                    statusEl.className = "launcher-update-status";
+                } else if (remoteVer) {
+                    statusEl.textContent = `Remote v${remoteVer} — game dir not found in registry`;
                     statusEl.className = "launcher-update-status";
                 } else {
-                    statusEl.textContent = "Mabinogi not found in registry";
+                    statusEl.textContent = "Could not read version from registry or Nexon API";
                     statusEl.className = "launcher-update-status error";
                 }
             } catch (e) { statusEl.textContent = "Check failed: " + e; statusEl.className = "launcher-update-status error"; }
         });
 
-        // Profile selector change
+        // Profile selector change (Settings > Launcher sub-tab)
         document.getElementById("launcher-profile-select")?.addEventListener("change", (e) => {
             const id = (e.target as HTMLSelectElement).value;
             this.selectProfile(id);
         });
 
+        // Profile quick-select on main Launcher page
+        document.getElementById("launcher-page-profile-select")?.addEventListener("change", (e) => {
+            const id = (e.target as HTMLSelectElement).value;
+            this.selectProfile(id);
+            // Mirror selection to settings dropdown
+            const settingsSel = document.getElementById("launcher-profile-select") as HTMLSelectElement;
+            if (settingsSel) settingsSel.value = id;
+        });
+        document.getElementById("btn-launcher-manage-profiles")?.addEventListener("click", () => {
+            // Navigate to Settings > Launcher sub-tab
+            document.getElementById("nav-settings")?.click();
+            setTimeout(() => {
+                (document.querySelector("[data-stab='launcher']") as HTMLElement)?.click();
+            }, 50);
+        });
+
         // Profile buttons
+        document.getElementById("btn-profile-detect")?.addEventListener("click", () => this.detectLauncherProfiles());
         document.getElementById("btn-profile-new")?.addEventListener("click", () => this.openProfileEditor("new"));
         document.getElementById("btn-profile-delete")?.addEventListener("click", () => this.deleteActiveProfile());
         document.getElementById("btn-profile-save")?.addEventListener("click", () => this.saveProfileEditor());
         document.getElementById("btn-profile-cancel")?.addEventListener("click", () => this.closeProfileEditor());
         document.getElementById("btn-profile-save-after-launch")?.addEventListener("click", () => this.saveCurrentSettingsToProfile());
+
+        // Custom server toggle in profile editor
+        document.getElementById("launcher-profile-custom-server")?.addEventListener("change", (e) => {
+            const checked = (e.target as HTMLInputElement).checked;
+            const serverFields = document.getElementById("launcher-profile-server-fields");
+            if (serverFields) serverFields.style.display = checked ? "block" : "none";
+        });
 
         // Browse buttons
         document.getElementById("btn-launcher-browse")?.addEventListener("click", async () => {
@@ -1846,15 +1881,22 @@ class App {
             this.launcherProfiles = profiles || [];
             this.renderProfileSelect();
 
-            // Auto-select active profile and populate client-dir
             const active = this.launcherProfiles[0];
             if (active) {
                 this.activeProfileId = active.id;
                 this.applyProfileToUI(active);
-                // If auto-login + valid session, restore it
                 if (active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
                 }
+            } else {
+                // No profiles — try to auto-fill client dir from registry
+                try {
+                    const info = await invoke("get_mabi_version_local") as { client_dir?: string } | null;
+                    if (info?.client_dir) {
+                        const el = document.getElementById("launcher-client-dir") as HTMLInputElement;
+                        if (el && !el.value) el.value = info.client_dir;
+                    }
+                } catch (_) {}
             }
         } catch {
             // No profiles yet or backend not available — silent
@@ -1862,20 +1904,25 @@ class App {
     }
 
     private renderProfileSelect() {
-        const sel = document.getElementById("launcher-profile-select") as HTMLSelectElement;
-        if (!sel) return;
-        sel.innerHTML = "";
-        if (this.launcherProfiles.length === 0) {
-            sel.innerHTML = "<option value=''>— No profiles saved —</option>";
-            return;
-        }
-        for (const p of this.launcherProfiles) {
-            const opt = document.createElement("option");
-            opt.value = p.id;
-            const badge = p.session_valid ? " ✓" : p.has_session ? " ⚠" : "";
-            opt.textContent = `${p.name} (${p.email})${badge}`;
-            if (p.id === this.activeProfileId) opt.selected = true;
-            sel.appendChild(opt);
+        const selIds = ["launcher-profile-select", "launcher-page-profile-select"];
+        for (const selId of selIds) {
+            const sel = document.getElementById(selId) as HTMLSelectElement;
+            if (!sel) continue;
+            sel.innerHTML = "";
+            if (this.launcherProfiles.length === 0) {
+                sel.innerHTML = "<option value=''>— No profiles saved —</option>";
+                continue;
+            }
+            for (const p of this.launcherProfiles) {
+                const opt = document.createElement("option");
+                opt.value = p.id;
+                const sessionBadge = p.session_valid ? " ✓" : p.has_session ? " ⚠" : "";
+                const typeBadge = p.profile_type && p.profile_type !== "nexon" ? ` [${p.profile_type}]` : "";
+                const emailPart = p.email ? ` (${p.email})` : "";
+                opt.textContent = `${p.name}${emailPart}${typeBadge}${sessionBadge}`;
+                if (p.id === this.activeProfileId) opt.selected = true;
+                sel.appendChild(opt);
+            }
         }
     }
 
@@ -1883,9 +1930,29 @@ class App {
         if (profile.client_dir) {
             (document.getElementById("launcher-client-dir") as HTMLInputElement).value = profile.client_dir;
         }
-        // Pre-fill email in login form if not yet logged in
         if (!this.launcherSession && profile.email) {
             (document.getElementById("launcher-email") as HTMLInputElement).value = profile.email;
+        }
+        // Track active profile server settings for launch
+        this.activeProfileLoginIp = profile.login_ip || "";
+        this.activeProfileLoginPort = profile.login_port || 0;
+
+        const isCustom = !!(profile.login_ip && profile.login_ip.trim());
+        // Show login card only for official profiles; custom servers launch directly
+        const loginCard = document.getElementById("launcher-login-card");
+        const sessionCard = document.getElementById("launcher-session-card");
+        if (loginCard) loginCard.style.display = isCustom ? "none" : "";
+        if (sessionCard && isCustom) sessionCard.style.display = "none";
+
+        // Update badge on launcher page
+        const badge = document.getElementById("launcher-profile-badge");
+        if (badge) {
+            if (isCustom) {
+                badge.textContent = `Custom server: ${profile.login_ip}:${profile.login_port || 11000} — ${profile.client_dir || "no game dir"}`;
+            } else {
+                const dir = profile.client_dir ? ` — ${profile.client_dir}` : "";
+                badge.textContent = `Official Nexon NA${dir}`;
+            }
         }
     }
 
@@ -1928,15 +1995,30 @@ class App {
         editor.classList.remove("hidden");
         if (mode === "new") {
             (document.getElementById("launcher-profile-name") as HTMLInputElement).value = "";
+            (document.getElementById("launcher-profile-email") as HTMLInputElement).value = "";
             (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value =
-                (document.getElementById("launcher-client-dir") as HTMLInputElement).value;
+                (document.getElementById("launcher-client-dir") as HTMLInputElement)?.value || "";
             (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = false;
+            (document.getElementById("launcher-profile-custom-server") as HTMLInputElement).checked = false;
+            const sf = document.getElementById("launcher-profile-server-fields");
+            if (sf) sf.style.display = "none";
         } else {
             const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
             if (profile) {
                 (document.getElementById("launcher-profile-name") as HTMLInputElement).value = profile.name;
+                (document.getElementById("launcher-profile-email") as HTMLInputElement).value = profile.email || "";
                 (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = profile.client_dir || "";
                 (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = !!profile.auto_login;
+                const hasCustom = !!(profile.login_ip || profile.login_port);
+                (document.getElementById("launcher-profile-custom-server") as HTMLInputElement).checked = hasCustom;
+                const sf = document.getElementById("launcher-profile-server-fields");
+                if (sf) sf.style.display = hasCustom ? "block" : "none";
+                if (hasCustom) {
+                    (document.getElementById("launcher-profile-login-ip") as HTMLInputElement).value = profile.login_ip || "";
+                    (document.getElementById("launcher-profile-login-port") as HTMLInputElement).value = String(profile.login_port || "");
+                    (document.getElementById("launcher-profile-chat-ip") as HTMLInputElement).value = profile.chat_ip || "";
+                    (document.getElementById("launcher-profile-chat-port") as HTMLInputElement).value = String(profile.chat_port || "");
+                }
             }
         }
     }
@@ -1950,18 +2032,27 @@ class App {
         const name = (document.getElementById("launcher-profile-name") as HTMLInputElement).value.trim();
         const clientDir = (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value.trim();
         const autoLogin = (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked;
-
-        // Get email from current login form or active profile
-        const emailEl = document.getElementById("launcher-email") as HTMLInputElement;
-        const email = emailEl.value.trim() ||
+        const emailEl = document.getElementById("launcher-profile-email") as HTMLInputElement;
+        const email = emailEl?.value.trim() ||
+            (document.getElementById("launcher-email") as HTMLInputElement)?.value.trim() ||
             this.launcherProfiles.find(p => p.id === this.activeProfileId)?.email || "";
+        const useCustom = (document.getElementById("launcher-profile-custom-server") as HTMLInputElement)?.checked;
+        const loginIp = useCustom ? (document.getElementById("launcher-profile-login-ip") as HTMLInputElement)?.value.trim() || null : null;
+        const loginPort = useCustom ? (parseInt((document.getElementById("launcher-profile-login-port") as HTMLInputElement)?.value) || null) : null;
+        const chatIp = useCustom ? (document.getElementById("launcher-profile-chat-ip") as HTMLInputElement)?.value.trim() || null : null;
+        const chatPort = useCustom ? (parseInt((document.getElementById("launcher-profile-chat-port") as HTMLInputElement)?.value) || null) : null;
 
         if (!name) { this.setLauncherStatus("Profile name is required", "error"); return; }
 
         const id = this.profileEditorMode === "edit" ? this.activeProfileId : null;
 
         try {
-            const newId = await invoke("launcher_save_profile", { id, name, email, clientDir, autoLogin }) as string;
+            const newId = await invoke("launcher_save_profile", {
+                id, name, email, clientDir, autoLogin,
+                profileType: useCustom ? "hyddwn" : "nexon",
+                loginIp, loginPort, chatIp, chatPort,
+                isOfficial: !useCustom,
+            }) as string;
             this.activeProfileId = newId;
             (document.getElementById("launcher-client-dir") as HTMLInputElement).value = clientDir;
             await this.loadProfiles();
@@ -1969,6 +2060,71 @@ class App {
             this.setLauncherStatus(`Profile "${name}" saved`, "ok");
         } catch (e: any) {
             this.setLauncherStatus(`Save failed: ${e}`, "error");
+        }
+    }
+
+    private async detectLauncherProfiles() {
+        const statusEl = document.getElementById("profile-detect-status");
+        const areaEl = document.getElementById("detected-profiles-area");
+        const listEl = document.getElementById("detected-profiles-list");
+        if (statusEl) statusEl.textContent = "Scanning…";
+        try {
+            const detected = await invoke("detect_launcher_profiles") as Array<{
+                source: string; name: string; client_dir: string;
+                login_ip: string; login_port: number;
+                chat_ip: string; chat_port: number;
+                is_official: boolean;
+            }>;
+            if (!detected || detected.length === 0) {
+                if (statusEl) statusEl.textContent = "No launchers detected";
+                if (areaEl) areaEl.style.display = "none";
+                return;
+            }
+            if (statusEl) statusEl.textContent = `Found ${detected.length} launcher(s)`;
+            if (areaEl) areaEl.style.display = "block";
+            if (listEl) {
+                listEl.innerHTML = "";
+                for (const d of detected) {
+                    const row = document.createElement("div");
+                    row.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border-glass)";
+                    const badge = d.is_official ? "OFFICIAL" : d.source.toUpperCase();
+                    const info = d.is_official
+                        ? `${d.name}${d.client_dir ? " — " + d.client_dir : ""}`
+                        : `${d.name}${d.login_ip ? " — " + d.login_ip + ":" + d.login_port : ""}`;
+                    row.innerHTML = `
+                        <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:var(--accent-cyan);color:#000">${badge}</span>
+                        <span style="flex:1;font-size:12px">${info}</span>
+                        <button class="tab-btn" style="font-size:11px;padding:2px 8px">Import</button>
+                    `;
+                    const importBtn = row.querySelector("button")!;
+                    const detected_copy = d;
+                    importBtn.addEventListener("click", async () => {
+                        try {
+                            await invoke("launcher_save_profile", {
+                                id: null,
+                                name: detected_copy.name,
+                                email: "",
+                                clientDir: detected_copy.client_dir,
+                                autoLogin: false,
+                                profileType: detected_copy.source,
+                                loginIp: detected_copy.login_ip || null,
+                                loginPort: detected_copy.login_port || null,
+                                chatIp: detected_copy.chat_ip || null,
+                                chatPort: detected_copy.chat_port || null,
+                                isOfficial: detected_copy.is_official,
+                            });
+                            await this.loadProfiles();
+                            importBtn.textContent = "Imported!";
+                            importBtn.disabled = true;
+                        } catch (e: any) {
+                            importBtn.textContent = "Error";
+                        }
+                    });
+                    listEl.appendChild(row);
+                }
+            }
+        } catch (e: any) {
+            if (statusEl) statusEl.textContent = `Detection failed: ${e}`;
         }
     }
 
@@ -2065,7 +2221,11 @@ class App {
     }
 
     private async launcherDoLaunch() {
-        if (!this.launcherSession) { this.setLauncherStatus("Please log in first", "error"); return; }
+        const isCustomServer = !!(this.activeProfileLoginIp && this.activeProfileLoginIp.trim());
+        if (!isCustomServer && !this.launcherSession) {
+            this.setLauncherStatus("Please log in first (or import a custom server profile)", "error");
+            return;
+        }
         const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
         if (!clientDir) { this.setLauncherStatus("Mabinogi folder is required", "error"); return; }
 
@@ -2074,7 +2234,12 @@ class App {
         this.setLauncherStatus("Launching…", "busy");
 
         try {
-            const r = await invoke("launcher_launch", { session: this.launcherSession, clientDir }) as any;
+            const r = await invoke("launcher_launch", {
+                session: this.launcherSession || null,
+                clientDir,
+                loginIp: this.activeProfileLoginIp || null,
+                loginPort: this.activeProfileLoginPort || null,
+            }) as any;
             const result = document.getElementById("launcher-launch-result")!;
             result.textContent = `Launched ${r.executable} (${r.argumentCount} args)${r.patchAvailable ? " — update available" : ""}`;
             result.className = "launcher-launch-result success";
@@ -2102,9 +2267,12 @@ class App {
     }
 
     private updateLauncherUI(loggedIn: boolean) {
-        document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
-        document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
-        document.getElementById("launcher-launch-card")?.classList.toggle("hidden", !loggedIn);
+        // Only touch login/session cards if we're in official-server mode
+        const isCustom = !!(this.activeProfileLoginIp && this.activeProfileLoginIp.trim());
+        if (!isCustom) {
+            document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
+            document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
+        }
         if (loggedIn && this.launcherSession) {
             const token = this.launcherSession.session_token;
             const preview = token ? token.substring(0, 12) + "…" : "—";
