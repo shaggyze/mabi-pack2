@@ -38,6 +38,24 @@ pub struct Profile {
     /// Unix timestamp of last login.
     #[serde(default)]
     pub last_login_at: u64,
+    /// Profile origin: "nexon", "hyddwn", "kanan", or "manual".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_type: String,
+    /// Login server IP (for custom/private servers).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub login_ip: String,
+    /// Login server port.
+    #[serde(default)]
+    pub login_port: u16,
+    /// Chat server IP.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chat_ip: String,
+    /// Chat server port.
+    #[serde(default)]
+    pub chat_port: u16,
+    /// Whether this profile uses the official Nexon servers.
+    #[serde(default)]
+    pub is_official: bool,
 }
 
 impl Profile {
@@ -52,6 +70,12 @@ impl Profile {
             auto_login: false,
             created_at: unix_now(),
             last_login_at: 0,
+            profile_type: "nexon".to_string(),
+            login_ip: String::new(),
+            login_port: 0,
+            chat_ip: String::new(),
+            chat_port: 0,
+            is_official: true,
         }
     }
 
@@ -193,6 +217,12 @@ pub struct ProfileSummary {
     pub session_valid: bool,
     pub created_at: u64,
     pub last_login_at: u64,
+    pub profile_type: String,
+    pub login_ip: String,
+    pub login_port: u16,
+    pub chat_ip: String,
+    pub chat_port: u16,
+    pub is_official: bool,
 }
 
 impl From<&Profile> for ProfileSummary {
@@ -207,6 +237,12 @@ impl From<&Profile> for ProfileSummary {
             session_valid: p.is_session_valid(),
             created_at: p.created_at,
             last_login_at: p.last_login_at,
+            profile_type: p.profile_type.clone(),
+            login_ip: p.login_ip.clone(),
+            login_port: p.login_port,
+            chat_ip: p.chat_ip.clone(),
+            chat_port: p.chat_port,
+            is_official: p.is_official,
         }
     }
 }

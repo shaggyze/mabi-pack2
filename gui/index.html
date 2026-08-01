@@ -256,7 +256,19 @@
             </div>
           </div>
 
-          <!-- Login form -->
+          <!-- Profile quick-select -->
+          <div class="card" id="launcher-profile-quick-card">
+            <div class="card-header">Profile</div>
+            <div class="input-row" style="gap:6px">
+              <select id="launcher-page-profile-select" class="form-input" style="flex:1">
+                <option value="">— No profiles saved —</option>
+              </select>
+              <button class="tab-btn" id="btn-launcher-manage-profiles" style="font-size:11px;white-space:nowrap">Manage</button>
+            </div>
+            <div id="launcher-profile-badge" style="font-size:11px;margin-top:6px;color:var(--text-muted)"></div>
+          </div>
+
+          <!-- Login form (hidden for custom-server profiles) -->
           <div class="card" id="launcher-login-card">
             <div class="card-header" id="launcher-login-header-text">Login</div>
             <div class="form-group">
@@ -302,8 +314,8 @@
             </div>
           </div>
 
-          <!-- Launch section (shown after login) -->
-          <div class="card hidden" id="launcher-launch-card">
+          <!-- Launch section -->
+          <div class="card" id="launcher-launch-card">
             <div class="card-header" id="launcher-launch-header-text">Launch Game</div>
             <div class="form-group">
               <label id="launcher-client-label-text">Mabinogi Folder</label>
@@ -673,6 +685,16 @@
             <!-- Profile manager (moved from Launcher tab) -->
             <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
               <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
+              <!-- Detect from installed launchers -->
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+                <button class="tab-btn" id="btn-profile-detect">Detect from installed launchers</button>
+                <span id="profile-detect-status" style="font-size:11px;color:var(--text-muted)"></span>
+              </div>
+              <!-- Detected profiles import area (hidden until detect is run) -->
+              <div id="detected-profiles-area" style="display:none;margin-bottom:8px;border:1px solid var(--border-glass);border-radius:6px;padding:8px;">
+                <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text-muted)">DETECTED LAUNCHERS</div>
+                <div id="detected-profiles-list"></div>
+              </div>
               <div class="profile-selector-row">
                 <select id="launcher-profile-select" class="form-input profile-select">
                   <option value="">— No profiles saved —</option>
@@ -686,11 +708,33 @@
                   <input type="text" id="launcher-profile-name" class="form-input" placeholder="Main Account" />
                 </div>
                 <div class="form-group">
+                  <label>Email</label>
+                  <input type="text" id="launcher-profile-email" class="form-input" placeholder="user@example.com" />
+                </div>
+                <div class="form-group">
                   <label id="launcher-profile-client-label-text">Mabinogi Folder</label>
                   <div class="input-row">
                     <input type="text" id="launcher-profile-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
                     <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
                   </div>
+                </div>
+                <div id="launcher-profile-server-fields" style="display:none">
+                  <div style="font-size:11px;font-weight:600;margin:8px 0 4px;color:var(--text-muted)">CUSTOM SERVER</div>
+                  <div style="display:grid;grid-template-columns:1fr 80px 1fr 80px;gap:6px;align-items:center;">
+                    <input type="text" id="launcher-profile-login-ip" class="form-input" placeholder="Login IP" />
+                    <input type="number" id="launcher-profile-login-port" class="form-input" placeholder="Port" min="1" max="65535" />
+                    <input type="text" id="launcher-profile-chat-ip" class="form-input" placeholder="Chat IP" />
+                    <input type="number" id="launcher-profile-chat-port" class="form-input" placeholder="Port" min="1" max="65535" />
+                  </div>
+                  <div style="display:grid;grid-template-columns:auto;gap:4px;margin-top:4px;font-size:11px;color:var(--text-muted)">
+                    <span>Login IP / Port &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Chat IP / Port</span>
+                  </div>
+                </div>
+                <div class="form-group form-row" style="margin-top:6px">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="launcher-profile-custom-server" />
+                    <span>Use custom server</span>
+                  </label>
                 </div>
                 <div class="form-group form-row">
                   <label class="checkbox-label">
