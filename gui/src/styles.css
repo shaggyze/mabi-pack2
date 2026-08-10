@@ -389,6 +389,8 @@ body {
   color: var(--text-muted);
 }
 
+.hidden { display: none !important; }
+
 .status-dot {
   width: 8px;
   height: 8px;
