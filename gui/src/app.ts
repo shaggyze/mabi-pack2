@@ -2673,8 +2673,9 @@ class App {
             const r = await invoke("launcher_launch", {
                 session: this.launcherSession || null,
                 clientDir,
-                loginIp: this.activeProfileLoginIp || null,
-                loginPort: this.activeProfileLoginPort || null,
+                // Don't pass loginIp for official Nexon servers — use OAuth passport flow instead
+                loginIp: (this.activeProfileIsOfficial ? null : this.activeProfileLoginIp) || null,
+                loginPort: (this.activeProfileIsOfficial ? null : this.activeProfileLoginPort) || null,
                 preLaunchCmd: preLaunchCmd || null,
                 postLaunchCmd: postLaunchCmd || null,
                 launchCmdOverride: launchCmdOverride || null,
