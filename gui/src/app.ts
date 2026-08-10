@@ -110,6 +110,7 @@ interface Config {
     pre_launch_cmd: string;
     post_launch_cmd: string;
     parallel_ops: boolean;
+    mod_remote_url: string;
 }
 
 interface PreviewData {
@@ -188,6 +189,7 @@ class App {
         pre_launch_cmd: "",
         post_launch_cmd: "",
         parallel_ops: true,
+        mod_remote_url: "",
     };
 
     private loadedEntries: AggregateEntry[] = [];
@@ -201,6 +203,7 @@ class App {
     private _activePreviewContainer: string = "preview-visual";
     private _mmlAudioCtx: AudioContext | null = null;
     private _mmlStopFlag: boolean = false;
+    private modBrowserMode: 'local' | 'remote' = 'local';
 
     private previewKey(e: AggregateEntry) { return `${e.source_archive}::${e.name}`; }
     
@@ -1306,6 +1309,10 @@ class App {
     }
 
     private async refreshModsList() {
+        if (this.modBrowserMode === 'remote') {
+            await this.refreshRemoteMods();
+            return;
+        }
         const list  = document.getElementById("dash-mods-list");
         const empty = document.getElementById("dash-mods-empty");
         const path  = document.getElementById("dash-mods-path");
@@ -1352,6 +1359,62 @@ class App {
         } catch (_) {}
     }
 
+    private async refreshRemoteMods() {
+        const list  = document.getElementById("dash-mods-list");
+        const empty = document.getElementById("dash-mods-empty");
+        const path  = document.getElementById("dash-mods-path");
+        if (!list) return;
+        list.querySelectorAll(".mod-item").forEach(el => el.remove());
+        const url = this.config.mod_remote_url || "https://shaggyze.website/mabipatcher/api/mods";
+        if (path) path.textContent = url;
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const remoteMods = await resp.json() as Array<{
+                name: string; description?: string; url: string; version?: string; author?: string;
+            }>;
+            if (remoteMods.length === 0) {
+                if (empty) { empty.textContent = this.t("mod_no_remote"); empty.style.display = ""; }
+                return;
+            }
+            if (empty) empty.style.display = "none";
+            const dir = await invoke("get_mods_dir") as string;
+            for (const m of remoteMods) {
+                const el = document.createElement("div");
+                el.className = "mod-item";
+                const byline = [m.version, m.author].filter(Boolean).join(" · ");
+                const desc = m.description ? `<div class="mod-item-desc">${m.description}</div>` : "";
+                el.innerHTML = `
+                    <div class="mod-item-header">
+                        <span class="mod-item-name">${m.name}</span>
+                        <button class="tab-btn mod-install-btn" style="margin-left:auto;font-size:11px;padding:2px 8px;">${this.t("mod_install")}</button>
+                    </div>
+                    <div class="mod-item-meta">${byline}</div>
+                    ${desc}`;
+                const btn = el.querySelector(".mod-install-btn") as HTMLButtonElement;
+                btn.addEventListener("click", async () => {
+                    btn.textContent = this.t("mod_installing");
+                    btn.disabled = true;
+                    try {
+                        const r = await fetch(m.url);
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        const content = await r.text();
+                        const filename = m.name.replace(/[^\w\-.]/g, "_") + ".mod";
+                        await writeTextFile(dir + "\\" + filename, content);
+                        btn.textContent = this.t("mod_install_ok");
+                    } catch (e) {
+                        btn.textContent = this.t("mod_install");
+                        btn.disabled = false;
+                        this.log(`[Mods] Install failed: ${e}`, "error");
+                    }
+                });
+                list.insertBefore(el, empty!);
+            }
+        } catch (e) {
+            if (empty) { empty.textContent = `${this.t("mod_no_remote")}: ${e}`; empty.style.display = ""; }
+        }
+    }
+
     private async applyModFromDashboard(modFilePath: string) {
         try {
             const { open } = await import("./platform/dialog");
@@ -1391,6 +1454,16 @@ class App {
                 this.log(`[Mods] Created new mod template: ${dest}`, "info");
             } catch (e) { this.log(`[Mods] Failed to create template: ${e}`, "error"); }
         });
+
+        const toggleBtn = document.getElementById("btn-mod-source-toggle");
+        if (toggleBtn) {
+            toggleBtn.addEventListener("click", () => {
+                this.modBrowserMode = this.modBrowserMode === 'local' ? 'remote' : 'local';
+                toggleBtn.setAttribute("data-i18n", this.modBrowserMode === 'remote' ? "btn_mod_local" : "btn_mod_online");
+                toggleBtn.textContent = this.modBrowserMode === 'remote' ? this.t("btn_mod_local") : this.t("btn_mod_online");
+                this.refreshModsList();
+            });
+        }
     }
 
     // ── VFS editing ─────────────────────────────────────────────────────────────
