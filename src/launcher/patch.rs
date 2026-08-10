@@ -81,7 +81,7 @@ pub fn is_maintenance(session: &NexonSession) -> Result<bool> {
 fn build_client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 mabi-patcher/2.0")
+        .user_agent("NexonLauncher.nxl-release-18.14.10-220-fc7480c-coreapp-3.3.0")
         .build()?)
 }
 
