@@ -91,11 +91,12 @@ pub fn get_entry_data(archive_path: &str, entry_name: &str, key: Option<String>)
 
     let salts = crate::load_salts();
     let (entries, _salt, _entries_salt, iv0, _h_off, mode, content_start) = run_list_with_key_search_data(archive_path, key, &salts, None)?;
-    if let Some(ent) = entries.iter().find(|e| e.name == entry_name) {
+    let norm = entry_name.replace('\\', "/");
+    if let Some(ent) = entries.iter().find(|e| e.name == entry_name || e.name.replace('\\', "/") == norm) {
         let data = extract::extract_single_file_to_memory(&mmap, content_start, ent, iv0, mode)?;
         return Ok((data, iv0, mode, ent.clone()));
     }
-    
+
     warn!("[ENTRY_DATA] FAILED: Could not find or decrypt entry '{}'.", entry_name);
     Err(Error::msg("Entry not found or invalid key"))
 }

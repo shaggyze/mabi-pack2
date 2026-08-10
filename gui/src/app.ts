@@ -100,6 +100,16 @@ interface Config {
     patcher_game_path: string;
     patcher_hyddwn_enabled: boolean;
     patcher_hyddwn_url: string;
+    patcher_auto_update: boolean;
+    patcher_focus_on_start: boolean;
+    patcher_max_workers: number;
+    patcher_run_elevated: boolean;
+    launch_use_nexon_launcher: boolean;
+    launch_cmd_override: string;
+    pre_patch_cmd: string;
+    pre_launch_cmd: string;
+    post_launch_cmd: string;
+    parallel_ops: boolean;
 }
 
 interface PreviewData {
@@ -167,7 +177,17 @@ class App {
         kanan_cfg_path: "",
         patcher_game_path: "",
         patcher_hyddwn_enabled: false,
-        patcher_hyddwn_url: "http://127.0.0.1:11000"
+        patcher_hyddwn_url: "http://127.0.0.1:11000",
+        patcher_auto_update: false,
+        patcher_focus_on_start: false,
+        patcher_run_elevated: false,
+        patcher_max_workers: 10,
+        launch_use_nexon_launcher: false,
+        launch_cmd_override: "",
+        pre_patch_cmd: "",
+        pre_launch_cmd: "",
+        post_launch_cmd: "",
+        parallel_ops: true,
     };
 
     private loadedEntries: AggregateEntry[] = [];
@@ -324,6 +344,8 @@ class App {
         this.setupFeaturesEditor();
         this.setupThemeCustomizer();
         this.setupPatcherTab();
+        this.setupResizableList();
+        this.setup3dPreviewResize();
         this.setupForms();
         this.setupEventListen();
 
@@ -354,8 +376,12 @@ class App {
             }
         }
 
+        const isAdmin: boolean = await invoke("is_ran_as_admin");
+        if (this.config.patcher_run_elevated && !isAdmin) {
+            await invoke("request_elevation");
+            return;
+        }
         if (!this.config.suppress_admin_warning) {
-            const isAdmin = await invoke("is_ran_as_admin");
             if (!isAdmin) {
                 const confirmed = await ask(this.t("adminReq"), { title: this.t("adminTitle"), kind: "warning" });
                 if (confirmed) {
@@ -367,6 +393,14 @@ class App {
             }
         }
 
+        if (this.config.patcher_focus_on_start) {
+            document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
+        }
+
+        if (this.config.patcher_auto_update && this.config.patcher_game_path) {
+            this.log("[Patcher] Auto-update enabled — starting patch on launch", "info");
+            this.runPatcher(this.config.patcher_game_path, false);
+        }
         this.log(this.t("engineInit"), "success");
     }
 
@@ -389,7 +423,7 @@ class App {
             "label_assoc_dds", "label_assoc_pmg", "label_assoc_xmlcompiled",
             "set_pack_opts", "label_pack_v1_version",
             "set_engine", "label_log", "label_compress_fmts", "label_iv",
-            "btn_unpack", "btn_create", "btn_load", "btn_diff", "btn_admin", "btn_wipe", "logs", "label-list-full-sequence",
+            "btn_unpack", "btn_create", "btn_diff", "btn_admin", "btn_wipe", "logs", "label-list-full-sequence",
             "label_list_auto_expand", "label_list_auto_select",
             "label_select_none", "label_select_first", "label_select_all",
             "ready", "set_conversion",
@@ -401,7 +435,9 @@ class App {
             "ctx_conv_xml", "ctx_conv_obj", "ctx_rename", "ctx_delete",
             "btn_wipe_assoc", "btn_open_config_dir", "btn_reset_config",
             "dash_mods_title", "lbl_cpu", "lbl_mem",
-            "label_hyddwn_enable", "label_patcher_verify", "label_patcher_repair",
+            "label_hyddwn_enable",
+            "label_patcher_server_url",
+            "recentActivity", "noActivity",
         ];
         ids.forEach(id => {
             document.querySelectorAll<HTMLElement>(`[id="${id}"]`).forEach(el => {
@@ -416,6 +452,13 @@ class App {
             if (val && val !== key) el.textContent = val;
         });
 
+        // Translate placeholder attributes
+        document.querySelectorAll<HTMLElement>("[data-i18n-placeholder]").forEach(el => {
+            const key = (el as any).dataset.i18nPlaceholder as string;
+            const val = this.t(key);
+            if (val && val !== key) (el as HTMLInputElement).placeholder = val;
+        });
+
         // Empty file tree placeholder
         const treeEmpty = document.getElementById("file-tree-empty");
         if (treeEmpty) treeEmpty.textContent = this.t("tree_empty");
@@ -428,10 +471,46 @@ class App {
         const runBtnMap: [string, string][] = [
             ["extract-run", "btn_unpack"],
             ["pack-run", "btn_create"],
-            ["differ-run", "btn_diff"]
+            ["differ-run", "btn_diff"],
+            ["btn-patcher-verify", "label_patcher_verify"],
+            ["btn-patcher-repair", "label_patcher_repair"],
+            ["btn-patcher-update", "label_patcher_download_updates"],
+            ["btn-patcher-browse", "label_patcher_browse"],
         ];
         runBtnMap.forEach(([id, key]) => {
             const el = document.getElementById(id);
+            if (el) el.textContent = this.t(key);
+        });
+
+        // Translate span elements with -text suffix IDs (launcher/features/jobs tabs)
+        const textMap: [string, string][] = [
+            ["launcher-title-text", "launcher_title"],
+            ["launcher-login-header-text", "launcher_login_header"],
+            ["launcher-email-label-text", "launcher_email_label"],
+            ["launcher-password-label-text", "launcher_password_label"],
+            ["launcher-remember-text", "launcher_remember_me"],
+            ["btn-launcher-login-text", "btn_launcher_login"],
+            ["btn-launcher-logout-text", "btn_launcher_logout"],
+            ["btn-launcher-import-session-text", "btn_launcher_import_session"],
+            ["launcher-session-header-text", "launcher_session_header"],
+            ["launcher-session-label-text", "launcher_session_token_label"],
+            ["launcher-version-label-text", "launcher_version_label"],
+            ["launcher-maintenance-label-text", "launcher_maintenance_label"],
+            ["launcher-launch-header-text", "launcher_launch_header"],
+            ["launcher-client-label-text", "launcher_client_label"],
+            ["btn-launcher-launch-text", "btn_launcher_launch"],
+            ["features-title-text", "features_title"],
+            ["features-archive-label-text", "features_archive_label"],
+            ["features-key-label-text", "features_key_label"],
+            ["btn-features-load-text", "btn_features_load"],
+            ["btn-features-save-text", "btn_features_save"],
+            ["features-servers-header-text", "features_servers_header"],
+            ["features-list-header-text", "features_list_header"],
+            ["jobs-title-text", "jobs_title"],
+            ["jobs-list-header-text", "jobs_list_header"],
+        ];
+        textMap.forEach(([elemId, key]) => {
+            const el = document.getElementById(elemId);
             if (el) el.textContent = this.t(key);
         });
 
@@ -480,7 +559,7 @@ class App {
         });
 
         // Tabs + sidebar tooltips
-        ["dashboard", "extract", "pack", "list", "differ", "settings"].forEach(tab => {
+        ["dashboard", "extract", "pack", "list", "differ", "jobs", "patcher", "features", "launcher", "settings"].forEach(tab => {
             const btn = document.querySelector(`.nav-item[data-tab="${tab}"]`) as HTMLElement;
             if (btn) {
                 const label = this.t(`tab_${tab}`);
@@ -524,7 +603,6 @@ class App {
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
             { id: "pack-auto-dds", prop: "auto_convert_dds" },
-            { id: "pack-wrap-data", prop: "pack_wrap_data" },
             { id: "settings-startup-extract", prop: "startup_auto_extract" },
             { id: "settings-startup-switch", prop: "startup_auto_switch" },
             { id: "list-full-sequence", prop: "list_full_sequence" },
@@ -823,28 +901,38 @@ class App {
     }
 
     private setupPatcherTab() {
-        const statusEl = () => document.getElementById("patcher-status");
-        const setText = (msg: string, ok?: boolean) => {
-            const el = statusEl();
-            if (el) { el.textContent = msg; el.style.color = ok === false ? "var(--accent-neon)" : ok ? "var(--accent-cyan)" : "var(--text-muted)"; }
-        };
-
         const gamePathEl = () => document.getElementById("patcher-game-path") as HTMLInputElement | null;
         const getGamePath = () => gamePathEl()?.value?.trim() ?? "";
+        const statusEl = document.getElementById("patcher-status");
+        const setText = (msg: string, ok?: boolean) => {
+            if (!statusEl) return;
+            statusEl.textContent = msg;
+            statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)";
+        };
 
-        // Restore saved values on init
+        // Restore saved game path
         if (this.config.patcher_game_path) {
             const el = gamePathEl();
             if (el) el.value = this.config.patcher_game_path;
         }
+
+        // Custom patch server toggle (in Launcher settings)
         const hyddwnChk = document.getElementById("patcher-hyddwn-enable") as HTMLInputElement | null;
-        const hyddwnRow = document.getElementById("patcher-hyddwn-row");
+        const hyddwnUrlRow = document.getElementById("patcher-hyddwn-url-row");
+        const updateHyddwnRow = () => {
+            if (hyddwnUrlRow) hyddwnUrlRow.style.display = this.config.patcher_hyddwn_enabled ? "" : "none";
+        };
         if (hyddwnChk) hyddwnChk.checked = this.config.patcher_hyddwn_enabled;
-        if (hyddwnRow) hyddwnRow.style.display = this.config.patcher_hyddwn_enabled ? "flex" : "none";
-        const hyddwnUrlEl = document.getElementById("patcher-hyddwn-url") as HTMLInputElement | null;
-        if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
+        updateHyddwnRow();
+        hyddwnChk?.addEventListener("change", () => {
+            this.config.patcher_hyddwn_enabled = hyddwnChk.checked;
+            updateHyddwnRow();
+            this.saveConfig();
+        });
+
+        // Folder browse (directory picker)
         document.getElementById("btn-patcher-browse")?.addEventListener("click", async () => {
-            const chosen = await open({ title: "Select Mabinogi folder" });
+            const chosen = await open({ directory: true, title: "Select Mabinogi folder" });
             if (!chosen) return;
             const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
             const el = gamePathEl();
@@ -852,68 +940,335 @@ class App {
             this.config.patcher_game_path = p;
             this.saveConfig();
         });
-
-        // Save game path on blur (user typed it manually)
         gamePathEl()?.addEventListener("blur", () => {
             this.config.patcher_game_path = getGamePath();
             this.saveConfig();
         });
 
+        // Check for updates
+        document.getElementById("btn-patcher-check")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            setText("Checking...");
+            this.log("Checking for updates...");
+            try {
+                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const localEl = document.getElementById("patcher-version-local");
+                const remoteEl = document.getElementById("patcher-version-remote");
+                if (localEl) localEl.textContent = String(res.local_version ?? "—");
+                if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
+                if (res.needs_update) {
+                    setText(`Update available: v${res.remote_version}`, false);
+                    this.log(`Update available: local v${res.local_version} → v${res.remote_version}`);
+                } else if (res.remote_version == null) {
+                    setText(`Installed: v${res.local_version ?? "?"}`, true);
+                    this.log(`Local version: v${res.local_version ?? "?"} (remote check unavailable)`);
+                } else {
+                    setText("Up to date ✓", true);
+                    this.log(`Up to date (v${res.local_version})`);
+                }
+            } catch(e) {
+                setText(`Check failed: ${e}`, false);
+                this.log(`Check error: ${e}`);
+            }
+        });
+
+        // Patch / Repair buttons
+        document.getElementById("btn-patcher-patch")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            await this.runPatcher(gp, false);
+        });
+        document.getElementById("btn-patcher-repair")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText("Set game path first.", false); return; }
+            await this.runPatcher(gp, true);
+        });
+
+        // Verify button
         document.getElementById("btn-patcher-verify")?.addEventListener("click", async () => {
             const gp = getGamePath();
             if (!gp) { setText("Set game path first.", false); return; }
             setText("Verifying...");
+            this.log(`Verifying: ${gp}`);
             try {
-                const res = await invoke("verify_game_files", { gamePath: gp }) as { ok: boolean; missing: string[]; mismatched: string[] };
+                const res = await invoke("verify_game_files", { gamePath: gp }) as any;
+                if (res.error && !res.version) { setText(`Error: ${res.error}`, false); this.log(`Error: ${res.error}`); return; }
+                const managed = res.managed_version ?? res.version ?? 0;
+                const local = res.local_version ?? res.version ?? 0;
+                const bt = res.buildtime ? new Date(res.buildtime * 1000).toLocaleDateString() : "";
+                const verLabel = (managed !== local) ? `v${managed} (local: v${local})` : `v${managed}`;
+                const header = verLabel + (bt ? ` (${bt})` : "") + ` — ${res.files_ok ?? 0} ok, ${res.files_missing ?? 0} missing, ${res.files_mismatched ?? 0} wrong`;
                 if (res.ok) {
-                    setText("All files OK.", true);
+                    setText(header, true);
+                    this.log(`Verify OK: ${header}`);
+                    const localEl = document.getElementById("patcher-version-local");
+                    if (localEl && local) localEl.textContent = String(local);
                 } else {
-                    const lines = [
-                        res.missing.length ? `Missing (${res.missing.length}): ${res.missing.slice(0,5).join(", ")}${res.missing.length>5?"...":""}` : "",
-                        res.mismatched.length ? `Size mismatch (${res.mismatched.length}): ${res.mismatched.slice(0,5).join(", ")}${res.mismatched.length>5?"...":""}` : "",
-                    ].filter(Boolean).join(" | ");
-                    setText(lines, false);
+                    const missStr = (res.missing ?? []).slice(0, 5).join(", ");
+                    const mismStr = (res.mismatched ?? []).slice(0, 3).map((m: any) => m.path ?? m).join(", ");
+                    setText(header, false);
+                    this.log(`Verify issues: ${header}`);
+                    if (missStr) this.log(`Missing: ${missStr}`);
+                    if (mismStr) this.log(`Wrong: ${mismStr}`);
                 }
-            } catch(e) { setText(`Error: ${e}`, false); }
+            } catch(e) {
+                setText(`Error: ${e}`, false);
+                this.log(`Verify error: ${e}`);
+            }
         });
 
-        document.getElementById("btn-patcher-repair")?.addEventListener("click", async () => {
-            const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
-            setText("Launching repair...");
-            try {
-                const res = await invoke("repair_game_files", { gamePath: gp }) as any;
-                if (res.action === "mabitydown_launched") {
-                    setText("MabiTDown.exe launched for repair.", true);
-                } else {
-                    const total = (res.missing?.length ?? 0) + (res.corrupt?.length ?? 0);
-                    setText(total === 0 ? "No issues found." : `Found ${total} issue(s). Run Nexon Launcher to repair.`, total === 0);
-                }
-            } catch(e) { setText(`Repair error: ${e}`, false); }
+        // Stop button
+        document.getElementById("btn-patcher-stop")?.addEventListener("click", () => {
+            this.log("Stop requested — cancellation not yet implemented");
         });
 
-        document.getElementById("btn-patcher-update")?.addEventListener("click", async () => {
-            const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
-            try {
-                await invoke("execute_terminal_command", { command: `"${gp}\\MabiTDown.exe"` });
-                setText("MabiTDown.exe launched.", true);
-            } catch(e) { setText(`Failed: ${e}`, false); }
-        });
+        // Settings > Patcher subtab wiring (elements live in stab-patcher but found by ID)
+        const autoUpdateChk = document.getElementById("patcher-auto-update") as HTMLInputElement | null;
+        const focusOnStartChk = document.getElementById("patcher-focus-on-start") as HTMLInputElement | null;
+        const runElevatedChk = document.getElementById("patcher-run-elevated") as HTMLInputElement | null;
+        const maxWorkersEl = document.getElementById("patcher-max-workers") as HTMLInputElement | null;
+        const hyddwnUrlEl = document.getElementById("patcher-hyddwn-url") as HTMLInputElement | null;
+        const launchNexonEl = document.getElementById("launch-use-nexon-launcher") as HTMLInputElement | null;
+        const launchCmdEl = document.getElementById("launch-cmd-override") as HTMLTextAreaElement | null;
+        const prePatchEl = document.getElementById("pre-patch-cmd") as HTMLTextAreaElement | null;
+        const preLaunchEl = document.getElementById("pre-launch-cmd") as HTMLTextAreaElement | null;
+        const postLaunchEl = document.getElementById("post-launch-cmd") as HTMLTextAreaElement | null;
 
-        hyddwnChk?.addEventListener("change", () => {
-            const enabled = hyddwnChk.checked;
-            if (hyddwnRow) hyddwnRow.style.display = enabled ? "flex" : "none";
-            this.config.patcher_hyddwn_enabled = enabled;
+        if (autoUpdateChk) autoUpdateChk.checked = this.config.patcher_auto_update;
+        if (focusOnStartChk) focusOnStartChk.checked = this.config.patcher_focus_on_start;
+        if (runElevatedChk) runElevatedChk.checked = this.config.patcher_run_elevated ?? false;
+        if (maxWorkersEl) maxWorkersEl.value = String(this.config.patcher_max_workers ?? 10);
+        if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
+        if (launchNexonEl) launchNexonEl.checked = this.config.launch_use_nexon_launcher ?? false;
+        if (launchCmdEl) launchCmdEl.value = this.config.launch_cmd_override ?? "";
+        if (prePatchEl) prePatchEl.value = this.config.pre_patch_cmd ?? "";
+        if (preLaunchEl) preLaunchEl.value = this.config.pre_launch_cmd ?? "";
+        if (postLaunchEl) postLaunchEl.value = this.config.post_launch_cmd ?? "";
+
+        autoUpdateChk?.addEventListener("change", () => { this.config.patcher_auto_update = autoUpdateChk.checked; this.saveConfig(); });
+        focusOnStartChk?.addEventListener("change", () => { this.config.patcher_focus_on_start = focusOnStartChk.checked; this.saveConfig(); });
+        runElevatedChk?.addEventListener("change", () => { this.config.patcher_run_elevated = runElevatedChk.checked; this.saveConfig(); });
+        maxWorkersEl?.addEventListener("change", () => {
+            const v = parseInt(maxWorkersEl.value, 10);
+            this.config.patcher_max_workers = isNaN(v) ? 10 : Math.min(32, Math.max(1, v));
+            maxWorkersEl.value = String(this.config.patcher_max_workers);
             this.saveConfig();
         });
-
         hyddwnUrlEl?.addEventListener("blur", () => {
             this.config.patcher_hyddwn_url = hyddwnUrlEl.value.trim() || "http://127.0.0.1:11000";
             this.saveConfig();
         });
+        launchNexonEl?.addEventListener("change", () => { this.config.launch_use_nexon_launcher = launchNexonEl.checked; this.saveConfig(); });
+        launchCmdEl?.addEventListener("blur", () => { this.config.launch_cmd_override = launchCmdEl.value.trim(); this.saveConfig(); });
+        prePatchEl?.addEventListener("blur", () => { this.config.pre_patch_cmd = prePatchEl.value.trim(); this.saveConfig(); });
+        preLaunchEl?.addEventListener("blur", () => { this.config.pre_launch_cmd = preLaunchEl.value.trim(); this.saveConfig(); });
+        postLaunchEl?.addEventListener("blur", () => { this.config.post_launch_cmd = postLaunchEl.value.trim(); this.saveConfig(); });
 
+        // Patcher settings: version refresh + force re-download + clear cache
+        document.getElementById("btn-patcher-settings-check")?.addEventListener("click", async () => {
+            const gp = this.config.patcher_game_path;
+            if (!gp) return;
+            try {
+                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const el = document.getElementById("patcher-settings-version");
+                if (el) el.textContent = `v${res.local_version ?? "?"}`;
+            } catch {}
+        });
+        document.getElementById("btn-patcher-force-repair")?.addEventListener("click", async () => {
+            const gp = this.config.patcher_game_path;
+            if (!gp) return;
+            document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
+            await this.runPatcher(gp, true);
+        });
+        document.getElementById("btn-patcher-clear-cache")?.addEventListener("click", async () => {
+            const gp = this.config.patcher_game_path;
+            if (!gp) return;
+            const el = document.getElementById("patcher-settings-version");
+            try {
+                const res = await invoke("clear_patch_cache", { gamePath: gp }) as any;
+                if (el) el.textContent = res.deleted ? "Cache cleared" : "No cache";
+            } catch(e) {
+                if (el) el.textContent = `Error: ${e}`;
+            }
+        });
+
+        // Progress event listeners
+        import("./platform/event").then(({ listen }) => {
+            // Global progress bar
+            listen("patch-progress", (event: any) => {
+                const e = event.payload as {
+                    phase: string; current_file: string;
+                    parts_done: number; parts_total: number;
+                    files_done: number; files_total: number;
+                    pct: number; speed_bps?: number; error?: string;
+                };
+                const wrap = document.getElementById("patcher-progress-wrap");
+                const bar = document.getElementById("patcher-progress-bar");
+                const detail = document.getElementById("patcher-progress-detail");
+                const speedEl = document.getElementById("patcher-speed");
+                const pipeBar = document.getElementById("dash-pipe-extract");
+                const pipeLabel = document.getElementById("dash-pipe-label");
+                const pipeCard = document.getElementById("dash-pipe-card");
+                const stopBtn = document.getElementById("btn-patcher-stop");
+                const pct = Math.round(e.pct);
+                if (e.phase === "done" || e.phase === "error") {
+                    if (wrap) wrap.style.display = "none";
+                    if (pipeCard) pipeCard.style.display = "none";
+                    if (pipeBar) pipeBar.style.width = "0%";
+                    if (pipeLabel) pipeLabel.textContent = "Idle";
+                    if (stopBtn) stopBtn.style.display = "none";
+                    if (e.error) this.log(`Error: ${e.error}`);
+                    // Clear all worker bars on completion
+                    const barsEl = document.getElementById("patcher-bars");
+                    if (barsEl) barsEl.innerHTML = "";
+                    this.workerBars.clear();
+                } else {
+                    if (pipeCard) pipeCard.style.display = "";
+                    if (wrap) wrap.style.display = "block";
+                    if (bar) bar.style.width = pct + "%";
+                    if (stopBtn) stopBtn.style.display = "";
+                    const info = e.phase === "downloading"
+                        ? `${e.parts_done}/${e.parts_total} parts (${pct}%)`
+                        : e.phase === "scanning"
+                        ? `Scanning ${e.parts_done}/${e.parts_total} — ${e.files_done} need update`
+                        : `${e.files_done}/${e.files_total} files (${pct}%)`;
+                    const fileShort = e.current_file.length > 55 ? "..." + e.current_file.slice(-52) : e.current_file;
+                    if (detail) detail.textContent = info + " — " + fileShort;
+                    if (e.phase === "scanning" && e.parts_done === e.parts_total) {
+                        this.log(`Scan complete: ${e.files_done} of ${e.parts_total} files need update`);
+                    }
+                    if (e.phase === "installing" && e.files_done > 0 && e.files_done % 50 === 0) {
+                        this.log(`Installing: ${e.files_done}/${e.files_total} files (${pct}%)`);
+                    }
+                    if (pipeBar) pipeBar.style.width = pct + "%";
+                    if (pipeLabel) pipeLabel.textContent = "Patching: " + info;
+                    if (speedEl && e.speed_bps) {
+                        const mb = (e.speed_bps / 1048576).toFixed(1);
+                        speedEl.textContent = `${mb} MB/s`;
+                    }
+                }
+            });
+
+            // Per-worker bars (appear/disappear like HyddwnLauncher)
+            listen("patch-worker", (event: any) => {
+                const e = event.payload as { worker_id: number; phase: string; file_name: string; parts_done: number; parts_total: number; };
+                const barsEl = document.getElementById("patcher-bars");
+                if (!barsEl) return;
+                const id = e.worker_id;
+                const fileShort = e.file_name.length > 50
+                    ? "..." + e.file_name.slice(-47) : e.file_name;
+                if (e.phase === "done" || e.phase === "error") {
+                    const bar = this.workerBars.get(id);
+                    if (bar) {
+                        bar.style.opacity = "0";
+                        bar.style.transition = "opacity 0.4s";
+                        setTimeout(() => { bar.remove(); }, 400);
+                        this.workerBars.delete(id);
+                    }
+                } else {
+                    let bar = this.workerBars.get(id);
+                    if (!bar) {
+                        bar = document.createElement("div");
+                        bar.style.cssText = "display:flex;align-items:center;gap:6px;padding:2px 0;animation:fadeIn 0.2s";
+                        const nameEl = document.createElement("span");
+                        nameEl.className = "wbar-name";
+                        nameEl.style.cssText = "font-size:0.7rem;color:var(--text-muted);width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0";
+                        const track = document.createElement("div");
+                        track.style.cssText = "flex:1;height:6px;background:var(--bg-input);border-radius:3px;overflow:hidden;position:relative";
+                        const fill = document.createElement("div");
+                        fill.className = "wbar-fill";
+                        fill.style.cssText = "position:absolute;top:0;height:100%;background:var(--accent-cyan);border-radius:3px;width:0%;transition:width 0.15s";
+                        const phaseEl = document.createElement("span");
+                        phaseEl.className = "wbar-phase";
+                        phaseEl.style.cssText = "font-size:0.65rem;color:var(--text-muted);width:90px;text-align:right;flex-shrink:0";
+                        track.appendChild(fill);
+                        bar.appendChild(nameEl);
+                        bar.appendChild(track);
+                        bar.appendChild(phaseEl);
+                        barsEl.appendChild(bar);
+                        this.workerBars.set(id, bar);
+                    }
+                    const nameEl = bar.querySelector(".wbar-name") as HTMLElement;
+                    const phaseEl = bar.querySelector(".wbar-phase") as HTMLElement;
+                    const fill = bar.querySelector(".wbar-fill") as HTMLElement;
+                    if (nameEl) nameEl.textContent = fileShort;
+                    if (e.phase === "assembling") {
+                        const pct = e.parts_total > 0 ? Math.round(e.parts_done / e.parts_total * 100) : 0;
+                        if (fill) { fill.style.animation = "none"; fill.style.width = pct + "%"; }
+                        if (phaseEl) phaseEl.textContent = `installing ${e.parts_done}/${e.parts_total}`;
+                        if (e.parts_done === 1) this.log(`Installing: ${fileShort}`);
+                    } else {
+                        if (fill) { fill.style.animation = "patcher-sweep 1.5s linear infinite"; fill.style.width = "40%"; }
+                        if (phaseEl) phaseEl.textContent = "downloading";
+                    }
+                }
+            });
+        });
     }
+
+    async runPatcher(gamePath: string, forceRepair: boolean) {
+        const statusEl = document.getElementById("patcher-status");
+        const wrap = document.getElementById("patcher-progress-wrap");
+        const bar = document.getElementById("patcher-progress-bar");
+        const detail = document.getElementById("patcher-progress-detail");
+        const pipeCard = document.getElementById("dash-pipe-card");
+        const stopBtn = document.getElementById("btn-patcher-stop");
+        const setText = (msg: string, ok?: boolean) => {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)"; }
+        };
+        if (pipeCard) pipeCard.style.display = "";
+        if (wrap) wrap.style.display = "block";
+        if (bar) bar.style.width = "0%";
+        if (detail) detail.textContent = "Starting...";
+        if (stopBtn) stopBtn.style.display = "";
+        setText(forceRepair ? "Repairing..." : "Patching...");
+        this.log(forceRepair ? "Starting full repair — scanning files for changes..." : "Starting patch...");
+        try {
+            const maxWorkers = this.config.patcher_max_workers ?? 10;
+            const parallelOps = this.config.parallel_ops ?? true;
+            const res = await invoke("patch_game_files", { gamePath, maxWorkers, forceRepair, parallelOps }) as any;
+            if (wrap) wrap.style.display = "none";
+            if (pipeCard) pipeCard.style.display = "none";
+            if (stopBtn) stopBtn.style.display = "none";
+            if (res.managed_version) {
+                const localEl = document.getElementById("patcher-version-local");
+                if (localEl) localEl.textContent = String(res.managed_version);
+            }
+            if (res.needs_elevation) {
+                setText("Requires administrator â€” relaunching...", false);
+                this.log("Permission denied â€” relaunching as administrator...");
+                await invoke("request_elevation");
+            } else if (res.ok) {
+                const msg = res.patched === 0
+                    ? `Up to date (v${res.managed_version ?? "?"})`
+                    : `Patched ${res.patched} files  v${res.managed_version ?? "?"}`;
+                setText(msg, true);
+                this.log(msg);
+            } else if (res.message) {
+                setText(res.message, true);
+                this.log(res.message);
+            } else {
+                const errs = (res.errors ?? []).slice(0, 3).join("; ");
+                setText(`Errors: ${errs}`, false);
+                this.log(`Errors: ${errs}`);
+            }
+        } catch(e) {
+            if (wrap) wrap.style.display = "none";
+            if (pipeCard) pipeCard.style.display = "none";
+            if (stopBtn) stopBtn.style.display = "none";
+            const errStr = String(e).toLowerCase();
+            if (errStr.includes("access is denied") || errStr.includes("permissiondenied") || errStr.includes("permission denied")) {
+                setText("Requires administrator â€” relaunching...", false);
+                this.log("Permission denied â€” relaunching as administrator...");
+                await invoke("request_elevation");
+            } else {
+                setText(`Failed: ${e}`, false);
+                this.log(`Error: ${e}`);
+            }
+        }
+    }
+
 
 
     private setupDashboard() {
@@ -1023,7 +1378,8 @@ class App {
             try {
                 const dir = await invoke("get_mods_dir") as string;
                 await invoke("execute_terminal_command", { command: `explorer "${dir}"` });
-            } catch (_) {}
+                this.log(`[Mods] Opened mods directory: ${dir}`, "info");
+            } catch (e) { this.log(`[Mods] Failed to open mods dir: ${e}`, "error"); }
         });
         document.getElementById("btn-new-mod-template")?.addEventListener("click", async () => {
             try {
@@ -1032,7 +1388,8 @@ class App {
                 const dest = dir + "\\new_mod.mod";
                 await writeTextFile(dest, tmpl);
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
-            } catch (_) {}
+                this.log(`[Mods] Created new mod template: ${dest}`, "info");
+            } catch (e) { this.log(`[Mods] Failed to create template: ${e}`, "error"); }
         });
     }
 
@@ -1105,7 +1462,10 @@ class App {
                 const srcPath = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
                 this.vfsPending.push({ op: "merge", src_archive: srcPath });
                 this.renderVfsPending();
-            } catch (err) { alert("Merge error: " + err); }
+                this.log(`[VFS] Queued merge: ${srcPath} → ${this.currentArchive}`, "info");
+            } catch (err) {
+                this.log(`[VFS] Merge error: ${err}`, "error");
+            }
         });
 
         // Apply button
@@ -1114,6 +1474,7 @@ class App {
             const btn = document.getElementById("btn-vfs-apply")!;
             btn.textContent = "Applying…";
             btn.setAttribute("disabled", "true");
+            this.log(`[VFS] Applying ${this.vfsPending.length} change(s) to ${this.currentArchive}`, "info");
             try {
                 const result = await invoke("apply_vfs_changes", {
                     archive: this.currentArchive,
@@ -1122,21 +1483,25 @@ class App {
                 }) as any;
                 this.vfsPending = [];
                 this.renderVfsPending();
-                alert(`Applied ${result.changes} change(s) — ${JSON.stringify(result.stats)}`);
+                this.log(`[VFS] Applied ${result.changes} change(s) — ${JSON.stringify(result.stats)}`, "info");
                 // Reload the archive listing
                 await this.listArchive(this.currentArchive);
-            } catch (err) { alert("Apply failed: " + err); }
+            } catch (err) {
+                this.log(`[VFS] Apply failed: ${err}`, "error");
+            }
             btn.textContent = "APPLY CHANGES";
             btn.removeAttribute("disabled");
         });
 
         // Reset button
         document.getElementById("btn-vfs-reset")?.addEventListener("click", () => {
+            const count = this.vfsPending.length;
             this.vfsPending = [];
             this.renderVfsPending();
             // Re-render tree without pending overlays
             const items = document.querySelectorAll<HTMLElement>(".tree-item, .tree-row");
             items.forEach(i => { i.classList.remove("vfs-delete", "vfs-add", "vfs-rename"); });
+            this.log(`[VFS] Reset ${count} pending change(s)`, "info");
         });
 
         // Show toolbar only when an archive is loaded
@@ -1381,6 +1746,7 @@ class App {
 
         if (!input || !output) return;
 
+        this.log(`[Jobs] Added ${type} job: ${input} → ${output}`, "info");
         const job: JobEntry = {
             id: Date.now() + Math.random(),
             type,
@@ -1485,10 +1851,12 @@ class App {
             job.status = "done";
             this.updateJobUI(job, "done", 100, "Completed");
             row.className = "job-row done";
+            this.log(`[Jobs] ${job.type} completed: ${job.input}`, "info");
         } catch (e: any) {
             job.status = "error";
             this.updateJobUI(job, "error", 0, `Error: ${e}`);
             row.className = "job-row error";
+            this.log(`[Jobs] ${job.type} failed: ${e}`, "error");
         }
     }
 
@@ -1508,6 +1876,7 @@ class App {
         if (this.jobsRunning) return;
         this.jobsRunning = true;
         const pending = this.jobs.filter(j => j.status === "pending");
+        this.log(`[Jobs] Running all: ${pending.length} pending job(s)`, "info");
         const LIMIT = 4;
         let running = 0, idx = 0;
         await new Promise<void>(resolve => {
@@ -1570,15 +1939,18 @@ class App {
         const btn = document.getElementById("btn-features-load") as HTMLButtonElement;
         btn.disabled = true;
 
+        this.log(`[Features] Loading features from: ${archive}`, "info");
         try {
             const data = await invoke("get_features_from_archive", { archive, key }) as any;
             this.featuresData = data;
             this.featuresModified = false;
             this.renderFeatures();
             this.setFeaturesStatus(`Loaded ${data.features.length} features, ${data.servers.length} servers`, "ok");
+            this.log(`[Features] Loaded ${data.features.length} features, ${data.servers.length} servers`, "info");
             document.getElementById("btn-features-save")?.classList.remove("hidden");
         } catch (e: any) {
             this.setFeaturesStatus(`Load failed: ${e}`, "error");
+            this.log(`[Features] Load failed: ${e}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -1593,6 +1965,7 @@ class App {
         const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
         const key = keyEl || null;
 
+        this.log(`[Features] Saving features to: ${archive}`, "info");
         this.setFeaturesStatus("Saving…", "busy");
         const btn = document.getElementById("btn-features-save") as HTMLButtonElement;
         btn.disabled = true;
@@ -1605,8 +1978,10 @@ class App {
             }) as any;
             this.featuresModified = false;
             this.setFeaturesStatus(`Saved — ${result.features} features, ${result.bytes} bytes`, "ok");
+            this.log(`[Features] Saved — ${result.features} features, ${result.bytes} bytes`, "info");
         } catch (e: any) {
             this.setFeaturesStatus(`Save failed: ${e}`, "error");
+            this.log(`[Features] Save failed: ${e}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -1729,7 +2104,9 @@ class App {
     private activeProfileId: string | null = null;
     private activeProfileLoginIp: string = "";
     private activeProfileLoginPort: number = 0;
+    private activeProfileIsOfficial: boolean = true;
     private profileEditorMode: "new" | "edit" | null = null;
+    private workerBars: Map<number, HTMLElement> = new Map();
     private kananMods: Array<{ name: string; enabled: boolean }> = [];
 
     private setupLauncher() {
@@ -1750,6 +2127,7 @@ class App {
         document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
         document.getElementById("btn-launcher-logout")?.addEventListener("click", () => this.launcherDoLogout());
         document.getElementById("btn-launcher-launch")?.addEventListener("click", () => this.launcherDoLaunch());
+        document.getElementById("btn-launcher-import-session")?.addEventListener("click", () => this.launcherImportSession());
 
         document.getElementById("btn-launcher-check-update")?.addEventListener("click", async () => {
             const statusEl = document.getElementById("launcher-update-status")!;
@@ -1757,44 +2135,37 @@ class App {
             statusEl.className = "launcher-update-status";
             statusEl.classList.remove("hidden");
             try {
-                // Local version: registry HKCU + version.dat
-                const localInfo = await invoke("get_mabi_version_local") as { installed_version?: string; client_dir?: string } | null;
-                const localVerStr = localInfo?.installed_version;
-                const localVer = localVerStr ? parseInt(localVerStr, 10) : null;
-                // Remote version: public Nexon API (no login needed)
-                let remoteVer: number | null = null;
-                try {
-                    const remoteInfo = await invoke("get_mabi_version_remote") as { remote_version?: number } | null;
-                    remoteVer = remoteInfo?.remote_version ?? null;
-                } catch (_) {}
-                // Fall back to session-based remote if public API failed
-                if (!remoteVer && this.launcherSession) {
-                    try { remoteVer = await invoke("launcher_get_version", { session: this.launcherSession }) as number; } catch (_) {}
-                }
-                if (localVer && remoteVer) {
-                    if (remoteVer > localVer) {
-                        statusEl.innerHTML = `⬆ Update available: v${localVer} → v${remoteVer}. <a href="#" id="lnk-nexon-launcher">Open Nexon Launcher</a>`;
-                        document.getElementById("lnk-nexon-launcher")?.addEventListener("click", async (e) => {
-                            e.preventDefault();
-                            await invoke("execute_terminal_command", { command: "start nexonlauncher://" });
-                        });
-                        statusEl.className = "launcher-update-status update-available";
-                    } else {
-                        statusEl.textContent = `✓ Up to date (v${localVer})`;
+                const info = await invoke("get_mabi_version_from_launcher_cache") as {
+                    cached_version: number | null;
+                    cached_manifest_url: string | null;
+                    local_manifest_hash: string | null;
+                    cdn_manifest_hash: string | null;
+                    update_available: boolean | null;
+                };
+                if (info.cached_version) {
+                    if (info.update_available === true) {
+                        statusEl.textContent = `Version ${info.cached_version}R — Update available!`;
+                        statusEl.className = "launcher-update-status error";
+                        this.log(`[Launcher] Version check: ${info.cached_version}R — update available`, "warn");
+                    } else if (info.update_available === false) {
+                        statusEl.textContent = `Version ${info.cached_version}R — Up to date`;
                         statusEl.className = "launcher-update-status up-to-date";
+                        this.log(`[Launcher] Version check: ${info.cached_version}R — up to date`, "info");
+                    } else {
+                        statusEl.textContent = `Version ${info.cached_version}R (cached)`;
+                        statusEl.className = "launcher-update-status up-to-date";
+                        this.log(`[Launcher] Version check: ${info.cached_version}R (cached, no local comparison)`, "info");
                     }
-                } else if (localVer) {
-                    const remoteStr = remoteVer ? ` / remote v${remoteVer}` : " (remote unavailable)";
-                    statusEl.textContent = `Local v${localVer}${remoteStr}`;
-                    statusEl.className = "launcher-update-status";
-                } else if (remoteVer) {
-                    statusEl.textContent = `Remote v${remoteVer} — game dir not found in registry`;
-                    statusEl.className = "launcher-update-status";
                 } else {
-                    statusEl.textContent = "Could not read version from registry or Nexon API";
+                    statusEl.textContent = "Version info not found — open Nexon Launcher once to cache it";
                     statusEl.className = "launcher-update-status error";
+                    this.log("[Launcher] Version check: no cached version found", "warn");
                 }
-            } catch (e) { statusEl.textContent = "Check failed: " + e; statusEl.className = "launcher-update-status error"; }
+            } catch (e) {
+                statusEl.textContent = "Check failed: " + e;
+                statusEl.className = "launcher-update-status error";
+                this.log(`[Launcher] Version check failed: ${e}`, "error");
+            }
         });
 
         // Profile selector change (Settings > Launcher sub-tab)
@@ -1813,7 +2184,7 @@ class App {
         });
         document.getElementById("btn-launcher-manage-profiles")?.addEventListener("click", () => {
             // Navigate to Settings > Launcher sub-tab
-            document.getElementById("nav-settings")?.click();
+            document.getElementById("tab-settings")?.click();
             setTimeout(() => {
                 (document.querySelector("[data-stab='launcher']") as HTMLElement)?.click();
             }, 50);
@@ -1877,13 +2248,25 @@ class App {
 
     private async loadProfiles() {
         try {
-            const profiles = await invoke("launcher_list_profiles") as any[];
-            this.launcherProfiles = profiles || [];
+            const result = await invoke("launcher_list_profiles") as { profiles: any[], active_id: string } | any[];
+            let profiles: any[];
+            let storedActiveId = "";
+            if (Array.isArray(result)) {
+                profiles = result;
+            } else {
+                profiles = result.profiles || [];
+                storedActiveId = result.active_id || "";
+            }
+            this.launcherProfiles = profiles;
+
+            // Prefer stored active_id, fall back to previously selected, then first profile
+            const activeId = storedActiveId || this.activeProfileId || this.launcherProfiles[0]?.id || "";
+            const active = this.launcherProfiles.find(p => p.id === activeId) || this.launcherProfiles[0];
+            if (active) this.activeProfileId = active.id;
+
             this.renderProfileSelect();
 
-            const active = this.launcherProfiles[0];
             if (active) {
-                this.activeProfileId = active.id;
                 this.applyProfileToUI(active);
                 if (active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
@@ -1930,14 +2313,17 @@ class App {
         if (profile.client_dir) {
             (document.getElementById("launcher-client-dir") as HTMLInputElement).value = profile.client_dir;
         }
-        if (!this.launcherSession && profile.email) {
+        if (profile.email) {
             (document.getElementById("launcher-email") as HTMLInputElement).value = profile.email;
+            // Clear password when switching profiles so user gets a clean login form
+            (document.getElementById("launcher-password") as HTMLInputElement).value = "";
         }
         // Track active profile server settings for launch
         this.activeProfileLoginIp = profile.login_ip || "";
         this.activeProfileLoginPort = profile.login_port || 0;
+        this.activeProfileIsOfficial = profile.is_official !== false;
 
-        const isCustom = !!(profile.login_ip && profile.login_ip.trim());
+        const isCustom = !this.activeProfileIsOfficial;
         // Show login card only for official profiles; custom servers launch directly
         const loginCard = document.getElementById("launcher-login-card");
         const sessionCard = document.getElementById("launcher-session-card");
@@ -1968,15 +2354,17 @@ class App {
     }
 
     private async autologinProfile(profileId: string) {
+        this.log(`[Launcher] Auto-login attempt for profile: ${profileId}`, "info");
         try {
             const data = await invoke("launcher_load_profile", { id: profileId }) as any;
             const token = data.session_token_for_autologin;
-            if (!token) return;
+            if (!token) { this.log("[Launcher] Auto-login: no saved session token", "warn"); return; }
             this.setLauncherStatus("Auto-logging in…", "busy");
             const result = await invoke("launcher_autologin", { sessionToken: token }) as any;
             this.launcherSession = result.session;
             this.updateLauncherUI(true);
             this.setLauncherStatus("Auto-logged in", "ok");
+            this.log("[Launcher] Auto-login successful", "info");
             this.fetchLauncherVersion();
             // Update session expiry in profile
             await invoke("launcher_update_profile_session", {
@@ -1986,6 +2374,7 @@ class App {
             }).catch(() => {});
         } catch (e: any) {
             this.setLauncherStatus(`Auto-login failed: ${e}`, "error");
+            this.log(`[Launcher] Auto-login failed: ${e}`, "error");
         }
     }
 
@@ -2058,8 +2447,10 @@ class App {
             await this.loadProfiles();
             this.closeProfileEditor();
             this.setLauncherStatus(`Profile "${name}" saved`, "ok");
+            this.log(`[Launcher] Profile "${name}" saved`, "info");
         } catch (e: any) {
             this.setLauncherStatus(`Save failed: ${e}`, "error");
+            this.log(`[Launcher] Profile save failed: ${e}`, "error");
         }
     }
 
@@ -2068,6 +2459,7 @@ class App {
         const areaEl = document.getElementById("detected-profiles-area");
         const listEl = document.getElementById("detected-profiles-list");
         if (statusEl) statusEl.textContent = "Scanning…";
+        this.log("[Launcher] Scanning for installed launchers...", "info");
         try {
             const detected = await invoke("detect_launcher_profiles") as Array<{
                 source: string; name: string; client_dir: string;
@@ -2078,9 +2470,11 @@ class App {
             if (!detected || detected.length === 0) {
                 if (statusEl) statusEl.textContent = "No launchers detected";
                 if (areaEl) areaEl.style.display = "none";
+                this.log("[Launcher] No launchers detected", "warn");
                 return;
             }
             if (statusEl) statusEl.textContent = `Found ${detected.length} launcher(s)`;
+            this.log(`[Launcher] Detected ${detected.length} launcher(s): ${detected.map(d => d.name).join(", ")}`, "info");
             if (areaEl) areaEl.style.display = "block";
             if (listEl) {
                 listEl.innerHTML = "";
@@ -2091,10 +2485,13 @@ class App {
                     const info = d.is_official
                         ? `${d.name}${d.client_dir ? " — " + d.client_dir : ""}`
                         : `${d.name}${d.login_ip ? " — " + d.login_ip + ":" + d.login_port : ""}`;
+                    const alreadyImported = this.launcherProfiles.some(
+                        p => p.name === d.name && p.profile_type === d.source
+                    );
                     row.innerHTML = `
                         <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:var(--accent-cyan);color:#000">${badge}</span>
                         <span style="flex:1;font-size:12px">${info}</span>
-                        <button class="tab-btn" style="font-size:11px;padding:2px 8px">Import</button>
+                        <button class="tab-btn" style="font-size:11px;padding:2px 8px" ${alreadyImported ? "disabled" : ""}>${alreadyImported ? "Imported ✓" : "Import"}</button>
                     `;
                     const importBtn = row.querySelector("button")!;
                     const detected_copy = d;
@@ -2116,8 +2513,10 @@ class App {
                             await this.loadProfiles();
                             importBtn.textContent = "Imported!";
                             importBtn.disabled = true;
+                            this.log(`[Launcher] Imported profile: ${detected_copy.name}`, "info");
                         } catch (e: any) {
                             importBtn.textContent = "Error";
+                            this.log(`[Launcher] Profile import failed: ${e}`, "error");
                         }
                     });
                     listEl.appendChild(row);
@@ -2125,6 +2524,7 @@ class App {
             }
         } catch (e: any) {
             if (statusEl) statusEl.textContent = `Detection failed: ${e}`;
+            this.log(`[Launcher] Profile detection failed: ${e}`, "error");
         }
     }
 
@@ -2133,13 +2533,16 @@ class App {
         const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
         if (!profile) return;
         if (!confirm(`Delete profile "${profile.name}"?`)) return;
+        const profileName = profile.name;
         try {
             await invoke("launcher_delete_profile", { id: this.activeProfileId });
             this.activeProfileId = null;
             await this.loadProfiles();
             this.setLauncherStatus("Profile deleted", "idle");
+            this.log(`[Launcher] Deleted profile: ${profileName}`, "info");
         } catch (e: any) {
             this.setLauncherStatus(`Delete failed: ${e}`, "error");
+            this.log(`[Launcher] Profile delete failed: ${e}`, "error");
         }
     }
 
@@ -2164,8 +2567,10 @@ class App {
                 }
                 await this.loadProfiles();
                 this.setLauncherStatus("Saved to profile", "ok");
+                this.log("[Launcher] Saved current session to active profile", "info");
             } catch (e: any) {
                 this.setLauncherStatus(`Save failed: ${e}`, "error");
+                this.log(`[Launcher] Save to profile failed: ${e}`, "error");
             }
         } else {
             // No active profile — open editor to create one
@@ -2203,9 +2608,11 @@ class App {
             pwEl.value = "";
             this.updateLauncherUI(true);
             this.setLauncherStatus("Logged in", "ok");
+            this.log(`[Launcher] Logged in as ${email}`, "info");
             this.fetchLauncherVersion();
         } catch (e: any) {
             this.setLauncherStatus(`Login failed: ${e}`, "error");
+            this.log(`[Launcher] Login failed: ${e}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2216,12 +2623,33 @@ class App {
         localStorage.removeItem(this.LAUNCHER_SESSION_KEY);
         this.updateLauncherUI(false);
         this.setLauncherStatus("Not logged in", "idle");
+        this.log("[Launcher] Logged out", "info");
         (document.getElementById("launcher-version-value") as HTMLElement).textContent = "—";
         (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = "—";
     }
 
+    private async launcherImportSession() {
+        const btn = document.getElementById("btn-launcher-import-session") as HTMLButtonElement;
+        if (btn) btn.disabled = true;
+        this.setLauncherStatus("Importing session from Nexon Launcher...", "busy");
+        try {
+            const result = await invoke("launcher_import_session") as { session: any };
+            this.launcherSession = result.session;
+            localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
+            this.updateLauncherUI(true);
+            this.setLauncherStatus("Session imported from Nexon Launcher", "ok");
+            this.log("[Launcher] Session imported from Nexon Launcher", "info");
+            this.fetchLauncherVersion();
+        } catch (e) {
+            this.setLauncherStatus(`Import failed: ${e}`, "error");
+            this.log(`[Launcher] Session import failed: ${e}`, "error");
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     private async launcherDoLaunch() {
-        const isCustomServer = !!(this.activeProfileLoginIp && this.activeProfileLoginIp.trim());
+        const isCustomServer = !this.activeProfileIsOfficial;
         if (!isCustomServer && !this.launcherSession) {
             this.setLauncherStatus("Please log in first (or import a custom server profile)", "error");
             return;
@@ -2233,24 +2661,39 @@ class App {
         btn.disabled = true;
         this.setLauncherStatus("Launching…", "busy");
 
+        const preLaunchCmd = (document.getElementById("pre-launch-cmd") as HTMLTextAreaElement)?.value?.trim() || "";
+        const postLaunchCmd = (document.getElementById("post-launch-cmd") as HTMLTextAreaElement)?.value?.trim() || "";
+        const launchCmdOverride = (document.getElementById("launch-cmd-override") as HTMLTextAreaElement)?.value?.trim() || "";
+        const useNexonLauncher = (document.getElementById("launch-use-nexon-launcher") as HTMLInputElement)?.checked ?? false;
+
+        this.log(`[Launcher] Launching Mabinogi from: ${clientDir}${isCustomServer ? ` (custom server: ${this.activeProfileLoginIp})` : ""}`, "info");
+        if (preLaunchCmd) this.log(`[Launcher] Pre-launch: ${preLaunchCmd}`, "info");
+
         try {
             const r = await invoke("launcher_launch", {
                 session: this.launcherSession || null,
                 clientDir,
                 loginIp: this.activeProfileLoginIp || null,
                 loginPort: this.activeProfileLoginPort || null,
+                preLaunchCmd: preLaunchCmd || null,
+                postLaunchCmd: postLaunchCmd || null,
+                launchCmdOverride: launchCmdOverride || null,
+                useNexonLauncher,
             }) as any;
             const result = document.getElementById("launcher-launch-result")!;
             result.textContent = `Launched ${r.executable} (${r.argumentCount} args)${r.patchAvailable ? " — update available" : ""}`;
             result.className = "launcher-launch-result success";
             result.classList.remove("hidden");
             this.setLauncherStatus("Mabinogi launched!", "ok");
+            this.log(`[Launcher] Mabinogi launched: ${r.executable} (${r.argumentCount} args)`, "info");
+            if (postLaunchCmd) this.log(`[Launcher] Post-launch: ${postLaunchCmd}`, "info");
         } catch (e: any) {
             const result = document.getElementById("launcher-launch-result")!;
             result.textContent = `Launch failed: ${e}`;
             result.className = "launcher-launch-result error";
             result.classList.remove("hidden");
             this.setLauncherStatus(`Launch error: ${e}`, "error");
+            this.log(`[Launcher] Launch failed: ${e}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2263,12 +2706,15 @@ class App {
             (document.getElementById("launcher-version-value") as HTMLElement).textContent = String(ver);
             const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
             (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
-        } catch { /* non-critical */ }
+            this.log(`[Launcher] Game version: ${ver}R, maintenance: ${maint}`, "info");
+        } catch (e) {
+            this.log(`[Launcher] Version check failed (non-critical): ${e}`, "warn");
+        }
     }
 
     private updateLauncherUI(loggedIn: boolean) {
         // Only touch login/session cards if we're in official-server mode
-        const isCustom = !!(this.activeProfileLoginIp && this.activeProfileLoginIp.trim());
+        const isCustom = !this.activeProfileIsOfficial;
         if (!isCustom) {
             document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
             document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
@@ -2344,6 +2790,7 @@ class App {
         const path = this.config.kanan_cfg_path;
         if (!path) return;
         const statusEl = document.getElementById("kanan-status")!;
+        this.log(`[Kanan] Saving mods to: ${path}`, "info");
         try {
             await invoke("write_kanan_cfg", { path, mods: this.kananMods });
             if (statusEl) {
@@ -2352,12 +2799,14 @@ class App {
                 statusEl.classList.remove("hidden");
                 setTimeout(() => statusEl.classList.add("hidden"), 2000);
             }
+            this.log(`[Kanan] Saved ${this.kananMods.length} mod(s)`, "info");
         } catch (e: any) {
             if (statusEl) {
                 statusEl.textContent = `Save failed: ${e}`;
                 statusEl.style.color = "var(--accent-warn,#f90)";
                 statusEl.classList.remove("hidden");
             }
+            this.log(`[Kanan] Save failed: ${e}`, "error");
         }
     }
 
@@ -2403,6 +2852,81 @@ class App {
             const btn = document.getElementById("sidebar-toggle")!;
             sidebar.classList.toggle("collapsed");
             btn.textContent = sidebar.classList.contains("collapsed") ? "▶" : "◀";
+        });
+    }
+
+    private setupResizableList() {
+        const handle = document.getElementById("list-split-handle");
+        const leftPane = document.querySelector(".file-list-pane") as HTMLElement | null;
+        if (!handle || !leftPane) return;
+
+        const saved = localStorage.getItem("list-split-px");
+        if (saved) leftPane.style.flex = `0 0 ${saved}px`;
+
+        let dragging = false;
+        let startX = 0;
+        let startWidth = 0;
+
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            startX = (e as MouseEvent).clientX;
+            startWidth = leftPane.getBoundingClientRect().width;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            const delta = (e as MouseEvent).clientX - startX;
+            const w = Math.max(150, Math.min(700, startWidth + delta));
+            leftPane.style.flex = `0 0 ${w}px`;
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem("list-split-px", String(Math.round(leftPane.getBoundingClientRect().width)));
+        });
+    }
+
+    private setup3dPreviewResize() {
+        const handle = document.getElementById("preview-3d-resize-handle");
+        const viewport = document.getElementById("three-viewport");
+        if (!handle || !viewport) return;
+
+        const saved = localStorage.getItem("preview-3d-height");
+        if (saved) { viewport.style.height = `${saved}px`; viewport.style.minHeight = `${saved}px`; }
+
+        let dragging = false;
+        let startY = 0;
+        let startH = 0;
+
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            startY = (e as MouseEvent).clientY;
+            startH = viewport.getBoundingClientRect().height;
+            document.body.style.cursor = "ns-resize";
+            document.body.style.userSelect = "none";
+            (e as MouseEvent).preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            const delta = (e as MouseEvent).clientY - startY;
+            const newH = Math.max(150, startH + delta);
+            viewport.style.height = `${newH}px`;
+            viewport.style.minHeight = `${newH}px`;
+            // Notify three.js of resize if renderer is registered
+            (window as any).__threeResizeFn?.();
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem("preview-3d-height", String(Math.round(viewport.getBoundingClientRect().height)));
         });
     }
 
@@ -2456,7 +2980,7 @@ class App {
         });
         document.getElementById("btn-browse-differ-out")?.addEventListener("click", async () => {
             const path = await save({ filters: [{ name: "Mabinogi Archive", extensions: ["it"] }] });
-            if (path) (document.getElementById("differ-out") as HTMLInputElement).value = path;
+            if (path) (document.getElementById("differ-output") as HTMLInputElement).value = path;
         });
 
         // Run Buttons
@@ -2527,7 +3051,6 @@ class App {
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
             { id: "pack-auto-dds", prop: "auto_convert_dds" },
-            { id: "pack-wrap-data", prop: "pack_wrap_data" },
             { id: "settings-startup-extract", prop: "startup_auto_extract" },
             { id: "settings-startup-switch", prop: "startup_auto_switch" },
             { id: "list-full-sequence", prop: "list_full_sequence" },
@@ -2593,6 +3116,10 @@ class App {
         };
         refreshConfigPath();
         refreshPortableToggle();
+
+        const parallelEl = document.getElementById("settings-parallel-ops") as HTMLInputElement | null;
+        if (parallelEl) parallelEl.checked = this.config.parallel_ops ?? true;
+        parallelEl?.addEventListener("change", () => { this.config.parallel_ops = parallelEl.checked; this.saveConfig(); });
 
         document.getElementById("settings-portable-mode")?.addEventListener("change", async (e) => {
             const enable = (e.target as HTMLInputElement).checked;
@@ -2870,7 +3397,7 @@ class App {
     private async runDiffer() {
         const base = (document.getElementById("differ-old") as HTMLInputElement).value;
         const modified = (document.getElementById("differ-new") as HTMLInputElement).value;
-        const output = (document.getElementById("differ-out") as HTMLInputElement).value;
+        const output = (document.getElementById("differ-output") as HTMLInputElement).value;
         const key = (document.getElementById("differ-key") as HTMLInputElement).value;
 
         if (!base || !modified || !output || !key) {
@@ -3405,7 +3932,7 @@ class App {
         const audio = document.getElementById("preview-audio")!;
         const threed = document.getElementById("preview-3d")!;
 
-        if (this.pmgViewer) { this.pmgViewer.dispose(); this.pmgViewer = undefined; }
+        if (this.pmgViewer) { this.pmgViewer.dispose(); this.pmgViewer = undefined; (window as any).__threeResizeFn = undefined; }
         this._mmlStopFlag = true;
         if (this._mmlAudioCtx) { this._mmlAudioCtx.close().catch(() => {}); this._mmlAudioCtx = null; }
         [visual, hex, details, audio, threed].forEach(el => el.classList.remove("active"));
@@ -3453,6 +3980,7 @@ class App {
             const infoEl = document.getElementById("pmg-info")!;
             const { createPMGViewer } = await import("./pmgLoader");
             this.pmgViewer = createPMGViewer(cont, prev.pmg_geometry);
+            (window as any).__threeResizeFn = () => this.pmgViewer?.resize();
             if (prev.pmg_geometry) {
                 const g = prev.pmg_geometry;
                 this.log(`[PMG] ${g.mesh_name || prev.name}  ·  ${g.vertex_count} verts  ${g.face_count} faces`);
@@ -4158,7 +4686,18 @@ class App {
         listen("tauri://drag-drop", (event) => {
             const p = event.payload as any;
             if (p.paths && p.paths.length > 0) {
-                this.handleAutoInput(p.paths[0]);
+                const path = p.paths[0];
+                const lp = path.toLowerCase();
+                if (lp.endsWith(".it") || lp.endsWith(".pack")) {
+                    // Archive drag: always open list tab and load — don't check startup_auto_switch
+                    (document.getElementById("list-input") as HTMLInputElement).value = path;
+                    (document.getElementById("extract-input") as HTMLInputElement).value = path;
+                    this.handlePathAutoFill("extract-input", path);
+                    document.querySelector('.nav-item[data-tab="list"]')?.dispatchEvent(new Event('click'));
+                    this.runList();
+                } else {
+                    this.handleAutoInput(path);
+                }
             }
         });
     }

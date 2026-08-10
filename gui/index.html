@@ -30,39 +30,43 @@
       <nav class="nav-links">
         <button class="nav-item active" data-tab="dashboard" id="tab-dashboard" data-tooltip="tab_dashboard">
           <span class="nav-icon">📊</span>
-          <span class="nav-text" id="tab-dashboard-text">Dashboard</span>
+          <span class="nav-text" id="tab-dashboard-text" data-i18n="tab_dashboard">Dashboard</span>
         </button>
         <button class="nav-item" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
           <span class="nav-icon">🔓</span>
-          <span class="nav-text" id="tab-extract-text">Extract</span>
+          <span class="nav-text" id="tab-extract-text" data-i18n="tab_extract">Extract</span>
         </button>
         <button class="nav-item" data-tab="pack" id="tab-pack" data-tooltip="tab_pack">
           <span class="nav-icon">📦</span>
-          <span class="nav-text" id="tab-pack-text">Pack</span>
+          <span class="nav-text" id="tab-pack-text" data-i18n="tab_pack">Pack</span>
         </button>
         <button class="nav-item" data-tab="list" id="tab-list" data-tooltip="tab_list">
           <span class="nav-icon">🔍</span>
-          <span class="nav-text" id="tab-list-text">List</span>
+          <span class="nav-text" id="tab-list-text" data-i18n="tab_list">List</span>
         </button>
         <button class="nav-item" data-tab="differ" id="tab-differ" data-tooltip="tab_differ">
           <span class="nav-icon">🔀</span>
-          <span class="nav-text" id="tab-differ-text">Differ</span>
+          <span class="nav-text" id="tab-differ-text" data-i18n="tab_differ">Differ</span>
         </button>
         <button class="nav-item" data-tab="jobs" id="tab-jobs" data-tooltip="tab_jobs">
           <span class="nav-icon">📋</span>
-          <span class="nav-text" id="tab-jobs-text">Jobs</span>
+          <span class="nav-text" id="tab-jobs-text" data-i18n="tab_jobs">Jobs</span>
+        </button>
+        <button class="nav-item" data-tab="patcher" id="tab-patcher" data-tooltip="tab_patcher">
+          <span class="nav-icon">🛠️</span>
+          <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
         </button>
         <button class="nav-item" data-tab="features" id="tab-features" data-tooltip="tab_features">
           <span class="nav-icon">🎛️</span>
-          <span class="nav-text" id="tab-features-text">Features</span>
+          <span class="nav-text" id="tab-features-text" data-i18n="tab_features">Features</span>
         </button>
         <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
           <span class="nav-icon">🚀</span>
-          <span class="nav-label" id="tab-launcher-text">Launcher</span>
+          <span class="nav-text" id="tab-launcher-text" data-i18n="tab_launcher">Launcher</span>
         </button>
         <button class="nav-item" data-tab="settings" id="tab-settings" data-tooltip="tab_settings">
           <span class="nav-icon">⚙️</span>
-          <span class="nav-text" id="tab-settings-text">Settings</span>
+          <span class="nav-text" id="tab-settings-text" data-i18n="tab_settings">Settings</span>
         </button>
       </nav>
       <div class="sidebar-footer">
@@ -128,8 +132,8 @@
               </div>
             </div>
           </div>
-          <div class="dash-card">
-            <h3 id="dash-pipe-title">Current Job</h3>
+          <div class="dash-card" id="dash-pipe-card" style="display:none">
+            <h3 id="dash-pipe-title">Patch Progress</h3>
             <div class="pipe-stat">
               <div class="pipe-bar-bg"><div class="pipe-bar" id="dash-pipe-extract" style="width:0%"></div></div>
               <span id="dash-pipe-label">Idle</span>
@@ -137,9 +141,9 @@
           </div>
         </div>
         <div class="dash-card recent-activity">
-          <h3 id="recentActivity">Recent Activity</h3>
+          <h3 id="recentActivity" data-i18n="recentActivity">Recent Activity</h3>
           <div id="activity-list" class="activity-list">
-            <div class="activity-item no-activity" id="noActivity">No recent activity</div>
+            <div class="activity-item no-activity" id="noActivity" data-i18n="noActivity">No recent activity</div>
           </div>
         </div>
 
@@ -165,7 +169,7 @@
           <div class="card">
             <div class="card-header">
               <span id="jobs-title-text">Job Queue</span>
-              <button class="tab-btn" id="btn-jobs-clear-done" style="margin-left:auto;font-size:11px;padding:2px 8px;" id="btn-jobs-clear">Clear Done</button>
+              <button class="tab-btn" id="btn-jobs-clear-done" style="margin-left:auto;font-size:11px;padding:2px 8px;" data-i18n="jobs_clear_done">Clear Done</button>
             </div>
             <div class="jobs-add-row">
               <select id="jobs-type-select" class="form-input" style="max-width:130px;">
@@ -175,12 +179,12 @@
                 <option value="merge" data-i18n="job_type_merge">Merge</option>
                 <option value="apply-mod" data-i18n="job_type_apply_mod">Apply Mod</option>
               </select>
-              <input type="text" id="jobs-input" class="form-input" placeholder="Input path" />
+              <input type="text" id="jobs-input" class="form-input" placeholder="Input path" data-i18n-placeholder="jobs_input_placeholder" />
               <button class="tab-btn" id="btn-jobs-browse-input" data-tooltip="tooltip_browse">…</button>
-              <input type="text" id="jobs-output" class="form-input" placeholder="Output path" />
+              <input type="text" id="jobs-output" class="form-input" placeholder="Output path" data-i18n-placeholder="jobs_output_placeholder" />
               <button class="tab-btn" id="btn-jobs-browse-output" data-tooltip="tooltip_browse">…</button>
-              <input type="text" id="jobs-key" class="form-input" style="max-width:130px;" placeholder="key / salt" />
-              <button class="tab-btn primary" id="btn-jobs-add">Add</button>
+              <input type="text" id="jobs-key" class="form-input" style="max-width:130px;" placeholder="key / salt" data-i18n-placeholder="jobs_key_placeholder" />
+              <button class="tab-btn primary" id="btn-jobs-add" data-i18n="jobs_add">Add</button>
             </div>
           </div>
 
@@ -188,10 +192,10 @@
             <div class="card-header">
               <span id="jobs-list-header-text">Queue</span>
               <span id="jobs-count-badge" style="font-size:11px;opacity:.6;margin-left:6px;"></span>
-              <button class="tab-btn primary" id="btn-jobs-run-all" style="margin-left:auto;">Run All</button>
+              <button class="tab-btn primary" id="btn-jobs-run-all" style="margin-left:auto;" data-i18n="jobs_run_all">Run All</button>
             </div>
             <div id="jobs-list" class="jobs-list">
-              <div class="jobs-empty" id="jobs-empty-msg">No jobs queued. Add extract or pack jobs above.</div>
+              <div class="jobs-empty" id="jobs-empty-msg" data-i18n="jobs_empty_msg">No jobs queued. Add extract or pack jobs above.</div>
             </div>
           </div>
         </div>
@@ -289,6 +293,9 @@
               <button class="tab-btn primary" id="btn-launcher-login">
                 <span id="btn-launcher-login-text">Login</span>
               </button>
+              <button class="tab-btn" id="btn-launcher-import-session" title="Import session from the running Nexon Launcher (no password needed)">
+                <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
+              </button>
             </div>
           </div>
 
@@ -336,7 +343,7 @@
       </div>
 
       <!-- Extract Tab -->
-      <div id="extract" class="tab-content active">
+      <div id="extract" class="tab-content">
         <div class="form-group">
           <label id="label_archive">Archive:</label>
           <div class="input-row">
@@ -439,6 +446,7 @@
               <div id="file-tree-empty" class="tree-empty-state" id="file-tree-empty">Browse for a .it or .pack archive above to view its contents</div>
             </div>
           </div>
+          <div class="resize-handle-v" id="list-split-handle"></div>
           <div class="preview-pane">
             <div class="preview-header">
                 <div class="preview-tabs">
@@ -467,9 +475,10 @@
                     </div>
                 </div>
 
-                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative">
-                    <div id="three-viewport" style="width:100%; height:100%; min-height:400px"></div>
+                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative;display:flex;flex-direction:column">
+                    <div id="three-viewport" style="width:100%; height:400px; min-height:150px; flex-shrink:0"></div>
                     <div id="pmg-info" style="position:absolute;top:6px;left:8px;font-size:0.75em;opacity:0.7;pointer-events:none;"></div>
+                    <div id="preview-3d-resize-handle" style="height:8px;cursor:ns-resize;background:linear-gradient(to bottom,transparent 2px,var(--border-glass,rgba(255,255,255,0.18)) 2px,var(--border-glass,rgba(255,255,255,0.18)) 3px,transparent 3px);flex-shrink:0;user-select:none;" title="Drag to resize 3D viewport"></div>
                 </div>
             </div>
           </div>
@@ -529,6 +538,55 @@
           <button id="differ-run" class="run-btn" data-tooltip="tooltip_differ_run">GENERATE DIFF</button>
       </div>
 
+      <!-- Patcher Tab -->
+      <div id="patcher" class="tab-content">
+      <div style="display:flex;flex-direction:column;gap:0;height:100%;padding:10px 12px;box-sizing:border-box">
+
+        <!-- Version row -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="display:flex;flex-direction:column;align-items:center;background:var(--bg-input);border-radius:6px;padding:4px 14px;min-width:78px">
+            <span style="font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em" data-i18n="patcher_installed">Installed</span>
+            <span style="font-size:1.1rem;font-weight:bold;color:var(--text-primary)" id="patcher-version-local">—</span>
+          </div>
+          <span style="color:var(--text-muted);font-size:1.1rem">→</span>
+          <div style="display:flex;flex-direction:column;align-items:center;background:var(--bg-input);border-radius:6px;padding:4px 14px;min-width:78px;border:1px solid rgba(0,229,255,0.18)">
+            <span style="font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em" data-i18n="patcher_available">Available</span>
+            <span style="font-size:1.1rem;font-weight:bold;color:var(--accent-cyan)" id="patcher-version-remote">—</span>
+          </div>
+          <button class="tab-btn" id="btn-patcher-check" style="margin-left:auto;font-size:0.75rem;padding:3px 10px" data-i18n="patcher_check">Check</button>
+        </div>
+
+        <!-- Game path -->
+        <div class="input-row" style="margin-bottom:6px">
+          <input type="text" id="patcher-game-path" class="form-input" placeholder="C:\Nexon\Mabinogi" />
+          <button class="tab-btn" id="btn-patcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
+        </div>
+
+        <!-- Action buttons + inline status -->
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <button class="tab-btn primary" id="btn-patcher-patch" style="padding:5px 18px;font-size:0.9rem" data-i18n="patcher_patch">▶ Patch</button>
+          <button class="tab-btn" id="btn-patcher-verify" data-i18n="patcher_verify">Verify</button>
+          <button class="tab-btn" id="btn-patcher-repair" data-i18n="patcher_repair">Repair</button>
+          <button class="tab-btn" id="btn-patcher-stop" style="display:none" data-i18n="patcher_stop">■ Stop</button>
+          <span id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
+        </div>
+
+        <!-- Progress bar -->
+        <div id="patcher-progress-wrap" style="display:none;margin-bottom:8px">
+          <div style="position:relative;height:8px;background:var(--bg-input);border-radius:6px;overflow:hidden">
+            <div id="patcher-progress-bar" style="height:100%;width:0%;background:var(--accent-cyan);transition:width 0.2s ease;border-radius:6px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:3px">
+            <span id="patcher-progress-detail" style="font-size:0.72rem;color:var(--text-muted)"></span>
+            <span id="patcher-speed" style="font-size:0.72rem;color:var(--text-muted)"></span>
+          </div>
+        </div>
+
+        <!-- Per-worker progress bars (up to 10 simultaneous downloads/installs, like HyddwnLauncher) -->
+        <div id="patcher-bars" style="display:flex;flex-direction:column;gap:3px;min-height:60px;max-height:240px;overflow-y:auto"></div>
+      </div>
+      </div>
+
       <!-- Settings Tab -->
       <div id="settings" class="tab-content">
         <!-- Sub-tab bar -->
@@ -537,7 +595,7 @@
           <button class="settings-stab" data-stab="engine">⚙️ Engine</button>
           <button class="settings-stab" data-stab="fileassoc">🔗 File Assoc</button>
           <button class="settings-stab" data-stab="launcher">🚀 Launcher</button>
-          <button class="settings-stab" data-stab="patcher">🛠 Patcher</button>
+          <button class="settings-stab" data-stab="patcher">🛠️ Patcher</button>
           <button class="settings-stab active" data-stab="themes">🎨 Themes</button>
         </div>
 
@@ -609,6 +667,10 @@
               <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
             </div>
             <div class="sys-stat" style="margin-top:10px;">
+              <span data-i18n="label_parallel_ops">Parallel processing (Rayon multi-core)</span>
+              <label class="switch"><input type="checkbox" id="settings-parallel-ops" checked><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" style="margin-top:6px;">
               <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
               <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
             </div>
@@ -774,30 +836,66 @@
           </div>
         </div>
 
+
         <!-- Patcher sub-tab -->
         <div id="stab-patcher" class="settings-stab-content">
           <div class="settings-section">
-  <h4>Game Installation</h4>
-  <div class="form-group" style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="patcher-game-path" class="form-input" style="flex:1" placeholder="C:\Nexon\Mabinogi">
-    <button class="tab-btn" id="btn-patcher-browse">Browse</button>
-  </div>
-  <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
-    <button class="tab-btn" id="btn-patcher-verify">Verify Files</button>
-    <button class="tab-btn" id="btn-patcher-repair">Full Repair</button>
-    <button class="tab-btn" id="btn-patcher-update">Download Updates</button>
-  </div>
-  <div id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;white-space:pre-wrap"></div>
-
-  <h4 style="margin-top:16px;border-top:1px solid var(--border-glass);padding-top:12px">Custom Server (hyddwn)</h4>
-  <div class="sys-stat">
-    <span id="label_hyddwn_enable">Enable hyddwn proxy</span>
-    <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
-  </div>
-  <div class="form-group" id="patcher-hyddwn-row" style="display:none;margin-top:6px">
-    <label style="font-size:0.8rem;color:var(--text-muted)">Server URL</label>
-    <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
-  </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_auto_update">Auto-update on launch</span>
+              <label class="switch"><input type="checkbox" id="patcher-auto-update"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_focus_on_start">Switch to Patcher tab on start</span>
+              <label class="switch"><input type="checkbox" id="patcher-focus-on-start"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_run_elevated">Always run as Administrator</span>
+              <label class="switch"><input type="checkbox" id="patcher-run-elevated"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+              <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_max_workers">Parallel workers</label>
+              <input type="number" id="patcher-max-workers" class="form-input" min="1" max="32" value="10" style="width:64px">
+            </div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+              <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_installed_ver">Installed version</label>
+              <span id="patcher-settings-version" style="font-size:0.85rem;color:var(--accent-cyan)">—</span>
+              <button class="tab-btn" id="btn-patcher-settings-check" style="padding:2px 8px;font-size:0.78rem" data-i18n="btn_patcher_version_refresh">Refresh</button>
+            </div>
+            <div class="form-group" style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
+              <button class="tab-btn" id="btn-patcher-force-repair" style="flex:1" data-i18n="btn_patcher_force_repair">Force Re-download All</button>
+              <button class="tab-btn" id="btn-patcher-clear-cache" data-i18n="btn_patcher_clear_cache">Clear Cache</button>
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:10px" data-i18n="label_custom_server_section">Custom Patch Server</h4>
+            <div class="sys-stat" style="margin-top:4px">
+              <span data-i18n="label_custom_server_enable">Override patch server URL</span>
+              <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" id="patcher-hyddwn-url-row" style="margin-top:6px;display:none">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_patcher_server_url">Patch Server URL</label>
+              <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:10px" id="label_launch_mode">Launch Mode</h4>
+            <div class="sys-stat">
+              <span id="label_launch_nexon_launcher">Via Nexon Launcher</span>
+              <label class="switch"><input type="checkbox" id="launch-use-nexon-launcher"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" style="margin-top:8px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_launch_cmd_override">Custom Launch Command (leave blank for auto)</label>
+              <textarea id="launch-cmd-override" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="{client_dir}\Client.exe {args} /P:{passport}"></textarea>
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px" id="label_launch_hooks">Launch Hooks</h4>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_patch_cmd">Before Patch</label>
+              <textarea id="pre-patch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before patching)"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_launch_cmd">Before Launch</label>
+              <textarea id="pre-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before starting client)"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_post_launch_cmd">After Launch</label>
+              <textarea id="post-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run after client starts)"></textarea>
+            </div>
           </div>
         </div>
 

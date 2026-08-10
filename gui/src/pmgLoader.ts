@@ -18,6 +18,7 @@ export interface PmgGeometry {
 export interface PMGViewer {
     dispose: () => void;
     setWireframe: (enabled: boolean) => void;
+    resize: () => void;
 }
 
 export function createPMGViewer(container: HTMLElement, geo: PmgGeometry | null | undefined): PMGViewer {
@@ -176,6 +177,13 @@ export function createPMGViewer(container: HTMLElement, geo: PmgGeometry | null 
 
     return {
         setWireframe: (enabled) => { material.wireframe = enabled; },
+        resize: () => {
+            const nw = container.clientWidth || 400;
+            const nh = container.clientHeight || 300;
+            camera.aspect = nw / nh;
+            camera.updateProjectionMatrix();
+            renderer.setSize(nw, nh);
+        },
         dispose: () => {
             cancelAnimationFrame(animId);
             renderer.dispose();
