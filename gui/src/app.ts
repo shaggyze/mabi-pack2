@@ -2322,6 +2322,8 @@ class App {
         this.activeProfileLoginIp = profile.login_ip || "";
         this.activeProfileLoginPort = profile.login_port || 0;
         this.activeProfileIsOfficial = profile.is_official !== false;
+        // Re-apply login state now that activeProfileIsOfficial is set
+        this.updateLauncherUI(!!this.launcherSession);
 
         const isCustom = !this.activeProfileIsOfficial;
         // Show login card only for official profiles; custom servers launch directly
@@ -2702,15 +2704,32 @@ class App {
 
     private async fetchLauncherVersion() {
         if (!this.launcherSession) return;
+
+        // Version check: CDN first, fall back to local patchdata
+        let verStr = "—";
         try {
             const ver = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
-            const verStr = ver > 0 ? String(ver) : "—";
-            (document.getElementById("launcher-version-value") as HTMLElement).textContent = verStr;
+            verStr = ver > 0 ? String(ver) : "—";
+        } catch {
+            try {
+                const gp = (this.config as any)?.patcher_game_path;
+                if (gp) {
+                    const pv = await invoke("check_patch_version", { gamePath: gp }) as any;
+                    const ver = (pv.remote_version ?? pv.local_version) as number | null;
+                    if (ver && ver > 0) verStr = String(ver);
+                }
+            } catch {}
+        }
+        (document.getElementById("launcher-version-value") as HTMLElement).textContent = verStr;
+        this.log(`[Launcher] Game version: ${verStr}`, "info");
+
+        // Maintenance check is independent of version check
+        try {
             const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
             (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
-            this.log(`[Launcher] Game version: ${verStr}, maintenance: ${maint}`, "info");
+            this.log(`[Launcher] Maintenance: ${maint}`, "info");
         } catch (e) {
-            this.log(`[Launcher] Version check failed (non-critical): ${e}`, "warn");
+            this.log(`[Launcher] Maintenance check failed (non-critical): ${e}`, "warn");
         }
     }
 
@@ -2728,6 +2747,9 @@ class App {
         }
         const dot = document.getElementById("launcher-status-dot");
         if (dot) dot.style.background = loggedIn ? "var(--green, #4ade80)" : "var(--yellow, #facc15)";
+        const statusText = document.getElementById("launcher-status-text");
+        if (statusText && !loggedIn) statusText.textContent = "Not logged in";
+        if (statusText && loggedIn) statusText.textContent = "Logged in";
     }
 
     private setLauncherStatus(msg: string, type: "ok" | "error" | "busy" | "idle") {
