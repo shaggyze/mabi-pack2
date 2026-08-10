@@ -192,6 +192,65 @@ pub fn get_passport(session: &NexonSession) -> Result<String> {
     parsed.passport.ok_or_else(|| anyhow!("Passport response has no passport field"))
 }
 
+/// Import session tokens from the running Nexon Launcher's cookie store.
+/// Reads %APPDATA%\NexonLauncher\Network\Cookies (SQLite) via Python.
+pub fn import_from_nexon_launcher() -> Result<NexonSession> {
+    let appdata = std::env::var("APPDATA")
+        .map_err(|_| anyhow!("APPDATA not set"))?;
+
+    let cookies_db = std::path::PathBuf::from(&appdata)
+        .join("NexonLauncher").join("Network").join("Cookies");
+
+    if !cookies_db.exists() {
+        return Err(anyhow!("Nexon Launcher not installed or not found"));
+    }
+
+    // Copy to temp to avoid SQLite lock conflicts
+    let tmp_db = std::env::temp_dir().join("nx_import_cookies.db");
+    std::fs::copy(&cookies_db, &tmp_db)
+        .map_err(|e| anyhow!("Failed to copy cookie DB: {}", e))?;
+
+    let py = "import sqlite3,json,sys\nconn=sqlite3.connect(sys.argv[1])\nc=conn.cursor()\nc.execute(\"SELECT name,value FROM cookies WHERE host_key LIKE '%nexon%' AND name IN ('AToken','g_AToken','NxLSession','NxGUN')\")\nd={r[0]:r[1] or '' for r in c.fetchall()}\nconn.close()\nprint(json.dumps(d))";
+
+    let tmp_py = std::env::temp_dir().join("nx_read_cookies.py");
+    std::fs::write(&tmp_py, py)
+        .map_err(|e| anyhow!("Write script failed: {}", e))?;
+
+    let out = std::process::Command::new("python")
+        .arg(&tmp_py)
+        .arg(tmp_db.to_string_lossy().as_ref())
+        .output();
+
+    let _ = std::fs::remove_file(&tmp_py);
+    let _ = std::fs::remove_file(&tmp_db);
+
+    let out = out.map_err(|e| anyhow!("Python not available: {}", e))?;
+
+    if !out.status.success() {
+        return Err(anyhow!("Cookie read failed: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let data: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow!("Parse error: {}", e))?;
+
+    let a_token = data["AToken"].as_str().unwrap_or("").to_string();
+    let g_token = data["g_AToken"].as_str().unwrap_or("").to_string();
+    let session = data["NxLSession"].as_str().unwrap_or("").to_string();
+    let user_id = data["NxGUN"].as_str().unwrap_or("").to_string();
+
+    if a_token.is_empty() || session.is_empty() {
+        return Err(anyhow!("Nexon Launcher is not logged in (no valid session found)"));
+    }
+
+    Ok(NexonSession {
+        access_token: a_token.clone(),
+        g_access_token: if g_token.is_empty() { a_token } else { g_token },
+        session_token: session,
+        hashed_user_id: user_id,
+    })
+}
+
 // ── Device ID ─────────────────────────────────────────────────────────────────
 
 /// Stable per-machine identifier matching Hyddwn's GetDeviceUuid algorithm.
@@ -243,7 +302,7 @@ pub fn hash_password(password: &str) -> String {
 fn build_client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 mabi-patcher/2.0")
+        .user_agent("NexonLauncher.nxl-release-18.14.10-220-fc7480c-coreapp-3.3.0")
         .build()?)
 }
 

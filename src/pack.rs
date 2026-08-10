@@ -12,6 +12,7 @@ use std::path::Path;
 use walkdir::WalkDir;
 use log::{info, debug, trace};
 use image_dds::dds_from_image;
+use rayon::prelude::*;
 
 fn get_rel_path(root_dir: &str, full_path: &str) -> Result<String, Error> {
     let rel_name = Path::new(full_path).strip_prefix(root_dir).expect(&format!(
@@ -190,27 +191,42 @@ pub fn run_pack(
     let start_content_off = ceil_1024((header_off as u64) + (entries_off as u64) + (entries_size as u64));
 
     let total = file_names.len();
-    
+    let encrypt_files = output_fname.to_lowercase().ends_with(".it") && !skey.is_empty();
+
+    // Compress files in parallel chunks (bounds peak RAM to ~chunk_size * largest_file).
+    // Writing to the archive must remain serial because content_off offsets chain.
+    let chunk_size = rayon::current_num_threads().max(1) * 2;
     let mut content_off = start_content_off;
     let mut entries = Vec::<FileEntry>::with_capacity(file_names.len());
-    
-    for (idx, (disk_name, archive_name)) in file_names.iter().enumerate() {
-        if let Some(cb) = progress_cb {
-            cb(idx, total, &format!("Packing: {}", archive_name));
-        }
-        let encrypt_this_file = output_fname.to_lowercase().ends_with(".it") && !skey.is_empty();
-        let (mut ent, content) = pack_file(&input_root, disk_name, archive_name, need_compress(disk_name, &compress_ext), auto_dds, encrypt_this_file, skey, &final_file_name, iv)
-            .context(format!("packing {} failed", archive_name))?;
+    let mut global_idx = 0usize;
 
-        stm.seek(SeekFrom::Start(content_off))?;
-        stm.write_all(&content)?;
-        
-        ent.offset = ((content_off - start_content_off) / 1024) as u32;
-        let key_sum = ent.key.iter().fold(0u32, |s, v| s.wrapping_add(*v as u32));
-        ent.checksum = ent.flags.wrapping_add(ent.offset).wrapping_add(ent.original_size).wrapping_add(ent.raw_size).wrapping_add(key_sum);
-        
-        content_off = ceil_1024(content_off + ent.raw_size as u64);
-        entries.push(ent);
+    for chunk in file_names.chunks(chunk_size) {
+        let chunk_base = global_idx;
+        let chunk_results: Vec<Result<(FileEntry, Vec<u8>), Error>> = chunk.par_iter()
+            .enumerate()
+            .map(|(ci, (disk_name, archive_name))| {
+                if let Some(cb) = progress_cb {
+                    cb(chunk_base + ci, total, &format!("Packing: {}", archive_name));
+                }
+                pack_file(&input_root, disk_name, archive_name,
+                    need_compress(disk_name, &compress_ext),
+                    auto_dds, encrypt_files, skey, &final_file_name, iv)
+                    .context(format!("packing {} failed", archive_name))
+            })
+            .collect();
+
+        for result in chunk_results {
+            let (mut ent, content) = result?;
+            stm.seek(SeekFrom::Start(content_off))?;
+            stm.write_all(&content)?;
+            ent.offset = ((content_off - start_content_off) / 1024) as u32;
+            let key_sum = ent.key.iter().fold(0u32, |s, v| s.wrapping_add(*v as u32));
+            ent.checksum = ent.flags.wrapping_add(ent.offset).wrapping_add(ent.original_size)
+                .wrapping_add(ent.raw_size).wrapping_add(key_sum);
+            content_off = ceil_1024(content_off + ent.raw_size as u64);
+            entries.push(ent);
+        }
+        global_idx += chunk.len();
     }
 
     stm.seek(SeekFrom::Start((header_off + entries_off) as u64))?;
