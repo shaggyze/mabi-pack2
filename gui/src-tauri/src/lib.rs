@@ -4237,11 +4237,53 @@ fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String> {
 
 #[tauri::command]
 
-fn launcher_get_version(session: SessionInfo) -> Result<i32, String> {
+fn launcher_get_version(_session: SessionInfo) -> Result<i32, String> {
 
-    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
+    use std::io::Read;
 
-    mabi_pack2::launcher::patch::get_latest_version(&nexon_session).map_err(|e| e.to_string())
+    let hash = ureq::get("http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash")
+
+        .timeout(std::time::Duration::from_secs(10))
+
+        .call().map_err(|e| e.to_string())?
+
+        .into_string().map_err(|e| e.to_string())?;
+
+    let hash = hash.trim();
+
+    if hash.is_empty() { return Err("empty CDN hash".to_string()); }
+
+    let manifest_url = format!("http://download2.nexon.net/Game/nxl/games/10200/{}", hash);
+
+    let m_resp = ureq::get(&manifest_url)
+
+        .timeout(std::time::Duration::from_secs(15))
+
+        .call().map_err(|e| e.to_string())?;
+
+    let mut m_bytes: Vec<u8> = Vec::new();
+
+    m_resp.into_reader().read_to_end(&mut m_bytes).map_err(|e| e.to_string())?;
+
+    if m_bytes.len() <= 2 { return Err("manifest too short".to_string()); }
+
+    let mut dec = flate2::read::DeflateDecoder::new(&m_bytes[2..]);
+
+    let mut json_bytes = Vec::new();
+
+    dec.read_to_end(&mut json_bytes).map_err(|e| e.to_string())?;
+
+    let manifest: serde_json::Value = serde_json::from_slice(&json_bytes).map_err(|e| e.to_string())?;
+
+    let buildtime = manifest["buildtime"].as_f64()
+
+        .ok_or_else(|| "no buildtime in manifest".to_string())?;
+
+    get_managed_version(buildtime.round() as i64)
+
+        .map(|v| v as i32)
+
+        .ok_or_else(|| "version lookup failed".to_string())
 
 }
 
