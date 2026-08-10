@@ -2704,10 +2704,11 @@ class App {
         if (!this.launcherSession) return;
         try {
             const ver = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
-            (document.getElementById("launcher-version-value") as HTMLElement).textContent = String(ver);
+            const verStr = ver > 0 ? String(ver) : "—";
+            (document.getElementById("launcher-version-value") as HTMLElement).textContent = verStr;
             const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
             (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
-            this.log(`[Launcher] Game version: ${ver}R, maintenance: ${maint}`, "info");
+            this.log(`[Launcher] Game version: ${verStr}, maintenance: ${maint}`, "info");
         } catch (e) {
             this.log(`[Launcher] Version check failed (non-critical): ${e}`, "warn");
         }
