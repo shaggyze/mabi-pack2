@@ -1,438 +1,672 @@
-// Nexon NA authentication for Mabinogi launcher.
+// Nexon NA authentication for the Mabinogi launcher.
 //
-// Auth flow mirrors Hyddwn Launcher (https://github.com/Hyddwn/HyddwnLauncher):
-//   1. Build device ID: SHA256(WMI_UUID + MachineGuid)
-//   2. Hash password:   SHA512(password) → lowercase hex
-//   3. POST /api/regional-auth/v1.0/no-auth/login/validate  (arena session init)
-//   4. POST /api/regional-auth/v1.0/no-auth/launcher/email/login  → cookies
-//   5. Persist NxLSession; refresh via autologin on next launch.
+// Ported from Rua (uNexonAPI.pas), which matches the current NXL launcher:
+//   Email/password : POST /api/account/v1/no-auth/login/launcher       (206 = MFA)
+//   OTP            : POST /api/account/v1/no-auth/login/launcher/otp
+//   Browser (TPA)  : POST /api/account/v1/no-auth/login/tpa/launcher   (TpaSession cookie)
+//   Refresh        : POST /api/regional-auth/v1.0/no-auth/login/launcher/autologin
+//                    (email/password accounts only; TPA returns 20182)
+//   Launch chain   : GET  /api/account/v1/account        (merges refreshed cookies)
+//                    POST /api/game-auth2/v1/access       (isPlayable verdict)
+//                    POST /api/game-auth2/v1/playable     (sets server-side flag)
+//                    POST /api/passport/v2/passport       (Bearer g_AToken)
 //
-// Captcha: Hyddwn's default (non-admin) path sends a random 256-char string.
-// Nexon accepts this for launcher auth. A real reCAPTCHA v3 bypass (hosts-file
-// redirect + local web server, admin-only) is left as future work.
+// Any call that returns 401 is retried once after an autologin refresh.
 
 use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const NEXON_BASE: &str = "https://www.nexon.com";
+pub const PRODUCT_ID: &str = "10200";
+pub const API_BASE: &str = "https://www.nexon.com/api";
 const CLIENT_ID: &str = "7853644408";
-const SCOPE: &str = "us.launcher.all";
-const PRODUCT_ID: &str = "10200";
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) NexonLauncher/4.7.9 Chrome/108.0.5359.215 Electron/22.3.27 Safari/537.36";
+const ARENA_VER: &str = "nxl-v2.71.0-c228c50d";
+const CAPTCHA_CODES: [i64; 3] = [1013, 70018, 70019];
+/// Nexon error code for "trust this device" (verify via email / official launcher).
+pub const ERR_DEVICE_TRUST: i64 = 20027;
+/// Nexon error code returned by autologin for TPA (Google/social) sessions.
+pub const ERR_TPA_NO_AUTOLOGIN: i64 = 20182;
+
+/// Random per-process launcher session id sent as `x-nxl-session-id`.
+static NXL_SESSION_ID: Lazy<String> = Lazy::new(|| {
+    let seed = format!(
+        "{}-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos(),
+        std::process::id()
+    );
+    hex(&Sha256::digest(seed.as_bytes()))[..32].to_string()
+});
+
+/// Shared client so every call reuses connections. Cookies are handled manually.
+static CLIENT: Lazy<reqwest::blocking::Client> = Lazy::new(|| {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("failed to build HTTP client")
+});
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NexonSession {
     pub access_token: String,
     pub g_access_token: String,
-    /// NxLSession cookie — store this and pass to `autologin` on next launch.
+    /// NxLSession cookie — long-lived; used to refresh AToken.
     pub session_token: String,
     pub hashed_user_id: String,
+    #[serde(default)]
+    pub nx_gun: String,
+    #[serde(default)]
+    pub id_token: String,
+    /// True for browser/TPA (Google, social) sessions — autologin is not supported.
+    #[serde(default)]
+    pub tpa: bool,
 }
 
 impl NexonSession {
     pub fn cookie_header(&self) -> String {
-        format!(
-            "AToken={}; g_AToken={}; NxLSession={}; NexonUserID={}",
-            self.access_token, self.g_access_token, self.session_token, self.hashed_user_id
-        )
+        let mut parts = Vec::new();
+        for (name, val) in [
+            ("NxLSession", &self.session_token),
+            ("AToken", &self.access_token),
+            ("g_AToken", &self.g_access_token),
+            ("NexonUserID", &self.hashed_user_id),
+            ("NxGUN", &self.nx_gun),
+            ("id_token", &self.id_token),
+        ] {
+            if !val.is_empty() {
+                parts.push(format!("{}={}", name, val));
+            }
+        }
+        parts.join("; ")
+    }
+
+    /// Game-auth endpoints want the game-scoped token; fall back to AToken.
+    pub fn game_token(&self) -> &str {
+        if self.g_access_token.is_empty() { &self.access_token } else { &self.g_access_token }
+    }
+
+    /// Update fields from `Set-Cookie` response headers (empty values are ignored).
+    pub fn merge_set_cookies(&mut self, headers: &reqwest::header::HeaderMap) {
+        for (name, val) in parse_set_cookies(headers) {
+            self.set_cookie(&name, val);
+        }
+    }
+
+    /// Update fields from a `Name=Value; Name2=Value2` cookie string.
+    pub fn merge_cookie_string(&mut self, cookies: &str) {
+        for part in cookies.split(';') {
+            if let Some((n, v)) = part.trim().split_once('=') {
+                self.set_cookie(n.trim(), v.trim().to_string());
+            }
+        }
+    }
+
+    fn set_cookie(&mut self, name: &str, val: String) {
+        if val.is_empty() {
+            return;
+        }
+        match name {
+            "NxLSession" => self.session_token = val,
+            "AToken" => self.access_token = val,
+            "g_AToken" => self.g_access_token = val,
+            "NexonUserID" => self.hashed_user_id = val,
+            "NxGUN" => self.nx_gun = val,
+            "id_token" => self.id_token = val,
+            _ => {}
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct LoginResult {
     pub session: NexonSession,
-    /// Seconds until NxLSession expires (from response body)
+    /// Seconds until NxLSession expires (from response body, default 24h).
     pub session_expires_in: i32,
 }
 
-// ── Request / response structs ────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct ValidateReq<'a> {
-    id: &'a str,
-    #[serde(rename = "deviceId")]
-    device_id: &'a str,
+/// Errors callers may want to handle specifically (downcast from `anyhow::Error`).
+#[derive(Debug, Clone)]
+pub enum AuthError {
+    /// HTTP 206 from login — submit an OTP with `login_otp`.
+    MfaRequired { mfa_key: String, mfa_type: String },
+    /// CAPTCHA required — only the browser login can get past it.
+    CaptchaRequired(i64),
+    /// Nexon wants this device verified (email link / official launcher).
+    DeviceTrustRequired,
+    /// Session expired and could not be refreshed — log in again.
+    SessionExpired(String),
+    /// The game is not playable right now (maintenance / region block).
+    NotPlayable(String),
+    /// Any other HTTP failure.
+    Http { status: u16, code: i64, body: String },
 }
 
-#[derive(Serialize)]
-struct LoginReq<'a> {
-    #[serde(rename = "autoLogin")]
-    auto_login: bool,
-    #[serde(rename = "captchaToken")]
-    captcha_token: String,
-    #[serde(rename = "captchaVersion")]
-    captcha_version: &'static str,
-    #[serde(rename = "clientId")]
-    client_id: &'static str,
-    #[serde(rename = "deviceId")]
-    device_id: String,
-    id: &'a str,
-    #[serde(rename = "localTime")]
-    local_time: u64,
-    password: String,
-    scope: &'static str,
-    #[serde(rename = "timeOffset")]
-    time_offset: i64,
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::MfaRequired { mfa_type, .. } => write!(f, "MFA required ({})", mfa_type),
+            AuthError::CaptchaRequired(c) => write!(f, "CAPTCHA required (code {}) — use the browser login", c),
+            AuthError::DeviceTrustRequired => write!(
+                f,
+                "Nexon requires device verification (code 20027). Check your email for Nexon's \
+                 verification link or log in once with the official Nexon Launcher, then try again."
+            ),
+            AuthError::SessionExpired(m) => write!(f, "Session expired (401). Re-login and try again. {}", m),
+            AuthError::NotPlayable(m) => write!(f, "{}", m),
+            AuthError::Http { status, code, body } => {
+                write!(f, "HTTP {} (code {}): {}", status, code, truncate(body, 300))
+            }
+        }
+    }
 }
 
-#[derive(Serialize)]
-struct AutoLoginReq {
-    #[serde(rename = "deviceId")]
-    device_id: String,
+impl std::error::Error for AuthError {}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AccessInfo {
+    pub http_status: u16,
+    pub is_playable: bool,
+    pub is_developer: bool,
+    pub ip_blocked: bool,
+    pub required_2fa: bool,
 }
 
-#[derive(Deserialize, Default)]
-struct LoginBody {
-    #[serde(rename = "hashedUserNo")]
-    hashed_user_no: Option<String>,
-    #[serde(rename = "loginSessionExpiresIn")]
-    login_session_expires_in: Option<i32>,
-}
+// ── Login paths ───────────────────────────────────────────────────────────────
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
-/// Full login with username + password. Returns session and expiry.
-pub fn login(username: &str, password: &str, remember: bool) -> Result<LoginResult> {
-    let dev = device_id("");
-    let hashed_pw = hash_password(password);
-    let captcha = random_token(256);
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let client = build_client()?;
-
-    // Arena session init (fire and forget — failure is non-fatal)
-    let _ = client
-        .post(format!("{}/api/regional-auth/v1.0/no-auth/login/validate", NEXON_BASE))
-        .json(&ValidateReq { id: username, device_id: &dev })
-        .send();
-
-    // Main login
-    let resp = client
-        .post(format!("{}/api/regional-auth/v1.0/no-auth/launcher/email/login", NEXON_BASE))
-        .json(&LoginReq {
-            auto_login: remember,
-            captcha_token: captcha,
-            captcha_version: "v3",
-            client_id: CLIENT_ID,
-            device_id: dev,
-            id: username,
-            local_time: now_ms,
-            password: hashed_pw,
-            scope: SCOPE,
-            time_offset: 0,
-        })
+/// Email/password login. On 206 returns `AuthError::MfaRequired` (call `login_otp`).
+pub fn login(email: &str, password: &str, device_id: &str) -> Result<LoginResult> {
+    let body = serde_json::json!({
+        "id": email,
+        "password": password,
+        "deviceId": device_id,
+        "deviceType": "PC",
+        "locale": "en",
+    });
+    let resp = request(reqwest::Method::POST, "/account/v1/no-auth/login/launcher", None)
+        .json(&body)
         .send()?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let text = resp.text().unwrap_or_default();
 
-    parse_login_response(resp)
+    match status {
+        200 => login_result_from(&headers, &text, false),
+        206 => {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            Err(AuthError::MfaRequired {
+                mfa_key: v["mfaKey"].as_str().unwrap_or("").to_string(),
+                mfa_type: v["mfaType"].as_str().unwrap_or("email").to_string(),
+            }
+            .into())
+        }
+        _ => {
+            let code = error_code(&headers, &text);
+            if CAPTCHA_CODES.contains(&code) || text.contains("captchaToken") {
+                Err(AuthError::CaptchaRequired(code).into())
+            } else if code == ERR_DEVICE_TRUST {
+                Err(AuthError::DeviceTrustRequired.into())
+            } else {
+                Err(AuthError::Http { status, code, body: text }.into())
+            }
+        }
+    }
 }
 
-/// Refresh session using a stored NxLSession cookie (no password needed).
-/// Call this on launch when a valid saved token exists.
+/// Submit the one-time password after `login` returned `MfaRequired`.
+pub fn login_otp(mfa_key: &str, otp: &str, device_id: &str) -> Result<LoginResult> {
+    let body = serde_json::json!({
+        "mfaKey": mfa_key,
+        "otp": otp,
+        "deviceId": device_id,
+        "deviceType": "PC",
+        "locale": "en",
+    });
+    let resp = request(reqwest::Method::POST, "/account/v1/no-auth/login/launcher/otp", None)
+        .json(&body)
+        .send()?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let text = resp.text().unwrap_or_default();
+    if status != 200 {
+        let code = error_code(&headers, &text);
+        return Err(AuthError::Http { status, code, body: text }.into());
+    }
+    login_result_from(&headers, &text, false)
+}
+
+/// Exchange a browser `TpaSession` cookie for NxLSession + AToken.
+/// TpaSession is single-use and expires within seconds — call immediately.
+pub fn exchange_tpa(tpa_session: &str, device_id: &str) -> Result<LoginResult> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let body = serde_json::json!({
+        "clientId": CLIENT_ID,
+        "deviceId": device_id,
+        "localTime": now.as_millis() as u64,
+        "timeOffset": tz_bias_minutes(),
+        "autoLogin": true,
+    });
+    let resp = request(reqwest::Method::POST, "/account/v1/no-auth/login/tpa/launcher", None)
+        .header("Cookie", format!("TpaSession={}", tpa_session))
+        .json(&body)
+        .send()?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let text = resp.text().unwrap_or_default();
+    if status != 200 {
+        let code = error_code(&headers, &text);
+        if code == ERR_DEVICE_TRUST {
+            return Err(AuthError::DeviceTrustRequired.into());
+        }
+        return Err(AuthError::Http { status, code, body: text }.into());
+    }
+    login_result_from(&headers, &text, true)
+}
+
+/// Refresh a session from a stored NxLSession cookie (email/password accounts only).
 pub fn autologin(session_token: &str) -> Result<LoginResult> {
-    let dev = device_id("");
-    let client = build_client()?;
+    autologin_with(session_token, &device_id(""))
+}
 
-    let resp = client
-        .post(format!("{}/api/account/v1/no-auth/login/launcher/autologin", NEXON_BASE))
+pub fn autologin_with(session_token: &str, device_id: &str) -> Result<LoginResult> {
+    let body = serde_json::json!({ "deviceId": device_id, "deviceType": "PC", "locale": "en" });
+    // The 2024 reorg moved autologin under regional-auth; /account/v1/... returns 404.
+    let resp = request(reqwest::Method::POST, "/regional-auth/v1.0/no-auth/login/launcher/autologin", None)
         .header("Cookie", format!("NxLSession={}", session_token))
-        .json(&AutoLoginReq { device_id: dev })
+        .json(&body)
         .send()?;
-
-    parse_login_response(resp)
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let text = resp.text().unwrap_or_default();
+    if status != 200 {
+        let code = error_code(&headers, &text);
+        if code == ERR_TPA_NO_AUTOLOGIN {
+            return Err(AuthError::SessionExpired(
+                "Browser (Google/SSO) sessions can't be refreshed — use the browser login again.".into(),
+            )
+            .into());
+        }
+        return Err(AuthError::SessionExpired(format!("autologin HTTP {} code {}", status, code)).into());
+    }
+    let mut result = login_result_from(&headers, &text, false)?;
+    if result.session.session_token.is_empty() {
+        result.session.session_token = session_token.to_string();
+    }
+    Ok(result)
 }
 
-/// Check if the game is accessible with this session.
-pub fn is_playable(session: &NexonSession) -> Result<bool> {
-    #[derive(Serialize)]
-    struct Req<'a> { #[serde(rename = "productId")] product_id: &'a str }
-
-    let resp = build_client()?
-        .post(format!("{}/api/game-auth2/v1/playable", NEXON_BASE))
-        .header("Cookie", session.cookie_header())
-        .json(&Req { product_id: PRODUCT_ID })
-        .send()?;
-
-    Ok(resp.status().is_success())
+/// Refresh `session` in place. TPA sessions cannot be refreshed.
+pub fn refresh(session: &mut NexonSession) -> Result<()> {
+    if session.tpa {
+        return Err(AuthError::SessionExpired(
+            "Browser (Google/SSO) sessions can't be refreshed — use the browser login again.".into(),
+        )
+        .into());
+    }
+    if session.session_token.is_empty() {
+        return Err(AuthError::SessionExpired("no NxLSession stored".into()).into());
+    }
+    let fresh = autologin(&session.session_token)?.session;
+    let keep_user = std::mem::take(&mut session.hashed_user_id);
+    *session = NexonSession { tpa: false, ..fresh };
+    if session.hashed_user_id.is_empty() {
+        session.hashed_user_id = keep_user;
+    }
+    Ok(())
 }
 
-/// Get a passport token needed as the `/P:` argument when launching Client.exe.
-pub fn get_passport(session: &NexonSession) -> Result<String> {
-    #[derive(Serialize)]
-    struct Req<'a> { #[serde(rename = "productId")] product_id: &'a str }
-    #[derive(Deserialize)]
-    struct Resp { passport: Option<String> }
+// ── Session / launch chain ────────────────────────────────────────────────────
 
-    // Confirm the account can play before requesting the passport
-    if !is_playable(session)? {
-        return Err(anyhow!("Account is not playable (maintenance or subscription issue)"));
-    }
-
-    let resp = build_client()?
-        .post(format!("{}/api/passport/v2/passport", NEXON_BASE))
-        .header("Cookie", session.cookie_header())
-        .json(&Req { product_id: PRODUCT_ID })
+/// GET /account/v1/account. Returns the HTTP status (200 = session valid).
+pub fn check_session(session: &mut NexonSession) -> Result<u16> {
+    let resp = request(reqwest::Method::GET, "/account/v1/account", Some(session))
+        .bearer_auth(session.access_token.clone())
         .send()?;
-
-    let status = resp.status();
-    let body = resp.text().unwrap_or_default();
-
-    if !status.is_success() {
-        return Err(anyhow!("Passport request failed ({}): {}", status, body));
-    }
-
-    let parsed: Resp = serde_json::from_str(&body)
-        .map_err(|e| anyhow!("Passport parse error ({}): body={}", e, body))?;
-
-    parsed.passport.ok_or_else(|| anyhow!("Passport response has no passport field"))
+    let status = resp.status().as_u16();
+    session.merge_set_cookies(resp.headers());
+    Ok(status)
 }
 
-/// Import session tokens from the running Nexon Launcher's cookie store.
-/// Reads %APPDATA%\NexonLauncher\Network\Cookies (SQLite) via Python.
-pub fn import_from_nexon_launcher() -> Result<NexonSession> {
-    let appdata = std::env::var("APPDATA")
-        .map_err(|_| anyhow!("APPDATA not set"))?;
-
-    let cookies_db = std::path::PathBuf::from(&appdata)
-        .join("NexonLauncher").join("Network").join("Cookies");
-
-    if !cookies_db.exists() {
-        return Err(anyhow!("Nexon Launcher not installed or not found"));
-    }
-
-    // Copy to temp to avoid SQLite lock conflicts
-    let tmp_db = std::env::temp_dir().join("nx_import_cookies.db");
-    std::fs::copy(&cookies_db, &tmp_db)
-        .map_err(|e| anyhow!("Failed to copy cookie DB: {}", e))?;
-
-    let py = "import sqlite3,json,sys\nconn=sqlite3.connect(sys.argv[1])\nc=conn.cursor()\nc.execute(\"SELECT name,value FROM cookies WHERE host_key LIKE '%nexon%' AND name IN ('AToken','g_AToken','NxLSession','NxGUN')\")\nd={r[0]:r[1] or '' for r in c.fetchall()}\nconn.close()\nprint(json.dumps(d))";
-
-    let tmp_py = std::env::temp_dir().join("nx_read_cookies.py");
-    std::fs::write(&tmp_py, py)
-        .map_err(|e| anyhow!("Write script failed: {}", e))?;
-
-    let out = std::process::Command::new("python")
-        .arg(&tmp_py)
-        .arg(tmp_db.to_string_lossy().as_ref())
-        .output();
-
-    let _ = std::fs::remove_file(&tmp_py);
-    let _ = std::fs::remove_file(&tmp_db);
-
-    let out = out.map_err(|e| anyhow!("Python not available: {}", e))?;
-
-    if !out.status.success() {
-        return Err(anyhow!("Cookie read failed: {}", String::from_utf8_lossy(&out.stderr)));
-    }
-
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let data: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| anyhow!("Parse error: {}", e))?;
-
-    let a_token = data["AToken"].as_str().unwrap_or("").to_string();
-    let g_token = data["g_AToken"].as_str().unwrap_or("").to_string();
-    let session = data["NxLSession"].as_str().unwrap_or("").to_string();
-    let user_id = data["NxGUN"].as_str().unwrap_or("").to_string();
-
-    if a_token.is_empty() || session.is_empty() {
-        return Err(anyhow!("Nexon Launcher is not logged in (no valid session found)"));
-    }
-
-    Ok(NexonSession {
-        access_token: a_token.clone(),
-        g_access_token: if g_token.is_empty() { a_token } else { g_token },
-        session_token: session,
-        hashed_user_id: user_id,
+/// Official launcher order: account → access → playable → passport.
+/// Refreshes once on 401. Returns the passport (ticket) for `/P:` and the pipe.
+pub fn prepare_launch(session: &mut NexonSession) -> Result<String> {
+    with_refresh(session, |s| {
+        let status = check_session(s)?;
+        if status == 401 {
+            return Err(AuthError::SessionExpired("account check".into()).into());
+        }
+        let access = fetch_access(s)?;
+        if access.http_status == 401 {
+            return Err(AuthError::SessionExpired("access".into()).into());
+        }
+        if access.ip_blocked {
+            return Err(AuthError::NotPlayable(
+                "Access blocked from your region/IP — the official launcher denies this game to your location.".into(),
+            )
+            .into());
+        }
+        if access.http_status == 200 && !access.is_playable {
+            return Err(AuthError::NotPlayable(
+                "Mabinogi is currently unavailable (under maintenance or not yet open). Try again later.".into(),
+            )
+            .into());
+        }
+        let playable = check_playable(s)?;
+        if playable == 401 {
+            return Err(AuthError::SessionExpired("playable".into()).into());
+        }
+        if playable == 400 {
+            return Err(AuthError::NotPlayable("Product not playable for this account (HTTP 400)".into()).into());
+        }
+        fetch_passport(s)
     })
 }
 
-/// Import session tokens from mabi-patcher's own WebView2 cookie store.
-/// Called after `nexon_login_webview` completes; reads the EBWebView Cookies SQLite
-/// with AES-GCM decryption (v10 cookie format used by Chromium/WebView2).
+/// Compatibility wrapper: run the full launch chain on a copy of the session.
+pub fn get_passport(session: &NexonSession) -> Result<String> {
+    let mut s = session.clone();
+    prepare_launch(&mut s)
+}
+
+/// POST /game-auth2/v1/access — cookie-only (Bearer here causes 401 on scope mismatch).
+pub fn fetch_access(session: &mut NexonSession) -> Result<AccessInfo> {
+    let resp = request(reqwest::Method::POST, "/game-auth2/v1/access", Some(session))
+        .json(&serde_json::json!({ "productId": PRODUCT_ID }))
+        .send()?;
+    let mut info = AccessInfo { http_status: resp.status().as_u16(), ..Default::default() };
+    session.merge_set_cookies(resp.headers());
+    if info.http_status == 200 {
+        let v: serde_json::Value = resp.json().unwrap_or_default();
+        info.is_playable = v["isPlayable"].as_bool().unwrap_or(false);
+        info.is_developer = v["isDeveloper"].as_bool().unwrap_or(false);
+        info.ip_blocked = v["ipBlocked"].as_bool().unwrap_or(false);
+        info.required_2fa = v["required2FA"].as_bool().unwrap_or(false);
+    }
+    Ok(info)
+}
+
+/// POST /game-auth2/v1/playable — cookie-only. Returns the HTTP status (400 = not playable).
+pub fn check_playable(session: &NexonSession) -> Result<u16> {
+    let resp = request(reqwest::Method::POST, "/game-auth2/v1/playable", Some(session))
+        .json(&serde_json::json!({ "productId": PRODUCT_ID }))
+        .send()?;
+    Ok(resp.status().as_u16())
+}
+
+/// Kept for callers that only want a yes/no.
+pub fn is_playable(session: &NexonSession) -> Result<bool> {
+    Ok(check_playable(session)? != 400)
+}
+
+/// POST /passport/v2/passport with `Bearer g_AToken`.
+pub fn fetch_passport(session: &NexonSession) -> Result<String> {
+    let resp = request(reqwest::Method::POST, "/passport/v2/passport", Some(session))
+        .bearer_auth(session.game_token().to_string())
+        .json(&serde_json::json!({ "productId": PRODUCT_ID }))
+        .send()?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let text = resp.text().unwrap_or_default();
+    if status == 401 {
+        return Err(AuthError::SessionExpired("passport".into()).into());
+    }
+    if status != 200 {
+        return Err(AuthError::Http { status, code: error_code(&headers, &text), body: text }.into());
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| anyhow!("Passport parse error ({}): {}", e, truncate(&text, 200)))?;
+    v["passport"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .ok_or_else(|| anyhow!("No passport in response: {}", truncate(&text, 200)))
+}
+
+/// Run `f`; if it fails with `SessionExpired`, refresh the session and retry once.
+pub fn with_refresh<T>(
+    session: &mut NexonSession,
+    mut f: impl FnMut(&mut NexonSession) -> Result<T>,
+) -> Result<T> {
+    match f(session) {
+        Err(e) if is_session_expired(&e) => {
+            log::info!("401 — refreshing session and retrying");
+            refresh(session).map_err(|re| anyhow!("{} (refresh failed: {})", e, re))?;
+            f(session)
+        }
+        other => other,
+    }
+}
+
+pub fn is_session_expired(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<AuthError>(), Some(AuthError::SessionExpired(_)))
+        || e.to_string().contains("401")
+}
+
+// ── Cookie imports ────────────────────────────────────────────────────────────
+
+/// Build a session from raw cookies read from a browser/WebView store.
+/// Uses NxLSession directly if present; otherwise exchanges TpaSession.
+/// Returns Ok(None) when the user hasn't finished logging in yet.
+pub fn session_from_browser_cookies(
+    cookies: &std::collections::HashMap<String, String>,
+    device_id: &str,
+) -> Result<Option<NexonSession>> {
+    let get = |n: &str| cookies.get(n).cloned().unwrap_or_default();
+    let nxl = get("NxLSession");
+    let a_token = get("AToken");
+    if !nxl.is_empty() && !a_token.is_empty() {
+        let mut s = NexonSession { tpa: true, ..Default::default() };
+        for (k, v) in cookies {
+            s.set_cookie(k, v.clone());
+        }
+        return Ok(Some(s));
+    }
+    let tpa = get("TpaSession");
+    if !tpa.is_empty() {
+        let mut result = exchange_tpa(&tpa, device_id)?;
+        result.session.tpa = true;
+        return Ok(Some(result.session));
+    }
+    Ok(None)
+}
+
+/// Import session tokens from the official Nexon Launcher's cookie store.
+pub fn import_from_nexon_launcher() -> Result<NexonSession> {
+    let appdata = std::env::var("APPDATA").map_err(|_| anyhow!("APPDATA not set"))?;
+    let db = std::path::PathBuf::from(&appdata).join("NexonLauncher").join("Network").join("Cookies");
+    if !db.exists() {
+        return Err(anyhow!("Nexon Launcher not installed or not found"));
+    }
+    let map = read_cookie_db(&db, None)?;
+    match session_from_browser_cookies(&map, &device_id(""))? {
+        Some(mut s) => {
+            // The official launcher's session is a launcher session, so autologin works.
+            s.tpa = false;
+            Ok(s)
+        }
+        None => Err(anyhow!("Nexon Launcher is not logged in (no valid session found)")),
+    }
+}
+
+/// Import from mabi-patcher's own WebView2 cookie store (after `nexon_login_webview`).
 pub fn import_from_tauri_webview() -> Result<NexonSession> {
+    poll_tauri_webview()?.ok_or_else(|| anyhow!("Not logged in yet — no session cookies in WebView2 store"))
+}
+
+/// Like `import_from_tauri_webview` but distinguishes "not yet" (Ok(None)) from hard
+/// failures such as a rejected TPA exchange, so the login window can stop polling.
+pub fn poll_tauri_webview() -> Result<Option<NexonSession>> {
     use crate::launcher::cookie_dec;
-
-    let localappdata = std::env::var("LOCALAPPDATA")
-        .map_err(|_| anyhow!("LOCALAPPDATA not set"))?;
-
-    let cookies_db = std::path::PathBuf::from(&localappdata)
+    let localappdata = std::env::var("LOCALAPPDATA").map_err(|_| anyhow!("LOCALAPPDATA not set"))?;
+    let db = std::path::PathBuf::from(&localappdata)
         .join("com.shaggyze.mabi-patcher")
         .join("EBWebView")
         .join("Default")
         .join("Network")
         .join("Cookies");
-
-    if !cookies_db.exists() {
-        return Err(anyhow!("WebView2 cookie store not found — has the login window been opened?"));
+    if !db.exists() {
+        return Ok(None);
     }
+    let key = cookie_dec::get_webview2_key().map_err(|e| anyhow!("Failed to read WebView2 key: {}", e))?;
+    let map = read_cookie_db(&db, Some(&key))?;
+    session_from_browser_cookies(&map, &device_id(""))
+}
 
-    let key = cookie_dec::get_webview2_key()
-        .map_err(|e| anyhow!("Failed to read WebView2 encryption key: {}", e))?;
-
-    let tmp_db = std::env::temp_dir().join("mabi_wv2_cookies.db");
-    std::fs::copy(&cookies_db, &tmp_db)
-        .map_err(|e| anyhow!("Failed to copy WebView2 cookie DB: {}", e))?;
-
-    let conn = rusqlite::Connection::open(&tmp_db)
-        .map_err(|e| anyhow!("Failed to open cookie DB: {}", e))?;
-
-    let names = ["AToken", "g_AToken", "NxLSession", "NexonUserID", "NxGUN"];
-    let mut map = std::collections::HashMap::new();
-
-    for name in &names {
-        let row: Option<(String, Vec<u8>)> = conn.query_row(
-            "SELECT value, encrypted_value FROM cookies WHERE host_key LIKE '%nexon%' AND name = ?1 LIMIT 1",
-            rusqlite::params![name],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).ok();
-
-        if let Some((plain, enc)) = row {
+fn read_cookie_db(
+    db: &std::path::Path,
+    key: Option<&[u8]>,
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::launcher::cookie_dec;
+    // Copy to temp to avoid SQLite lock conflicts with the running browser.
+    let tmp = std::env::temp_dir().join(format!("mabi_cookies_{}.db", std::process::id()));
+    std::fs::copy(db, &tmp).map_err(|e| anyhow!("Failed to copy cookie DB: {}", e))?;
+    let result = (|| -> Result<std::collections::HashMap<String, String>> {
+        let conn = rusqlite::Connection::open(&tmp)?;
+        let mut stmt = conn.prepare(
+            "SELECT name, value, encrypted_value FROM cookies WHERE host_key LIKE '%nexon.com'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows.flatten() {
+            let (name, plain, enc) = row;
             let value = if !plain.is_empty() {
                 plain
+            } else if let (false, Some(k)) = (enc.is_empty(), key) {
+                cookie_dec::decrypt_cookie(&enc, k).unwrap_or_default()
             } else if !enc.is_empty() {
-                cookie_dec::decrypt_cookie(&enc, &key).unwrap_or_default()
+                cookie_dec::dpapi_decrypt(&enc)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
-            map.insert(name.to_string(), value);
+            if !value.is_empty() {
+                map.insert(name, value);
+            }
         }
-    }
-
-    let _ = std::fs::remove_file(&tmp_db);
-
-    let a_token = map.get("AToken").cloned().unwrap_or_default();
-    let g_token = map.get("g_AToken").cloned().unwrap_or_default();
-    let session = map.get("NxLSession").cloned().unwrap_or_default();
-    let user_id = map.get("NexonUserID").or_else(|| map.get("NxGUN")).cloned().unwrap_or_default();
-
-    if a_token.is_empty() || session.is_empty() {
-        return Err(anyhow!("Not logged in yet — no valid session cookies found in WebView2 store"));
-    }
-
-    Ok(NexonSession {
-        access_token: a_token.clone(),
-        g_access_token: if g_token.is_empty() { a_token } else { g_token },
-        session_token: session,
-        hashed_user_id: user_id,
-    })
+        Ok(map)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 // ── Device ID ─────────────────────────────────────────────────────────────────
 
-/// Stable per-machine identifier matching Hyddwn's GetDeviceUuid algorithm.
+/// Stable per-machine identifier matching the Nexon Launcher's algorithm:
 /// SHA256( WMI_UUID + MachineGuid [+ tag] ) → lowercase hex.
 pub fn device_id(tag: &str) -> String {
+    static CACHE: Lazy<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        Lazy::new(Default::default);
+    if let Some(id) = CACHE.lock().unwrap().get(tag) {
+        return id.clone();
+    }
     let mut raw = String::new();
-
-    // Try wmic (available on Windows 10; deprecated but functional)
-    if let Some(uuid) = wmi_uuid_via_wmic() {
+    if let Some(uuid) = wmi_uuid_via_wmic().or_else(wmi_uuid_via_powershell) {
         raw.push_str(&uuid);
     }
-
-    // Fallback: PowerShell WMI (Windows 11 removed wmic.exe)
-    if raw.is_empty() {
-        if let Some(uuid) = wmi_uuid_via_powershell() {
-            raw.push_str(&uuid);
-        }
-    }
-
-    // HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
     if let Some(guid) = machine_guid() {
         raw.push_str(&guid);
     }
-
-    if raw.is_empty() {
-        // No machine identifiers available — return a session-stable random string.
-        // This will change each process launch; store the result in config if needed.
-        return random_token(64);
-    }
-
-    if !tag.is_empty() {
+    let id = if raw.is_empty() {
+        // Non-Windows: derive from /etc/machine-id so the id is stable across runs.
+        let mid = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
+        hex(&Sha256::digest(format!("{}{}", mid.trim(), tag).as_bytes()))
+    } else {
         raw.push_str(tag);
-    }
-
-    let hash = Sha256::digest(raw.as_bytes());
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-// ── Password hashing ──────────────────────────────────────────────────────────
-
-/// SHA512(password bytes) → lowercase hex string (matches Hyddwn HashPassword).
-pub fn hash_password(password: &str) -> String {
-    let hash = Sha512::digest(password.as_bytes());
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
+        hex(&Sha256::digest(raw.as_bytes()))
+    };
+    CACHE.lock().unwrap().insert(tag.to_string(), id.clone());
+    id
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn build_client() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("NexonLauncher.nxl-release-18.14.10-220-fc7480c-coreapp-3.3.0")
-        .build()?)
-}
-
-/// Parse a login or autologin response, extracting cookies and body fields.
-fn parse_login_response(resp: reqwest::blocking::Response) -> Result<LoginResult> {
-    let status = resp.status();
-
-    // Extract Set-Cookie headers BEFORE consuming the body.
-    // `resp.headers()` borrows resp; extract owned strings and the borrow ends.
-    let (access_token, g_access_token, session_token) = extract_cookies(resp.headers());
-
-    let body_text = resp.text().unwrap_or_default();
-
-    if !status.is_success() {
-        return Err(anyhow!("Nexon auth failed ({}): {}", status, body_text));
-    }
-
-    if access_token.is_empty() {
-        return Err(anyhow!("Auth succeeded but AToken cookie was not set"));
-    }
-
-    let body: LoginBody = serde_json::from_str(&body_text).unwrap_or_default();
-
-    Ok(LoginResult {
-        session: NexonSession {
-            access_token,
-            g_access_token,
-            session_token,
-            hashed_user_id: body.hashed_user_no.unwrap_or_default(),
-        },
-        session_expires_in: body.login_session_expires_in.unwrap_or(86400),
-    })
-}
-
-/// Parse AToken, g_AToken, NxLSession from Set-Cookie response headers.
-fn extract_cookies(headers: &reqwest::header::HeaderMap) -> (String, String, String) {
-    let mut a_token = String::new();
-    let mut g_token = String::new();
-    let mut nx_session = String::new();
-
-    for value in headers.get_all("set-cookie") {
-        if let Ok(s) = value.to_str() {
-            // Each Set-Cookie looks like: "Name=Value; Path=/; Domain=..."
-            let name_val = s.split(';').next().unwrap_or("").trim();
-            if let Some((name, val)) = name_val.split_once('=') {
-                match name.trim() {
-                    "AToken" => a_token = val.trim().to_string(),
-                    "g_AToken" => g_token = val.trim().to_string(),
-                    "NxLSession" => nx_session = val.trim().to_string(),
-                    _ => {}
-                }
-            }
+fn request(
+    method: reqwest::Method,
+    path: &str,
+    session: Option<&NexonSession>,
+) -> reqwest::blocking::RequestBuilder {
+    let mut rb = CLIENT
+        .request(method, format!("{}{}", API_BASE, path))
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Accept-Language", "en-GB")
+        .header("x-arena-fe-version", ARENA_VER)
+        .header("x-nxl-session-id", NXL_SESSION_ID.as_str());
+    if let Some(s) = session {
+        let c = s.cookie_header();
+        if !c.is_empty() {
+            rb = rb.header("Cookie", c);
         }
     }
-
-    (a_token, g_token, nx_session)
+    rb
 }
 
-/// Get WMI UUID via `wmic csproduct get uuid /format:list`.
+fn login_result_from(headers: &reqwest::header::HeaderMap, body: &str, tpa: bool) -> Result<LoginResult> {
+    let mut session = NexonSession { tpa, ..Default::default() };
+    session.merge_set_cookies(headers);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    if session.hashed_user_id.is_empty() {
+        if let Some(h) = v["hashedUserNo"].as_str() {
+            session.hashed_user_id = h.to_string();
+        }
+    }
+    if session.access_token.is_empty() && session.session_token.is_empty() {
+        return Err(anyhow!("Login succeeded but no NxLSession/AToken cookie was set"));
+    }
+    let expires = v["loginSessionExpiresIn"].as_i64().unwrap_or(86400) as i32;
+    Ok(LoginResult { session, session_expires_in: expires })
+}
+
+fn parse_set_cookies(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|s| {
+            let nv = s.split(';').next()?.trim();
+            let (n, v) = nv.split_once('=')?;
+            Some((n.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Nexon error code from `x-arena-web-errorcode` header or JSON `code` field.
+fn error_code(headers: &reqwest::header::HeaderMap, body: &str) -> i64 {
+    if let Some(c) = headers
+        .get("x-arena-web-errorcode")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok())
+    {
+        return c;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    v["code"].as_i64().or_else(|| v["code"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0)
+}
+
+/// Minutes west of UTC (Windows TIME_ZONE_INFORMATION.Bias semantics).
+fn tz_bias_minutes() -> i64 {
+    use chrono::Offset;
+    -(chrono::Local::now().offset().fix().local_minus_utc() as i64) / 60
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn truncate(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 fn wmi_uuid_via_wmic() -> Option<String> {
     #[cfg(windows)]
     {
@@ -446,10 +680,7 @@ fn wmi_uuid_via_wmic() -> Option<String> {
         for line in text.lines() {
             if let Some(uuid) = line.strip_prefix("UUID=") {
                 let uuid = uuid.trim().to_string();
-                if !uuid.is_empty()
-                    && !uuid.starts_with("FFFFFFFF")
-                    && uuid != "03000200-0400-0500-0006-000700080009"
-                {
+                if !uuid.is_empty() {
                     return Some(uuid);
                 }
             }
@@ -458,54 +689,33 @@ fn wmi_uuid_via_wmic() -> Option<String> {
     None
 }
 
-/// Get WMI UUID via PowerShell (fallback when wmic.exe is absent).
 fn wmi_uuid_via_powershell() -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command",
-                "(Get-WmiObject Win32_ComputerSystemProduct).UUID"])
+            .args(["-NoProfile", "-Command", "(Get-CimInstance Win32_ComputerSystemProduct).UUID"])
             .creation_flags(0x08000000)
             .output()
             .ok()?;
         let uuid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !uuid.is_empty() && !uuid.starts_with("FFFFFFFF") {
+        if !uuid.is_empty() {
             return Some(uuid);
         }
     }
     None
 }
 
-/// Read MachineGuid from Windows registry.
 fn machine_guid() -> Option<String> {
     #[cfg(windows)]
     {
-        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
         use winreg::RegKey;
         let key = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey("SOFTWARE\\Microsoft\\Cryptography")
+            .open_subkey_with_flags("SOFTWARE\\Microsoft\\Cryptography", KEY_READ | KEY_WOW64_64KEY)
             .ok()?;
         key.get_value::<String, _>("MachineGuid").ok()
     }
     #[cfg(not(windows))]
     None
-}
-
-/// Random alphanumeric+punctuation string (Hyddwn's captcha token fallback).
-fn random_token(len: usize) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789_-";
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as usize;
-    (0..len)
-        .map(|i| {
-            let idx = seed
-                .wrapping_add(i * 6364136223846793005_usize)
-                .wrapping_add(i)
-                % CHARS.len();
-            CHARS[idx] as char
-        })
-        .collect()
 }

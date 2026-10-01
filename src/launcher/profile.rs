@@ -56,6 +56,10 @@ pub struct Profile {
     /// Whether this profile uses the official Nexon servers.
     #[serde(default)]
     pub is_official: bool,
+    /// Full cookie session (AToken/g_AToken/NexonUserID...). Needed for browser/SSO
+    /// accounts, which can't be refreshed from NxLSession alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::launcher::auth::NexonSession>,
 }
 
 impl Profile {
@@ -76,6 +80,7 @@ impl Profile {
             chat_ip: String::new(),
             chat_port: 0,
             is_official: true,
+            session: None,
         }
     }
 
@@ -200,6 +205,19 @@ pub fn update_session(id: &str, session_token: &str, expires_in_secs: i32) -> Re
     let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile '{}' not found", id))?;
     profile.session_token = session_token.to_string();
     profile.session_expires_at = unix_now() + expires_in_secs.max(0) as u64;
+    profile.last_login_at = unix_now();
+    store.save()
+}
+
+/// Store a full session (and its NxLSession) on a profile after login/refresh.
+pub fn save_session(id: &str, session: &crate::launcher::auth::NexonSession, expires_in_secs: i32) -> Result<()> {
+    let mut store = ProfileStore::load()?;
+    let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile not found: {}", id))?;
+    profile.session_token = session.session_token.clone();
+    profile.session = Some(session.clone());
+    if expires_in_secs > 0 {
+        profile.session_expires_at = unix_now() + expires_in_secs as u64;
+    }
     profile.last_login_at = unix_now();
     store.save()
 }

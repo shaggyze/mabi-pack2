@@ -104,6 +104,8 @@ interface Config {
     patcher_focus_on_start: boolean;
     patcher_max_workers: number;
     patcher_run_elevated: boolean;
+    /** Wildcard paths (`*`, `?`) the patcher never touches — keeps local mods safe. */
+    patcher_ignore_list?: string[];
     launch_use_nexon_launcher: boolean;
     launch_cmd_override: string;
     pre_patch_cmd: string;
@@ -182,6 +184,7 @@ class App {
         patcher_auto_update: false,
         patcher_focus_on_start: false,
         patcher_run_elevated: false,
+        patcher_ignore_list: [],
         patcher_max_workers: 10,
         launch_use_nexon_launcher: false,
         launch_cmd_override: "",
@@ -955,11 +958,14 @@ class App {
             setText("Checking...");
             this.log("Checking for updates...");
             try {
-                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const res = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
                 const localEl = document.getElementById("patcher-version-local");
                 const remoteEl = document.getElementById("patcher-version-remote");
                 if (localEl) localEl.textContent = String(res.local_version ?? "—");
                 if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
+                if (res.error && res.remote_version == null && !res.remote_hash) {
+                    this.log(`Remote check: ${res.error}`);
+                }
                 if (res.needs_update) {
                     setText(`Update available: v${res.remote_version}`, false);
                     this.log(`Update available: local v${res.local_version} → v${res.remote_version}`);
@@ -985,7 +991,8 @@ class App {
         document.getElementById("btn-patcher-repair")?.addEventListener("click", async () => {
             const gp = getGamePath();
             if (!gp) { setText("Set game path first.", false); return; }
-            await this.runPatcher(gp, true);
+            // Repair = SHA1-check every file and re-download only bad ones.
+            await this.runPatcher(gp, false, true);
         });
 
         // Verify button
@@ -1023,7 +1030,8 @@ class App {
 
         // Stop button
         document.getElementById("btn-patcher-stop")?.addEventListener("click", () => {
-            this.log("Stop requested — cancellation not yet implemented");
+            this.log("Stop requested — finishing in-flight files...");
+            invoke("patch_cancel").catch(() => {});
         });
 
         // Settings > Patcher subtab wiring (elements live in stab-patcher but found by ID)
@@ -1073,7 +1081,7 @@ class App {
             const gp = this.config.patcher_game_path;
             if (!gp) return;
             try {
-                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const res = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
                 const el = document.getElementById("patcher-settings-version");
                 if (el) el.textContent = `v${res.local_version ?? "?"}`;
             } catch {}
@@ -1210,7 +1218,7 @@ class App {
         });
     }
 
-    async runPatcher(gamePath: string, forceRepair: boolean) {
+    async runPatcher(gamePath: string, forceRepair: boolean, verifyOnly = false) {
         const statusEl = document.getElementById("patcher-status");
         const wrap = document.getElementById("patcher-progress-wrap");
         const bar = document.getElementById("patcher-progress-bar");
@@ -1230,7 +1238,13 @@ class App {
         try {
             const maxWorkers = this.config.patcher_max_workers ?? 10;
             const parallelOps = this.config.parallel_ops ?? true;
-            const res = await invoke("patch_game_files", { gamePath, maxWorkers, forceRepair, parallelOps }) as any;
+            if (!this.launcherSession) {
+                throw new Error("Log in on the Launcher tab first — the current game manifest needs a Nexon session");
+            }
+            const ignore = ((this.config as any).patcher_ignore_list ?? []) as string[];
+            const res = await invoke("patch_game_files", {
+                gamePath, maxWorkers, forceRepair, verify: verifyOnly, parallelOps, ignore, session: this.launcherSession,
+            }) as any;
             if (wrap) wrap.style.display = "none";
             if (pipeCard) pipeCard.style.display = "none";
             if (stopBtn) stopBtn.style.display = "none";
@@ -2171,7 +2185,9 @@ class App {
 
     // ── Launcher tab ────────────────────────────────────────────────────────────
 
-    private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string } | null = null;
+    private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string; tpa?: boolean; [k: string]: any } | null = null;
+    /** Pending MFA challenge from an email/password login (submit the code with launcher_login_otp). */
+    private pendingMfaKey: string | null = null;
     private readonly LAUNCHER_SESSION_KEY = "nexon_session";
     private launcherProfiles: any[] = [];
     private activeProfileId: string | null = null;
@@ -2436,6 +2452,7 @@ class App {
             if (!token) { this.log("[Launcher] Auto-login: no saved session token", "warn"); return; }
             this.setLauncherStatus("Auto-logging in…", "busy");
             const result = await invoke("launcher_autologin", { sessionToken: token }) as any;
+            if (!result.session) throw new Error("session could not be refreshed — log in again");
             this.launcherSession = result.session;
             this.updateLauncherUI(true);
             this.setLauncherStatus("Auto-logged in", "ok");
@@ -2668,15 +2685,35 @@ class App {
         try {
             let result: any;
             if ((this.config as any).launcher_legacy_auth) {
-                if (!email || !password) { this.setLauncherStatus("Email and password required for direct legacy auth", "error"); btn.disabled = false; return; }
+                // Email/password (Rua path B). 206 → emailed/authenticator code via launcher_login_otp.
                 const vcodeEl = document.getElementById("launcher-verification") as HTMLInputElement;
-                const verificationCode = vcodeEl ? vcodeEl.value.trim() : "";
-                const vcodeOpt = verificationCode.length > 0 ? verificationCode : null;
-                result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked, verificationCode: vcodeOpt }) as any;
+                const code = vcodeEl ? vcodeEl.value.trim() : "";
+                if (this.pendingMfaKey && code) {
+                    result = await invoke("launcher_login_otp", { mfaKey: this.pendingMfaKey, otp: code }) as any;
+                    this.pendingMfaKey = null;
+                    if (vcodeEl) vcodeEl.value = "";
+                } else {
+                    if (!email || !password) { this.setLauncherStatus("Email and password required", "error"); btn.disabled = false; return; }
+                    result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked }) as any;
+                }
+                if (result.mfa_required) {
+                    this.pendingMfaKey = result.mfa_key;
+                    const group = document.getElementById("launcher-verification-group");
+                    if (group) group.style.display = "block";
+                    vcodeEl?.focus();
+                    this.setLauncherStatus(`Enter the ${result.mfa_type || "email"} verification code, then click Login again`, "busy");
+                    this.log("[Launcher] Nexon requested a verification code (MFA)", "info");
+                    return;
+                }
+                if (result.captcha_required) {
+                    this.setLauncherStatus("Nexon wants a CAPTCHA — turn off direct login and use the browser login", "error");
+                    this.log(`[Launcher] ${result.message}`, "warn");
+                    return;
+                }
             } else {
+                // Browser / SSO login (Rua path A): NxLSession or TpaSession → exchange.
                 this.setLauncherStatus("Please log in through the popup window...", "busy");
-                const sessionJson = await invoke("nexon_login_webview") as any;
-                result = { session: sessionJson, expiresIn: 86400 };
+                result = await invoke("nexon_login_webview") as any;
             }
             this.launcherSession = result.session;
             if (rememberEl.checked) {
@@ -2767,6 +2804,13 @@ class App {
                 launchCmdOverride: launchCmdOverride || null,
                 useNexonLauncher,
             }) as any;
+            if (r.session) {
+                // The launch may have refreshed an expired AToken (401 → autologin) — keep it.
+                this.launcherSession = r.session;
+                if (localStorage.getItem(this.LAUNCHER_SESSION_KEY)) {
+                    localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(r.session));
+                }
+            }
             const result = document.getElementById("launcher-launch-result")!;
             result.textContent = `Launched ${r.executable} (${r.argumentCount} args)${r.patchAvailable ? " — update available" : ""}`;
             result.className = "launcher-launch-result success";
@@ -2798,7 +2842,7 @@ class App {
             try {
                 const gp = (this.config as any)?.patcher_game_path;
                 if (gp) {
-                    const pv = await invoke("check_patch_version", { gamePath: gp }) as any;
+                    const pv = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
                     const ver = (pv.remote_version ?? pv.local_version) as number | null;
                     if (ver && ver > 0) verStr = String(ver);
                 }

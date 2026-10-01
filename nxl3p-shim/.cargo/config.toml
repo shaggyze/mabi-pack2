@@ -1,0 +1,3 @@
+# Static CRT so the DLL has no vcruntime dependency inside the game process.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

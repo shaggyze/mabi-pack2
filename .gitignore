@@ -50,3 +50,5 @@ examples/
 *.exe
 *.pdb
 *.msi
+# nxl3p shim build output
+/nxl3p-shim/target
