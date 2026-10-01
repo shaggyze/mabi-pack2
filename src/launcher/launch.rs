@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::auth::NexonSession;
+use super::auth::{NexonSession, Unauthorized};
 
 const NEXON_BASE: &str = "https://www.nexon.com";
 const PRODUCT_ID: &str = "10200";
@@ -57,6 +57,9 @@ pub fn fetch_launch_config(session: &NexonSession) -> Result<LaunchConfig> {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
 
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Unauthorized(body).into());
+    }
     if !status.is_success() {
         return Err(anyhow!("Launch config fetch failed ({}): {}", status, body));
     }
@@ -109,7 +112,7 @@ impl LaunchConfig {
         // Single space-joined argument string (matches how Nexon's launcher passes args)
         let arg_str = args.join(" ");
 
-        let mut cmd = std::process::Command::new(&exe);
+        let mut cmd = client_command(&exe);
         cmd.current_dir(client_dir).args(&args);
 
         // Windows: CREATE_NO_WINDOW + DETACHED_PROCESS so it runs independent of our process
@@ -177,7 +180,7 @@ pub fn launch_direct(
     }
 
     let arg_count = full_args.len();
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = client_command(&exe);
     cmd.current_dir(client_dir).args(&full_args);
     #[cfg(windows)]
     {
@@ -187,6 +190,28 @@ pub fn launch_direct(
     log::info!("Direct launch: {} {}", exe.display(), full_args.join(" "));
     cmd.spawn().map_err(|e| anyhow!("Failed to spawn Client.exe: {}", e))?;
     Ok(arg_count)
+}
+
+/// Command that runs `exe` (Client.exe).
+///
+/// Windows runs it directly. Elsewhere it goes through Wine: the `MABI_WINE`
+/// environment variable names the runner (e.g. `wine64`, a Proton `wine`
+/// binary or a wrapper script), defaulting to `wine`. Set `WINEPREFIX` as usual.
+fn client_command(exe: &Path) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        std::process::Command::new(exe)
+    }
+    #[cfg(not(windows))]
+    {
+        let runner = std::env::var("MABI_WINE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "wine".to_string());
+        let mut cmd = std::process::Command::new(runner);
+        cmd.arg(exe);
+        cmd
+    }
 }
 
 // ── Serializable summary for Tauri IPC ───────────────────────────────────────
@@ -214,8 +239,19 @@ pub fn run_hook_cmd(cmd: &str, working_dir: &Path) -> Result<String> {
     if cmd.trim().is_empty() {
         return Ok(String::new());
     }
-    let output = std::process::Command::new("cmd")
-        .args(["/C", cmd])
+    #[cfg(windows)]
+    let mut shell = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut shell = {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    let output = shell
         .current_dir(working_dir)
         .output()
         .map_err(|e| anyhow!("Hook command failed to start: {}", e))?;

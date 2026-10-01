@@ -14,8 +14,7 @@ use log::{debug, info};
 
 // Correct library name from Cargo.toml
 use mabi_pack2::{api, load_salts, extract, list, mod_file, pack};
-#[cfg(windows)]
-use mabi_pack2::launcher::{auth, launch, patch};
+use mabi_pack2::launcher::{auth, launch, nxl, patch, profile};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -176,13 +175,39 @@ fn main() -> Result<()> {
                 )
         )
         .subcommand(
-            Command::new("launch")
-                .about("Login to Nexon NA and launch Mabinogi (Windows only)")
+            Command::new("login")
+                .about("Log in to Nexon NA and save the session to a profile")
                 .arg(Arg::new("username").short('u').long("username").value_name("EMAIL").help("Nexon account email").required(true))
-                .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password").required(true))
-                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Mabinogi installation directory (contains Client.exe)").required(true))
+                .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password (or set MABI_PASSWORD)").required(false))
+                .arg(Arg::new("profile").long("profile").value_name("NAME").help("Profile to save to (default: the email); created if missing"))
+                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Store this game folder (or Client.exe path) on the profile"))
+        )
+        .subcommand(
+            Command::new("check-update")
+                .about("Check whether a game update is available (exit 0 = up to date, 2 = update available, 1 = error)")
+                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Game folder or Client.exe path (default: the profile's)"))
+                .arg(Arg::new("profile").long("profile").value_name("NAME").help("Profile whose session asks Nexon for the version (default: active profile; falls back to the public CDN)"))
+        )
+        .subcommand(
+            Command::new("update")
+                .about("Download and apply game updates from Nexon's CDN")
+                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Game folder or Client.exe path (default: the profile's)"))
+                .arg(Arg::new("profile").long("profile").value_name("NAME").help("Profile whose session asks Nexon for the version (default: active profile; falls back to the public CDN)"))
+                .arg(Arg::new("force-all").long("force-all").action(ArgAction::SetTrue).help("Re-download every file regardless of local state"))
+                .arg(Arg::new("scan-only").long("scan-only").action(ArgAction::SetTrue).help("List the files that would be downloaded, then exit"))
+                .arg(Arg::new("workers").short('j').long("workers").value_name("N").help("Files downloaded in parallel (default: 8, max 32)"))
+                .arg(Arg::new("ignore").long("ignore").value_name("PATTERN").action(ArgAction::Append).help("Path or */? wildcard the patcher must never touch (repeatable)"))
+        )
+        .subcommand(
+            Command::new("launch")
+                .about("Log in to Nexon NA and launch Mabinogi (on Linux through Wine; set MABI_WINE to pick the runner)")
+                .arg(Arg::new("username").short('u').long("username").value_name("EMAIL").help("Nexon account email (omit to use a saved profile)"))
+                .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password (or set MABI_PASSWORD)"))
+                .arg(Arg::new("profile").long("profile").value_name("NAME").help("Saved profile to use (default: active profile)"))
+                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Mabinogi installation directory (contains Client.exe); default: the profile's"))
                 .arg(Arg::new("remember").long("remember").action(ArgAction::SetTrue).help("Save session token for future auto-login"))
                 .arg(Arg::new("version").long("version").action(ArgAction::SetTrue).help("Print the latest game version and exit (no launch)"))
+                .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue).help("Wait until the game exits"))
         )
         .subcommand(
             Command::new("batch")
@@ -477,50 +502,16 @@ fn main() -> Result<()> {
                 }
             }
         }
+    } else if let Some(sub) = matches.subcommand_matches("login") {
+        cmd_login(sub)?;
+    } else if let Some(sub) = matches.subcommand_matches("check-update") {
+        let code = cmd_check_update(sub)?;
+        std::process::exit(code);
+    } else if let Some(sub) = matches.subcommand_matches("update") {
+        let code = cmd_update(sub)?;
+        std::process::exit(code);
     } else if let Some(sub) = matches.subcommand_matches("launch") {
-        #[cfg(not(windows))]
-        { let _ = sub; return Err(anyhow::anyhow!("The 'launch' command is only available on Windows")); }
-
-        #[cfg(windows)]
-        {
-            let username = sub.get_one::<String>("username").unwrap();
-            let password = sub.get_one::<String>("password").unwrap();
-            let client_dir = std::path::Path::new(sub.get_one::<String>("client").unwrap());
-            let remember = sub.get_flag("remember");
-            let version_only = sub.get_flag("version");
-
-            info!("[LAUNCH] Logging in as {}...", username);
-            let result = auth::login(username, password, remember, None)
-                .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
-
-            let session = result.session.as_ref().unwrap();
-            info!("[LAUNCH] Login OK. Session expires in {}s", result.session_expires_in);
-
-            if version_only {
-                let ver = patch::get_latest_version(session)
-                    .map_err(|e| anyhow::anyhow!("Version check failed: {}", e))?;
-                println!("Latest Mabinogi version: {}", ver);
-                return Ok(());
-            }
-
-            info!("[LAUNCH] Fetching launch config...");
-            let config = launch::fetch_launch_config(session)
-                .map_err(|e| anyhow::anyhow!("Launch config error: {}", e))?;
-
-            if config.patch_available {
-                info!("[LAUNCH] Note: a game patch is available");
-            }
-
-            info!("[LAUNCH] Requesting passport...");
-            let passport = auth::get_passport(session)
-                .map_err(|e| anyhow::anyhow!("Passport error: {}", e))?;
-
-            info!("[LAUNCH] Spawning {}...", config.executable_path);
-            let _child = config.spawn_client(client_dir, &passport)
-                .map_err(|e| anyhow::anyhow!("Spawn failed: {}", e))?;
-
-            info!("[LAUNCH] Mabinogi launched.");
-        }
+        cmd_launch(sub)?;
     } else {
         info!("No subcommand provided. Use --help for usage information.");
     }
@@ -536,3 +527,255 @@ fn ctrlc_handler(f: impl Fn() + Send + 'static) {
     });
 }
 
+
+// ── Launcher / patcher commands ───────────────────────────────────────────────
+
+/// Profile by name or id (case-insensitive), else the active one, else the first.
+fn find_profile(store: &profile::ProfileStore, name: Option<&String>) -> Option<profile::Profile> {
+    match name {
+        Some(n) => store
+            .profiles
+            .iter()
+            .find(|p| p.id == *n || p.name.eq_ignore_ascii_case(n))
+            .cloned(),
+        None => store.active().cloned().or_else(|| store.profiles.first().cloned()),
+    }
+}
+
+/// A session that only carries the saved NxLSession cookie. The first call
+/// with it gets a 401, which `with_session_retry` answers with an autologin.
+fn session_from_profile(p: &profile::Profile) -> Option<auth::NexonSession> {
+    if p.session_token.is_empty() {
+        return None;
+    }
+    Some(auth::NexonSession {
+        access_token: String::new(),
+        g_access_token: String::new(),
+        session_token: p.session_token.clone(),
+        hashed_user_id: String::new(),
+    })
+}
+
+fn save_refreshed(p: &profile::Profile, session: &auth::NexonSession, expires_in: Option<i32>) {
+    if let Some(secs) = expires_in {
+        match profile::update_session(&p.id, &session.session_token, secs) {
+            Ok(()) => info!("[SESSION] Refreshed session saved to profile '{}'", p.name),
+            Err(e) => log::warn!("[SESSION] Could not save refreshed session: {}", e),
+        }
+    }
+}
+
+fn password_arg(sub: &clap::ArgMatches) -> Option<String> {
+    sub.get_one::<String>("password").cloned().or_else(|| std::env::var("MABI_PASSWORD").ok())
+}
+
+/// Game folder from --client, else the profile's saved one.
+fn game_install(sub: &clap::ArgMatches, prof: Option<&profile::Profile>) -> Result<nxl::GameInstall> {
+    let dir = sub
+        .get_one::<String>("client")
+        .cloned()
+        .or_else(|| prof.map(|p| p.client_dir.clone()).filter(|d| !d.is_empty()))
+        .ok_or_else(|| anyhow::anyhow!("--client <game folder> is required (no game folder saved on the profile)"))?;
+    nxl::GameInstall::locate(Path::new(&dir))
+}
+
+fn cmd_login(sub: &clap::ArgMatches) -> Result<()> {
+    let username = sub.get_one::<String>("username").unwrap();
+    let password = password_arg(sub)
+        .ok_or_else(|| anyhow::anyhow!("--password (or MABI_PASSWORD) is required"))?;
+
+    info!("[LOGIN] Logging in as {}...", username);
+    let result = auth::login(username, &password, true)
+        .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
+    if result.session.session_token.is_empty() {
+        return Err(anyhow::anyhow!("Login succeeded but Nexon returned no NxLSession to save"));
+    }
+
+    let name = sub.get_one::<String>("profile").cloned().unwrap_or_else(|| username.clone());
+    let mut store = profile::ProfileStore::load()?;
+    let mut prof = find_profile(&store, Some(&name)).unwrap_or_else(|| profile::Profile::new(&name, username));
+    prof.email = username.clone();
+    prof.session_token = result.session.session_token.clone();
+    prof.session_expires_at = unix_now() + result.session_expires_in.max(0) as u64;
+    prof.last_login_at = unix_now();
+    prof.auto_login = true;
+    if let Some(dir) = sub.get_one::<String>("client") {
+        prof.client_dir = nxl::GameInstall::locate(Path::new(dir))?.root.to_string_lossy().into_owned();
+    }
+    let id = prof.id.clone();
+    store.upsert(prof);
+    store.active_id = id;
+    store.save()?;
+    println!("Logged in. Session saved to profile '{}' (expires in {}s).", name, result.session_expires_in);
+    Ok(())
+}
+
+/// Resolve profile + install and fetch the remote hash, persisting any session refresh.
+fn remote_state(sub: &clap::ArgMatches) -> Result<(nxl::GameInstall, nxl::RemoteHash)> {
+    let store = profile::ProfileStore::load().unwrap_or_default();
+    let prof = find_profile(&store, sub.get_one::<String>("profile"));
+    if sub.get_one::<String>("profile").is_some() && prof.is_none() {
+        return Err(anyhow::anyhow!("Profile not found: {}", sub.get_one::<String>("profile").unwrap()));
+    }
+    let install = game_install(sub, prof.as_ref())?;
+
+    let mut session = prof.as_ref().and_then(session_from_profile);
+    let remote = nxl::fetch_remote_hash(session.as_mut())?;
+    if let (Some(p), Some(s)) = (prof.as_ref(), session.as_ref()) {
+        save_refreshed(p, s, remote.refreshed_expires_in);
+    }
+    Ok((install, remote))
+}
+
+fn cmd_check_update(sub: &clap::ArgMatches) -> Result<i32> {
+    let (install, remote) = remote_state(sub)?;
+    let local = install.local_hash();
+    println!("Game folder: {}", install.root.display());
+    println!("Remote hash: {}", remote.hash);
+    println!("Local hash:  {}", local.as_deref().unwrap_or("<none>"));
+    if local.as_deref() == Some(remote.hash.as_str()) {
+        println!("Up to date.");
+        Ok(0)
+    } else {
+        println!("Update available.");
+        Ok(2)
+    }
+}
+
+fn cmd_update(sub: &clap::ArgMatches) -> Result<i32> {
+    let (install, remote) = remote_state(sub)?;
+    let opts = nxl::PatchOptions {
+        force_all: sub.get_flag("force-all"),
+        workers: sub.get_one::<String>("workers").map(|s| s.parse()).transpose()
+            .map_err(|_| anyhow::anyhow!("--workers must be a number"))?.unwrap_or(0),
+        ignore: sub.get_many::<String>("ignore").map_or(Vec::new(), |v| v.cloned().collect()),
+    };
+
+    info!("[PATCH] Game folder: {}", install.root.display());
+    if !opts.force_all && install.local_hash().as_deref() == Some(remote.hash.as_str()) {
+        println!("Up to date ({}). Use --force-all to re-download everything.", remote.hash);
+        return Ok(0);
+    }
+
+    info!("[PATCH] Downloading manifest {}...", remote.hash);
+    let manifest = nxl::fetch_manifest(&remote.hash)?;
+    info!("[PATCH] {} files in manifest, scanning...", manifest.files.len());
+    let pending = nxl::scan(&install, &manifest, &opts);
+    let total = nxl::Manifest::total_size(&pending.iter().map(|p| p.file.clone()).collect::<Vec<_>>());
+    println!("{} file(s) to download ({:.1} MiB)", pending.len(), total as f64 / 1048576.0);
+
+    if sub.get_flag("scan-only") {
+        for p in &pending {
+            println!("  {:<16} {} ({} bytes)", p.reason.to_string(), p.file.path, p.file.fsize);
+        }
+        return Ok(if pending.is_empty() { 0 } else { 2 });
+    }
+
+    let start = std::time::Instant::now();
+    let report = nxl::apply(&install, &manifest, &pending, &opts, &|p: &nxl::Progress| {
+        let secs = start.elapsed().as_secs_f64().max(0.1);
+        eprint!(
+            "\r  [{}/{}] {:>5.1}%  {:.1} MiB/s  {:<60.60}",
+            p.files_done,
+            p.files_total,
+            if p.bytes_total > 0 { p.bytes_done as f64 * 100.0 / p.bytes_total as f64 } else { 100.0 },
+            p.bytes_done as f64 / 1048576.0 / secs,
+            p.current
+        );
+        let _ = std::io::stderr().flush();
+    })?;
+    if !pending.is_empty() {
+        eprintln!();
+    }
+
+    for (path, err) in &report.failed {
+        log::error!("[PATCH] {}: {}", path, err);
+    }
+    if report.hash_updated {
+        println!("Patched {} file(s). Game is up to date ({}).", report.patched, manifest.hash);
+        Ok(0)
+    } else {
+        println!(
+            "Patched {} file(s), {} failed. Run update again to retry the failed files.",
+            report.patched,
+            report.failed.len()
+        );
+        Ok(1)
+    }
+}
+
+fn cmd_launch(sub: &clap::ArgMatches) -> Result<()> {
+    let store = profile::ProfileStore::load().unwrap_or_default();
+    let prof = find_profile(&store, sub.get_one::<String>("profile"));
+    if sub.get_one::<String>("profile").is_some() && prof.is_none() {
+        return Err(anyhow::anyhow!("Profile not found: {}", sub.get_one::<String>("profile").unwrap()));
+    }
+
+    // Log in with credentials, or reuse the profile's saved session.
+    let (mut session, mut expires_in) = if let Some(username) = sub.get_one::<String>("username") {
+        let password = password_arg(sub)
+            .ok_or_else(|| anyhow::anyhow!("--password (or MABI_PASSWORD) is required with --username"))?;
+        info!("[LAUNCH] Logging in as {}...", username);
+        let result = auth::login(username, &password, sub.get_flag("remember") || prof.is_some())
+            .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
+        info!("[LAUNCH] Login OK. Session expires in {}s", result.session_expires_in);
+        (result.session, Some(result.session_expires_in))
+    } else {
+        let p = prof.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No saved profile. Pass --username/--password or run `mabi-patcher login` first")
+        })?;
+        let s = session_from_profile(p).ok_or_else(|| {
+            anyhow::anyhow!("Profile '{}' has no saved session. Run `mabi-patcher login` first", p.name)
+        })?;
+        info!("[LAUNCH] Using profile '{}'", p.name);
+        (s, None)
+    };
+
+    if sub.get_flag("version") {
+        let (ver, refreshed) = auth::with_session_retry(&mut session, patch::get_latest_version)
+            .map_err(|e| anyhow::anyhow!("Version check failed: {}", e))?;
+        expires_in = refreshed.or(expires_in);
+        if let Some(p) = prof.as_ref() {
+            save_refreshed(p, &session, expires_in);
+        }
+        println!("Latest Mabinogi version: {}", ver);
+        return Ok(());
+    }
+
+    let client_dir = game_install(sub, prof.as_ref())?.root;
+
+    info!("[LAUNCH] Fetching launch config...");
+    let (config, refreshed) = auth::with_session_retry(&mut session, launch::fetch_launch_config)
+        .map_err(|e| anyhow::anyhow!("Launch config error: {}", e))?;
+    expires_in = refreshed.or(expires_in);
+    if config.patch_available {
+        info!("[LAUNCH] Note: a game patch is available (run `mabi-patcher update`)");
+    }
+
+    info!("[LAUNCH] Requesting passport...");
+    let (passport, refreshed) = auth::with_session_retry(&mut session, auth::get_passport)
+        .map_err(|e| anyhow::anyhow!("Passport error: {}", e))?;
+    expires_in = refreshed.or(expires_in);
+    if let Some(p) = prof.as_ref() {
+        save_refreshed(p, &session, expires_in);
+    }
+
+    info!("[LAUNCH] Spawning {}...", config.executable_path);
+    let mut child = config
+        .spawn_client(&client_dir, &passport)
+        .map_err(|e| anyhow::anyhow!("Spawn failed: {}", e))?;
+    info!("[LAUNCH] Mabinogi launched.");
+
+    if sub.get_flag("wait") {
+        let status = child.wait()?;
+        info!("[LAUNCH] Game exited ({})", status);
+    }
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
