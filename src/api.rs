@@ -17,18 +17,25 @@
 ///   POST /api/v1/uotiara/build
 ///   GET  /api/v1/mabi-version
 ///   POST /api/v1/extract/stream  (SSE progress stream)
-///   POST /api/v1/launcher/login              (Windows only)
-///   POST /api/v1/launcher/autologin           (Windows only)
-///   POST /api/v1/launcher/passport            (Windows only)
-///   POST /api/v1/launcher/maintenance         (Windows only)
-///   POST /api/v1/launcher/version             (Windows only)
-///   GET  /api/v1/launcher/profiles            (Windows only)
-///   POST /api/v1/launcher/profile/save        (Windows only)
-///   POST /api/v1/launcher/profile/delete      (Windows only)
-///   POST /api/v1/launcher/profile/activate    (Windows only)
-///   POST /api/v1/launcher/profile/load        (Windows only)
-///   POST /api/v1/launcher/profile/session     (Windows only)
-///   POST /api/v1/launcher/launch              (Windows only)
+///   POST /api/v1/launcher/login               { email, password }  → session | mfa_required | captcha_required
+///   POST /api/v1/launcher/login/otp           { mfa_key, otp }
+///   POST /api/v1/launcher/login/tpa           { tpa_session }      (browser/SSO cookie exchange)
+///   POST /api/v1/launcher/autologin           { session_token }
+///   POST /api/v1/launcher/session/check       { session }          (refreshes on 401)
+///   POST /api/v1/launcher/passport            { session }
+///   POST /api/v1/launcher/maintenance         { session }
+///   POST /api/v1/launcher/version             { session }
+///   POST /api/v1/launcher/update/check        { game_path, session? }
+///   POST /api/v1/launcher/update              { game_path, mode: update|verify|force_all, max_workers?, ignore? }
+///   GET  /api/v1/launcher/update/status
+///   POST /api/v1/launcher/update/cancel
+///   GET  /api/v1/launcher/profiles
+///   POST /api/v1/launcher/profile/save
+///   POST /api/v1/launcher/profile/delete
+///   POST /api/v1/launcher/profile/activate
+///   POST /api/v1/launcher/profile/load
+///   POST /api/v1/launcher/profile/session
+///   POST /api/v1/launcher/launch              { session, client_exe | client_dir }  (Windows/Wine)
 ///   POST /api/v1/mod/vfs/apply
 ///   POST /api/v1/mod/pending/save
 ///   GET  /api/v1/mod/pending
@@ -749,84 +756,221 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
     }).collect()
 }
 
-// ---- launcher handlers (Windows only) ---------------------------------------
+// ---- launcher handlers ------------------------------------------------------
+// Replaces Rua's RuaAPI.dll: everything the DLL exports is reachable here over
+// loopback HTTP (and the named pipe in api_pipe on Windows).
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_login(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let username = match body["username"].as_str() { Some(s) => s, None => return err("'username' is required", 400) };
-    let password = match body["password"].as_str() { Some(s) => s, None => return err("'password' is required", 400) };
-    let remember = body["remember"].as_bool().unwrap_or(false);
+type Resp = Response<std::io::Cursor<Vec<u8>>>;
 
-    match crate::launcher::auth::login(username, password, remember) {
-        Ok(result) => ok(json!({
-            "session": result.session,
-            "expiresIn": result.session_expires_in,
-        })),
-        Err(e) => err(&e.to_string(), 500),
+/// Map launcher errors to responses; MFA/CAPTCHA are reported as data, not failures.
+fn auth_err(e: anyhow::Error) -> Resp {
+    use crate::launcher::auth::AuthError;
+    match e.downcast_ref::<AuthError>() {
+        Some(AuthError::MfaRequired { mfa_key, mfa_type }) => {
+            ok(json!({ "mfa_required": true, "mfa_key": mfa_key, "mfa_type": mfa_type }))
+        }
+        Some(AuthError::CaptchaRequired(code)) => {
+            ok(json!({ "captcha_required": true, "code": code, "message": e.to_string() }))
+        }
+        Some(AuthError::SessionExpired(_)) => err(&e.to_string(), 401),
+        Some(AuthError::NotPlayable(_)) => err(&e.to_string(), 503),
+        Some(AuthError::DeviceTrustRequired) => err(&e.to_string(), 403),
+        _ => err(&e.to_string(), 500),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_autologin(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn login_ok(result: crate::launcher::auth::LoginResult) -> Resp {
+    ok(json!({ "session": result.session, "expiresIn": result.session_expires_in }))
+}
+
+fn device_id_from(body: &Value) -> String {
+    body["device_id"].as_str().map(String::from)
+        .unwrap_or_else(|| crate::launcher::auth::device_id(body["profile"].as_str().unwrap_or("")))
+}
+
+fn handle_launcher_login(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let email = match body["email"].as_str().or(body["username"].as_str()) { Some(s) => s, None => return err("'email' is required", 400) };
+    let password = match body["password"].as_str() { Some(s) => s, None => return err("'password' is required", 400) };
+    match crate::launcher::auth::login(email, password, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_login_otp(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let key = match body["mfa_key"].as_str() { Some(s) => s, None => return err("'mfa_key' is required", 400) };
+    let otp = match body["otp"].as_str() { Some(s) => s, None => return err("'otp' is required", 400) };
+    match crate::launcher::auth::login_otp(key, otp, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_login_tpa(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let tpa = match body["tpa_session"].as_str() { Some(s) => s, None => return err("'tpa_session' is required", 400) };
+    match crate::launcher::auth::exchange_tpa(tpa, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_autologin(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let session_token = match body["session_token"].as_str() { Some(s) => s, None => return err("'session_token' is required", 400) };
-
     match crate::launcher::auth::autologin(session_token) {
-        Ok(result) => ok(json!({
-            "session": result.session,
-            "expiresIn": result.session_expires_in,
-        })),
-        Err(e) => err(&e.to_string(), 500),
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn parse_session(body: &Value) -> Result<crate::launcher::auth::NexonSession, Response<std::io::Cursor<Vec<u8>>>> {
+fn parse_session(body: &Value) -> Result<crate::launcher::auth::NexonSession, Resp> {
     serde_json::from_value(body["session"].clone())
         .map_err(|e| err(&format!("'session' is invalid: {}", e), 400))
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_passport(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_session_check(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    match crate::launcher::auth::get_passport(&session) {
-        Ok(passport) => ok(json!({ "passport": passport })),
-        Err(e) => err(&e.to_string(), 500),
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    let mut status = match crate::launcher::auth::check_session(&mut session) { Ok(s) => s, Err(e) => return auth_err(e) };
+    let mut refreshed = false;
+    if status == 401 && crate::launcher::auth::refresh(&mut session).is_ok() {
+        refreshed = true;
+        status = crate::launcher::auth::check_session(&mut session).unwrap_or(status);
+    }
+    ok(json!({ "valid": status == 200, "status": status, "refreshed": refreshed, "session": session }))
+}
+
+fn handle_launcher_passport(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    match crate::launcher::auth::prepare_launch(&mut session) {
+        Ok(passport) => ok(json!({ "passport": passport, "session": session })),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_maintenance(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_maintenance(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
     match crate::launcher::patch::is_maintenance(&session) {
         Ok(maintenance) => ok(json!({ "maintenance": maintenance })),
-        Err(e) => err(&e.to_string(), 500),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_version(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_version(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    match crate::launcher::patch::get_latest_version(&session) {
-        Ok(version) => ok(json!({ "version": version })),
-        Err(e) => err(&e.to_string(), 500),
+    match crate::launcher::patch::fetch_manifest(&session) {
+        Ok(info) => ok(json!({ "version": info.version, "manifest_url": info.manifest_url })),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profiles_list() -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_update_check(req: &mut Request) -> Resp {
+    use crate::launcher::patch;
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let game_path = match body["game_path"].as_str() { Some(s) => s, None => return err("'game_path' is required", 400) };
+    let session = parse_session(&body).ok();
+    let roots = patch::GameRoots::resolve(game_path);
+    match patch::check_update(&roots, session.as_ref()) {
+        Ok(c) => ok(json!({ "check": c, "roots": roots })),
+        Err(e) => auth_err(e),
+    }
+}
+
+/// Background patch job state (one at a time), polled via /launcher/update/status.
+#[derive(Default, Serialize, Clone)]
+struct PatchJob {
+    running: bool,
+    log: Vec<String>,
+    files_done: usize,
+    files_total: usize,
+    bytes: u64,
+    bytes_total: u64,
+    speed_bps: u64,
+    scan_done: usize,
+    scan_total: usize,
+    result: Option<crate::launcher::patch::PatchResult>,
+    error: Option<String>,
+}
+
+static PATCH_JOB: once_cell::sync::Lazy<std::sync::Mutex<PatchJob>> = once_cell::sync::Lazy::new(Default::default);
+static PATCH_CANCEL: once_cell::sync::Lazy<std::sync::Mutex<Arc<AtomicBool>>> = once_cell::sync::Lazy::new(Default::default);
+
+fn handle_launcher_update(req: &mut Request) -> Resp {
+    use crate::launcher::patch::{self, PatchEvent, PatchMode, PatchOptions};
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let game_path = match body["game_path"].as_str() { Some(s) => s.to_string(), None => return err("'game_path' is required", 400) };
+    let mode = match body["mode"].as_str().unwrap_or("update") {
+        "verify" => PatchMode::Verify,
+        "force_all" | "force" => PatchMode::ForceAll,
+        _ => PatchMode::Update,
+    };
+    {
+        let mut job = PATCH_JOB.lock().unwrap();
+        if job.running { return err("a patch job is already running", 409); }
+        *job = PatchJob { running: true, ..Default::default() };
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    *PATCH_CANCEL.lock().unwrap() = cancel.clone();
+    let opts = PatchOptions {
+        mode,
+        max_workers: body["max_workers"].as_u64().unwrap_or(8) as usize,
+        ignore: body["ignore"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        scan_only: body["scan_only"].as_bool().unwrap_or(false),
+        manifest_hash: None,
+        cancel,
+    };
+    let session = parse_session(&body).ok();
+    std::thread::spawn(move || {
+        let roots = patch::GameRoots::resolve(&game_path);
+        let on_event = |ev: PatchEvent| {
+            let mut job = PATCH_JOB.lock().unwrap();
+            match ev {
+                PatchEvent::Log { message } => { job.log.push(message); }
+                PatchEvent::Scan { done, total, .. } => { job.scan_done = done; job.scan_total = total; }
+                PatchEvent::Download { files_done, files_total, bytes, bytes_total, speed_bps, .. } => {
+                    job.files_done = files_done; job.files_total = files_total;
+                    job.bytes = bytes; job.bytes_total = bytes_total; job.speed_bps = speed_bps;
+                }
+                PatchEvent::Worker { .. } => {}
+            }
+        };
+        let res = patch::run_patcher(&roots, session.as_ref(), &opts, &on_event);
+        let mut job = PATCH_JOB.lock().unwrap();
+        job.running = false;
+        match res {
+            Ok(r) => { job.files_total = job.files_total.max(r.need.len()); job.result = Some(r); }
+            Err(e) => job.error = Some(e.to_string()),
+        }
+    });
+    ok(json!({ "started": true }))
+}
+
+fn handle_launcher_update_status() -> Resp {
+    let job = PATCH_JOB.lock().unwrap().clone();
+    ok(serde_json::to_value(job).unwrap_or_default())
+}
+
+fn handle_launcher_update_cancel() -> Resp {
+    PATCH_CANCEL.lock().unwrap().store(true, Ordering::Relaxed);
+    ok(json!({ "cancelling": PATCH_JOB.lock().unwrap().running }))
+}
+
+fn handle_launcher_profiles_list() -> Resp {
     match crate::launcher::profile::list_profiles() {
         Ok(summaries) => ok(json!({ "profiles": summaries })),
         Err(e) => err(&e.to_string(), 500),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_save(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_save(req: &mut Request) -> Resp {
     use crate::launcher::profile::{Profile, ProfileStore};
 
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
@@ -853,8 +997,7 @@ fn handle_launcher_profile_save(req: &mut Request) -> Response<std::io::Cursor<V
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_delete(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_delete(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     match crate::launcher::profile::delete_profile(id) {
@@ -863,8 +1006,7 @@ fn handle_launcher_profile_delete(req: &mut Request) -> Response<std::io::Cursor
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_activate(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_activate(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     match crate::launcher::profile::set_active_profile(id) {
@@ -873,8 +1015,7 @@ fn handle_launcher_profile_activate(req: &mut Request) -> Response<std::io::Curs
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_load(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_load(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     let profile = match crate::launcher::profile::load_profile(id) { Ok(p) => p, Err(e) => return err(&e.to_string(), 404) };
@@ -886,8 +1027,7 @@ fn handle_launcher_profile_load(req: &mut Request) -> Response<std::io::Cursor<V
     ok(val)
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_session(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_session(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     let session_token = match body["session_token"].as_str() { Some(s) => s, None => return err("'session_token' is required", 400) };
@@ -898,31 +1038,24 @@ fn handle_launcher_profile_session(req: &mut Request) -> Response<std::io::Curso
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_launch(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    use crate::launcher::{auth, launch};
-
+/// Official launch: body { session, client_dir | client_exe | game_path }.
+fn handle_launcher_launch(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    let client_dir = match body["client_dir"].as_str() { Some(s) => s, None => return err("'client_dir' is required", 400) };
-
-    let config = match launch::fetch_launch_config(&session) { Ok(c) => c, Err(e) => return err(&e.to_string(), 500) };
-    let passport = match auth::get_passport(&session) { Ok(p) => p, Err(e) => return err(&e.to_string(), 500) };
-    let summary = launch::LaunchSummary::from(&config);
-
-    match config.spawn_client(std::path::Path::new(client_dir), &passport) {
-        Ok(_child) => ok(json!({
-            "executable": summary.executable,
-            "argumentCount": summary.argument_count,
-            "patchAvailable": summary.patch_available,
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    let path = match body["client_exe"].as_str().or(body["client_dir"].as_str()).or(body["game_path"].as_str()) {
+        Some(s) => s, None => return err("'client_exe' or 'client_dir' is required", 400),
+    };
+    let exe = crate::launcher::patch::GameRoots::resolve(path).client_exe();
+    match crate::launcher::launch::launch_official(&mut session, &exe, false) {
+        Ok(info) => ok(json!({
+            "pid": info.pid,
+            "executable": info.executable,
+            "argumentCount": info.argument_count,
+            "patchAvailable": info.patch_available,
+            "session": session,
         })),
-        Err(e) => err(&e.to_string(), 500),
+        Err(e) => auth_err(e),
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn launcher_unavailable() -> Response<std::io::Cursor<Vec<u8>>> {
-    err("launcher endpoints are only available on Windows", 501)
 }
 
 // ---- mod VFS / pending-changes handlers --------------------------------------
@@ -1566,33 +1699,25 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Post, "/api/v1/convert")           => handle_convert(req),
         (Method::Post, "/api/v1/pmg/export")        => handle_pmg_export(req),
 
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/login")             => handle_launcher_login(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/login/otp")         => handle_launcher_login_otp(req),
+        (Method::Post, "/api/v1/launcher/login/tpa")         => handle_launcher_login_tpa(req),
         (Method::Post, "/api/v1/launcher/autologin")         => handle_launcher_autologin(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/session/check")     => handle_launcher_session_check(req),
         (Method::Post, "/api/v1/launcher/passport")          => handle_launcher_passport(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/maintenance")       => handle_launcher_maintenance(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/version")           => handle_launcher_version(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/update/check")      => handle_launcher_update_check(req),
+        (Method::Post, "/api/v1/launcher/update")            => handle_launcher_update(req),
+        (Method::Get,  "/api/v1/launcher/update/status")     => handle_launcher_update_status(),
+        (Method::Post, "/api/v1/launcher/update/cancel")     => handle_launcher_update_cancel(),
         (Method::Get,  "/api/v1/launcher/profiles")          => handle_launcher_profiles_list(),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/save")      => handle_launcher_profile_save(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/delete")    => handle_launcher_profile_delete(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/activate")  => handle_launcher_profile_activate(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/load")      => handle_launcher_profile_load(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/session")   => handle_launcher_profile_session(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/launch")            => handle_launcher_launch(req),
-
-        #[cfg(not(target_os = "windows"))]
-        (_, p) if p.starts_with("/api/v1/launcher/") => launcher_unavailable(),
 
         // Anything else under /api/ is a genuine 404; anything not under /api/
         // falls through to the WebUI static bundle (`mabi-patcher serve` hosts

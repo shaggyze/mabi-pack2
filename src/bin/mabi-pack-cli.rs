@@ -14,8 +14,7 @@ use log::{debug, info};
 
 // Correct library name from Cargo.toml
 use mabi_pack2::{api, load_salts, extract, list, mod_file, pack};
-#[cfg(windows)]
-use mabi_pack2::launcher::{auth, launch, patch};
+use mabi_pack2::launcher::{cli as launcher_cli, launch};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -60,6 +59,8 @@ fn num_cpus() -> usize {
 }
 
 fn main() -> Result<()> {
+    // When copied as nexon_client.exe for a game launch, just act as the stub.
+    launch::run_stub_if_requested();
     #[cfg(windows)]
     register_shell_menu();
     let matches = Command::new("mabi-pack2")
@@ -175,15 +176,7 @@ fn main() -> Result<()> {
                         .arg(Arg::new("dir").short('d').long("dir").value_name("DIR").help("Directory to scan (default: mods/)").default_value("mods"))
                 )
         )
-        .subcommand(
-            Command::new("launch")
-                .about("Login to Nexon NA and launch Mabinogi (Windows only)")
-                .arg(Arg::new("username").short('u').long("username").value_name("EMAIL").help("Nexon account email").required(true))
-                .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password").required(true))
-                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Mabinogi installation directory (contains Client.exe)").required(true))
-                .arg(Arg::new("remember").long("remember").action(ArgAction::SetTrue).help("Save session token for future auto-login"))
-                .arg(Arg::new("version").long("version").action(ArgAction::SetTrue).help("Print the latest game version and exit (no launch)"))
-        )
+        .subcommands(launcher_cli::commands())
         .subcommand(
             Command::new("batch")
                 .about("Extract all .it/.pack archives in a folder, merging output into one directory.")
@@ -477,50 +470,15 @@ fn main() -> Result<()> {
                 }
             }
         }
-    } else if let Some(sub) = matches.subcommand_matches("launch") {
-        #[cfg(not(windows))]
-        { let _ = sub; return Err(anyhow::anyhow!("The 'launch' command is only available on Windows")); }
-
-        #[cfg(windows)]
-        {
-            let username = sub.get_one::<String>("username").unwrap();
-            let password = sub.get_one::<String>("password").unwrap();
-            let client_dir = std::path::Path::new(sub.get_one::<String>("client").unwrap());
-            let remember = sub.get_flag("remember");
-            let version_only = sub.get_flag("version");
-
-            info!("[LAUNCH] Logging in as {}...", username);
-            let result = auth::login(username, password, remember, None)
-                .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
-
-            let session = result.session.as_ref().unwrap();
-            info!("[LAUNCH] Login OK. Session expires in {}s", result.session_expires_in);
-
-            if version_only {
-                let ver = patch::get_latest_version(session)
-                    .map_err(|e| anyhow::anyhow!("Version check failed: {}", e))?;
-                println!("Latest Mabinogi version: {}", ver);
-                return Ok(());
+    } else if let Some((name, sub)) = matches.subcommand().filter(|(n, _)| launcher_cli::NAMES.contains(n)) {
+        let code = match launcher_cli::run(name, sub) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                1
             }
-
-            info!("[LAUNCH] Fetching launch config...");
-            let config = launch::fetch_launch_config(session)
-                .map_err(|e| anyhow::anyhow!("Launch config error: {}", e))?;
-
-            if config.patch_available {
-                info!("[LAUNCH] Note: a game patch is available");
-            }
-
-            info!("[LAUNCH] Requesting passport...");
-            let passport = auth::get_passport(session)
-                .map_err(|e| anyhow::anyhow!("Passport error: {}", e))?;
-
-            info!("[LAUNCH] Spawning {}...", config.executable_path);
-            let _child = config.spawn_client(client_dir, &passport)
-                .map_err(|e| anyhow::anyhow!("Spawn failed: {}", e))?;
-
-            info!("[LAUNCH] Mabinogi launched.");
-        }
+        };
+        std::process::exit(code);
     } else {
         info!("No subcommand provided. Use --help for usage information.");
     }
@@ -535,4 +493,5 @@ fn ctrlc_handler(f: impl Fn() + Send + 'static) {
         f();
     });
 }
+
 
