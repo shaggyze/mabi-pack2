@@ -48,6 +48,52 @@ pub struct LoginResult {
     pub session_expires_in: i32,
 }
 
+/// Nexon rejected the request with HTTP 401: the session has expired.
+///
+/// Returned (wrapped in `anyhow::Error`) by the session-bound calls so callers
+/// can tell an expired session apart from other failures; see
+/// [`with_session_retry`]. The message keeps "401" for callers that match on text.
+#[derive(Debug)]
+pub struct Unauthorized(pub String);
+
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Session expired (401 Unauthorized): {}", self.0)
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
+/// True if `err` is (or wraps) an [`Unauthorized`] error.
+pub fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Unauthorized>().is_some()
+}
+
+/// Run `f` with `session`; if Nexon answers 401, refresh the session through
+/// `autologin` (NxLSession cookie) and run `f` once more.
+///
+/// On a refresh `session` is replaced with the new one and the new expiry (in
+/// seconds) is returned alongside the value so callers can persist it.
+pub fn with_session_retry<T, F>(session: &mut NexonSession, mut f: F) -> Result<(T, Option<i32>)>
+where
+    F: FnMut(&NexonSession) -> Result<T>,
+{
+    match f(session) {
+        Err(e) if is_unauthorized(&e) => {
+            if session.session_token.is_empty() {
+                return Err(anyhow!("{} (no saved session to refresh; log in again)", e));
+            }
+            log::info!("Session rejected (401), refreshing via autologin...");
+            let refreshed = autologin(&session.session_token)
+                .map_err(|re| anyhow!("{}; session refresh failed: {} (log in again)", e, re))?;
+            *session = refreshed.session;
+            let value = f(session)?;
+            Ok((value, Some(refreshed.session_expires_in)))
+        }
+        other => other.map(|v| (v, None)),
+    }
+}
+
 // ── Request / response structs ────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -158,6 +204,9 @@ pub fn is_playable(session: &NexonSession) -> Result<bool> {
         .json(&Req { product_id: PRODUCT_ID })
         .send()?;
 
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Unauthorized(resp.text().unwrap_or_default()).into());
+    }
     Ok(resp.status().is_success())
 }
 
@@ -182,6 +231,9 @@ pub fn get_passport(session: &NexonSession) -> Result<String> {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
 
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Unauthorized(body).into());
+    }
     if !status.is_success() {
         return Err(anyhow!("Passport request failed ({}): {}", status, body));
     }
@@ -489,7 +541,14 @@ fn machine_guid() -> Option<String> {
         key.get_value::<String, _>("MachineGuid").ok()
     }
     #[cfg(not(windows))]
-    None
+    {
+        // systemd / dbus machine id: stable per install, like MachineGuid.
+        ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .find(|s| !s.is_empty())
+    }
 }
 
 /// Random alphanumeric+punctuation string (Hyddwn's captcha token fallback).

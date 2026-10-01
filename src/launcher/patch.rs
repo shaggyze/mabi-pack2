@@ -2,13 +2,12 @@
 //
 // Fetches the manifest URL from the branch endpoint, extracts the version
 // from the URL pattern (e.g. "12345R"), and checks maintenance status.
-// Full patch download (download2.nexon.net file fetching, zlib decompress,
-// diff application) is deferred — see plans.ts roadmap item `launch-mabitd`.
+// The file download itself lives in `nxl.rs`.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use super::auth::NexonSession;
+use super::auth::{NexonSession, Unauthorized};
 
 const NEXON_BASE: &str = "https://www.nexon.com";
 const PRODUCT_ID: &str = "10200";
@@ -44,6 +43,9 @@ pub fn fetch_manifest(session: &NexonSession) -> Result<ManifestInfo> {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
 
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Unauthorized(body).into());
+    }
     if !status.is_success() {
         return Err(anyhow!("Manifest fetch failed ({}): {}", status, body));
     }

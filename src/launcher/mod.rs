@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod cookie_dec;
 pub mod launch;
+pub mod nxl;
 pub mod patch;
 pub mod profile;
 

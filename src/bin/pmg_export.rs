@@ -1,6 +1,8 @@
 fn main() {
     println!("Testing auth directly with plaintext on regional-auth with correct JSON fields...");
     let dev = mabi_pack2::launcher::auth::device_id("");
+    let email = std::env::var("MABI_EMAIL").expect("set MABI_EMAIL");
+    let password = std::env::var("MABI_PASSWORD").expect("set MABI_PASSWORD");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("NexonLauncher.nxl-release-18.14.10-220-fc7480c-coreapp-3.3.0")
@@ -12,12 +14,12 @@ fn main() {
         "captchaVersion": "v3",
         "clientId": "7853644408",
         "deviceId": dev,
-        "id": "shaggyze@gmail.com",
+        "id": email,
         "localTime": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64,
-        "password": "E@rthair00",
+        "password": password,
         "scope": "us.launcher.all",
         "timeOffset": 0,
     });

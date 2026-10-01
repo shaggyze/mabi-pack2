@@ -88,6 +88,25 @@ Right-clicking a registered file type gives an "Open with mabi-pack2" context me
 
 ---
 
+## Game patcher and launcher CLI
+
+`mabi-patcher` can patch and launch Mabinogi NA without the Nexon Launcher, on
+Windows and on Linux (the game runs through Wine there). The patcher downloads
+from Nexon's NXL CDN, 8 files at a time with a shared cap of 16 connections,
+and retries failed parts. A 401 from Nexon refreshes the saved session once and
+retries.
+
+```sh
+mabi-patcher login -u you@example.com -p '...' --profile Main -c /games/mabinogi/appdata
+mabi-patcher check-update          # exit 0 = up to date, 2 = update available
+mabi-patcher update                # --force-all, --scan-only, -j N, --ignore 'mods/*'
+mabi-patcher launch --wait         # uses the active profile; MABI_WINE picks the Wine runner
+```
+
+`-c` takes the folder holding `Client.exe` (or the exe itself). The installed
+version is read from `patchdata/10200.manifest.hash`, inside that folder or
+beside it. Build the Linux binary with `./build-linux.sh`.
+
 ## GUI
 
 The GUI is a single `mabi-pack2.exe` binary that acts as both CLI (when given a subcommand) and GUI (when launched normally or by double-clicking a registered archive).
