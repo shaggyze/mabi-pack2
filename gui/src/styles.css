@@ -555,6 +555,7 @@ input:focus, select:focus { border-color: var(--accent-blue); outline: none; box
 }
 .preview-tab-content.active { display: block; }
 .preview-tab-content.audio-mode.active { display: flex; align-items: center; justify-content: center; }
+#preview-3d.active { display: flex; flex-direction: column; }
 
 /* XML syntax highlight */
 .xml-view { white-space: pre; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.82rem; padding: 0.75rem 1rem; overflow: auto; line-height: 1.5; }

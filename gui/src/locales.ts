@@ -228,6 +228,7 @@ export const locales: Record<string, any> = {
     launcher_launch_header: "Launch Game",
     launcher_email_label: "Nexon Email",
     launcher_password_label: "Password",
+    launcher_verification_label: "Verification Code",
     launcher_remember: "Remember me",
     btn_launcher_login: "Login",
     btn_launcher_logout: "Log out",

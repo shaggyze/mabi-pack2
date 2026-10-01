@@ -32,6 +32,9 @@ CLAUDE.md
 .windsurf
 skills-lock.json
 
+# Private, never push
+/.private_backup_diff
+
 # Generated / temp
 output.csv
 *.bak

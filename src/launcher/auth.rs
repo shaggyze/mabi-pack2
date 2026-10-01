@@ -251,6 +251,77 @@ pub fn import_from_nexon_launcher() -> Result<NexonSession> {
     })
 }
 
+/// Import session tokens from mabi-patcher's own WebView2 cookie store.
+/// Called after `nexon_login_webview` completes; reads the EBWebView Cookies SQLite
+/// with AES-GCM decryption (v10 cookie format used by Chromium/WebView2).
+pub fn import_from_tauri_webview() -> Result<NexonSession> {
+    use crate::launcher::cookie_dec;
+
+    let localappdata = std::env::var("LOCALAPPDATA")
+        .map_err(|_| anyhow!("LOCALAPPDATA not set"))?;
+
+    let cookies_db = std::path::PathBuf::from(&localappdata)
+        .join("com.shaggyze.mabi-patcher")
+        .join("EBWebView")
+        .join("Default")
+        .join("Network")
+        .join("Cookies");
+
+    if !cookies_db.exists() {
+        return Err(anyhow!("WebView2 cookie store not found — has the login window been opened?"));
+    }
+
+    let key = cookie_dec::get_webview2_key()
+        .map_err(|e| anyhow!("Failed to read WebView2 encryption key: {}", e))?;
+
+    let tmp_db = std::env::temp_dir().join("mabi_wv2_cookies.db");
+    std::fs::copy(&cookies_db, &tmp_db)
+        .map_err(|e| anyhow!("Failed to copy WebView2 cookie DB: {}", e))?;
+
+    let conn = rusqlite::Connection::open(&tmp_db)
+        .map_err(|e| anyhow!("Failed to open cookie DB: {}", e))?;
+
+    let names = ["AToken", "g_AToken", "NxLSession", "NexonUserID", "NxGUN"];
+    let mut map = std::collections::HashMap::new();
+
+    for name in &names {
+        let row: Option<(String, Vec<u8>)> = conn.query_row(
+            "SELECT value, encrypted_value FROM cookies WHERE host_key LIKE '%nexon%' AND name = ?1 LIMIT 1",
+            rusqlite::params![name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).ok();
+
+        if let Some((plain, enc)) = row {
+            let value = if !plain.is_empty() {
+                plain
+            } else if !enc.is_empty() {
+                cookie_dec::decrypt_cookie(&enc, &key).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            map.insert(name.to_string(), value);
+        }
+    }
+
+    let _ = std::fs::remove_file(&tmp_db);
+
+    let a_token = map.get("AToken").cloned().unwrap_or_default();
+    let g_token = map.get("g_AToken").cloned().unwrap_or_default();
+    let session = map.get("NxLSession").cloned().unwrap_or_default();
+    let user_id = map.get("NexonUserID").or_else(|| map.get("NxGUN")).cloned().unwrap_or_default();
+
+    if a_token.is_empty() || session.is_empty() {
+        return Err(anyhow!("Not logged in yet — no valid session cookies found in WebView2 store"));
+    }
+
+    Ok(NexonSession {
+        access_token: a_token.clone(),
+        g_access_token: if g_token.is_empty() { a_token } else { g_token },
+        session_token: session,
+        hashed_user_id: user_id,
+    })
+}
+
 // ── Device ID ─────────────────────────────────────────────────────────────────
 
 /// Stable per-machine identifier matching Hyddwn's GetDeviceUuid algorithm.

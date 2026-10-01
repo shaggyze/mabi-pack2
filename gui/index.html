@@ -263,7 +263,7 @@
 
           <!-- Profile quick-select -->
           <div class="card" id="launcher-profile-quick-card">
-            <div class="card-header">Profile</div>
+            <div class="card-header" id="launcher-profile-quick-header-text">Profile</div>
             <div class="input-row" style="gap:6px">
               <select id="launcher-page-profile-select" class="form-input" style="flex:1">
                 <option value="">— No profiles saved —</option>
@@ -284,7 +284,11 @@
               <label id="launcher-password-label-text">Password</label>
               <input type="password" id="launcher-password" class="form-input" placeholder="••••••••" autocomplete="current-password" />
             </div>
-            <div class="form-group form-row">
+                          <div class="form-group" id="launcher-verification-group" style="display:none;">
+                <label id="launcher-verification-label-text">Verify Code</label>
+                <input type="text" id="launcher-verification" class="form-input" placeholder="Email Verification Code" />
+              </div>
+              <div class="form-group form-row">
               <label class="checkbox-label">
                 <input type="checkbox" id="launcher-remember" />
                 <span id="launcher-remember-text">Remember me</span>
@@ -476,7 +480,7 @@
                     </div>
                 </div>
 
-                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative;display:flex;flex-direction:column">
+                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative;">
                     <div id="three-viewport" style="width:100%; height:400px; min-height:150px; flex-shrink:0"></div>
                     <div id="pmg-info" style="position:absolute;top:6px;left:8px;font-size:0.75em;opacity:0.7;pointer-events:none;"></div>
                     <div id="preview-3d-resize-handle" style="height:8px;cursor:ns-resize;background:linear-gradient(to bottom,transparent 2px,var(--border-glass,rgba(255,255,255,0.18)) 2px,var(--border-glass,rgba(255,255,255,0.18)) 3px,transparent 3px);flex-shrink:0;user-select:none;" title="Drag to resize 3D viewport"></div>
@@ -742,9 +746,23 @@
           </div>
         </div>
 
-        <!-- Launcher sub-tab -->
+                  <!-- Launcher sub-tab -->
         <div id="stab-launcher" class="settings-stab-content">
           <div class="settings-section">
+            <h4 style="margin:0 0 10px 0;">Login & Auth</h4>
+            <div class="sys-stat">
+              <span id="label-legacy-auth">Use legacy direct API login (Hyddwn) instead of WebView</span>
+              <label class="switch"><input type="checkbox" id="launcher-legacy-auth"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label-autoclose-login">Auto-close WebView login window on success</span>
+              <label class="switch"><input type="checkbox" id="launcher-autoclose-login" checked><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" style="margin-top: 8px;">
+              <span id="label-reset-login">Clear WebView Login Cache (Fixes stuck 'Stay Logged In')</span>
+              <button class="btn btn-secondary" id="btn-reset-login-cache" style="padding:4px 12px; font-size:12px;">Reset Cache</button>
+            </div>
+            <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
             <!-- Profile manager (moved from Launcher tab) -->
             <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
               <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
@@ -856,6 +874,11 @@
             <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
               <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_max_workers">Parallel workers</label>
               <input type="number" id="patcher-max-workers" class="form-input" min="1" max="32" value="10" style="width:64px">
+            </div>
+            <div class="form-group" style="margin-top:10px">
+              <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:4px" data-i18n="label_patcher_ignore_list">Ignore List (one pattern per line, e.g. <code>data/ui.it</code> or <code>*.pack</code>)</label>
+              <textarea id="patcher-ignore-list" class="form-input" rows="4" style="width:100%;resize:vertical;font-family:monospace;font-size:0.82rem" placeholder="data/mymod.it&#10;*.pack&#10;data/sound/*"></textarea>
+              <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px" data-i18n="hint_patcher_ignore_list">Files matching these patterns will never be overwritten during patching. Wildcards (* ?) supported.</div>
             </div>
             <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
               <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_installed_ver">Installed version</label>
@@ -1082,3 +1105,6 @@
 >
 >
 >
+
+
+
