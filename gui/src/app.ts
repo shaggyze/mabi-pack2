@@ -2663,10 +2663,21 @@ class App {
 
         const btn = document.getElementById("btn-launcher-login") as HTMLButtonElement;
         btn.disabled = true;
-        this.setLauncherStatus("Logging in…", "busy");
+        this.setLauncherStatus("Logging in...", "busy");
 
         try {
-            const result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked }) as any;
+            let result: any;
+            if ((this.config as any).launcher_legacy_auth) {
+                if (!email || !password) { this.setLauncherStatus("Email and password required for direct legacy auth", "error"); btn.disabled = false; return; }
+                const vcodeEl = document.getElementById("launcher-verification") as HTMLInputElement;
+                const verificationCode = vcodeEl ? vcodeEl.value.trim() : "";
+                const vcodeOpt = verificationCode.length > 0 ? verificationCode : null;
+                result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked, verificationCode: vcodeOpt }) as any;
+            } else {
+                this.setLauncherStatus("Please log in through the popup window...", "busy");
+                const sessionJson = await invoke("nexon_login_webview") as any;
+                result = { session: sessionJson, expiresIn: 86400 };
+            }
             this.launcherSession = result.session;
             if (rememberEl.checked) {
                 localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
@@ -2807,6 +2818,9 @@ class App {
     }
 
     private updateLauncherUI(loggedIn: boolean) {
+        const group = document.getElementById("launcher-verification-group");
+        if (group) { group.style.display = (this.config as any).launcher_legacy_auth ? "block" : "none"; }
+        
         // Only touch login/session cards if we're in official-server mode
         const isCustom = !this.activeProfileIsOfficial;
         if (!isCustom) {

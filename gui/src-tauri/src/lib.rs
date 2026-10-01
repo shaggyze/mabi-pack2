@@ -4137,8 +4137,48 @@ impl From<SessionInfo> for mabi_pack2::launcher::auth::NexonSession {
 
 /// Import session from Nexon Launcher cookie store.
 
-#[tauri::command]
+fn delete_webview_cookies() {
+    let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    if localappdata.is_empty() { return; }
+    let cookies_db = std::path::PathBuf::from(&localappdata)
+        .join("com.shaggyze.mabi-patcher")
+        .join("EBWebView")
+        .join("Default")
+        .join("Network")
+        .join("Cookies");
+    let _ = std::fs::remove_file(&cookies_db);
+}
 
+#[tauri::command]
+fn nexon_login_webview(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri::WebviewUrl;
+    use tauri::WebviewWindowBuilder;
+  
+    delete_webview_cookies();
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "nexon_login",
+        WebviewUrl::External("https://www.nexon.com/account/en/login".parse().unwrap())
+    )
+    .title("Nexon Login")
+    .inner_size(500.0, 800.0)
+    .resizable(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if let Ok(session) = mabi_pack2::launcher::auth::import_from_tauri_webview() {
+            let _ = window.close();
+            return Ok(serde_json::json!({
+                "access_token": session.access_token,
+                "session_token": session.session_token
+            }));
+        }
+    }
+}
+
+#[tauri::command]
 fn launcher_import_session() -> Result<serde_json::Value, String> {
 
     let result = mabi_pack2::launcher::auth::import_from_nexon_launcher()
@@ -4152,31 +4192,16 @@ fn launcher_import_session() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-
-fn launcher_login(
-
-    username: String,
-
-    password: String,
-
-    remember: bool,
-
-) -> Result<serde_json::Value, String> {
-
+fn launcher_login(username: String, password: String, remember: bool, _verification_code: Option<String>) -> Result<serde_json::Value, String> {
     let result = mabi_pack2::launcher::auth::login(&username, &password, remember)
-
         .map_err(|e| e.to_string())?;
-
-    let session: SessionInfo = result.session.into();
+    
+    let tauri_session: SessionInfo = result.session.into();
 
     Ok(serde_json::json!({
-
-        "session": session,
-
-        "expiresIn": result.session_expires_in,
-
+        "session": tauri_session,
+        "expiresIn": result.session_expires_in
     }))
-
 }
 
 
@@ -4618,9 +4643,18 @@ fn launcher_launch(
 
         use mabi_pack2::launcher::auth;
 
-        let nexon_session: auth::NexonSession = session.into();
+        let mut nexon_session: auth::NexonSession = session.into();
 
-        let config = launcher_mod::fetch_launch_config(&nexon_session).map_err(|e| e.to_string())?;
+        let config = match launcher_mod::fetch_launch_config(&nexon_session) {
+            Ok(c) => c,
+            Err(e) if e.to_string().contains("401") => {
+                let refreshed = auth::autologin(&nexon_session.session_token)
+                    .map_err(|re| format!("Launch failed (401) and token refresh failed: {}", re))?;
+                nexon_session = refreshed.session;
+                launcher_mod::fetch_launch_config(&nexon_session).map_err(|e| e.to_string())?
+            },
+            Err(e) => return Err(e.to_string()),
+        };
 
         let passport = auth::get_passport(&nexon_session).map_err(|e| e.to_string())?;
 
@@ -7030,7 +7064,7 @@ pub fn run() {
 
             preview_loose_file,
 
-            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port,
+            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, nexon_login_webview,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 

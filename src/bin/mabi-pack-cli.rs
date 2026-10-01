@@ -490,10 +490,10 @@ fn main() -> Result<()> {
             let version_only = sub.get_flag("version");
 
             info!("[LAUNCH] Logging in as {}...", username);
-            let result = auth::login(username, password, remember)
+            let result = auth::login(username, password, remember, None)
                 .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
 
-            let session = &result.session;
+            let session = result.session.as_ref().unwrap();
             info!("[LAUNCH] Login OK. Session expires in {}s", result.session_expires_in);
 
             if version_only {
@@ -535,3 +535,4 @@ fn ctrlc_handler(f: impl Fn() + Send + 'static) {
         f();
     });
 }
+
