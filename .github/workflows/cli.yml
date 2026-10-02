@@ -1,0 +1,33 @@
+name: CLI build
+
+on:
+  push:
+    branches: [mabi-patcher]
+  pull_request:
+    branches: [mabi-patcher]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: target/release/mabi-patcher
+          - os: windows-latest
+            artifact: target/release/mabi-patcher.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI binaries
+        run: cargo build --release --bins
+      - name: Lib unit tests
+        run: cargo test --release --lib
+      - name: Integration tests (non-ignored)
+        run: cargo test --release --tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mabi-patcher-${{ matrix.os }}
+          path: ${{ matrix.artifact }}

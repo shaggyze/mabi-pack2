@@ -30,7 +30,7 @@ COPY gui/src ./src
 RUN npm run build
 
 # ── Rust build stage ─────────────────────────────────────────────────────────
-FROM rust:1.82-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -42,11 +42,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the workspace
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+# build.rs only builds the nxl3p shim for Windows targets, but it watches these files.
+COPY nxl3p-shim ./nxl3p-shim
 
 # Build only the CLI binary (no Tauri/GUI)
-RUN cargo build --release --bin mabi-pack-cli
+RUN cargo build --release --bin mabi-patcher
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -57,7 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary
-COPY --from=builder /build/target/release/mabi-pack-cli /usr/local/bin/mabi-patcher
+COPY --from=builder /build/target/release/mabi-patcher /usr/local/bin/mabi-patcher
 
 # Copy the built WebUI bundle — resolved via the `<exe_dir>/webui` convention
 # in src/api.rs::webui_dir(), so `mabi-patcher serve` hosts API + WebUI together.

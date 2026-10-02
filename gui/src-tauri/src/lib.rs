@@ -1,5 +1,9 @@
 use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption, rgn as rgn_lib};
 
+mod vfs_ops;
+mod world_preview;
+mod kanan_import;
+
 use encoding_rs::{WINDOWS_1252, SHIFT_JIS, EUC_KR, BIG5};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +17,6 @@ use tauri::{Manager, Emitter};
 use log::{debug, info, warn};
 
 use std::io::Write;
-use rayon::prelude::*;
 
 use std::sync::{Arc, Mutex};
 
@@ -183,6 +186,10 @@ fn default_hyddwn_url() -> String { "http://127.0.0.1:11000".to_string() }
 
 fn default_max_workers() -> u32 { 10 }
 
+fn default_api_port() -> u16 { api::DEFAULT_PORT }
+
+fn default_product_id() -> u32 { mabi_pack2::launcher::auth::DEFAULT_PRODUCT_ID }
+
 
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -287,10 +294,6 @@ struct Config {
 
     #[serde(default)]
 
-    kanan_cfg_path: String,
-
-    #[serde(default)]
-
     patcher_game_path: String,
 
     #[serde(default)]
@@ -327,6 +330,29 @@ struct Config {
     #[serde(default)]
 
     pre_patch_cmd: String,
+
+    #[serde(default)]
+    post_patch_cmd: String,
+
+    /// Set once the legacy hook/ignore fields above were moved into the shared
+    /// config (and blanked here), so clearing them there doesn't bring them back.
+    #[serde(default)]
+    shared_config_migrated: bool,
+
+    /// Run the REST API (same as `mabi-patcher serve`, loopback only) while the app is open.
+    #[serde(default)]
+    api_enabled: bool,
+
+    #[serde(default = "default_api_port")]
+    api_port: u16,
+
+    /// Nexon product id used by every patch/launch/auth call (advanced; default 10200).
+    #[serde(default = "default_product_id")]
+    product_id: u32,
+
+    /// Hide to the system tray instead of exiting when the window is closed.
+    #[serde(default)]
+    minimize_to_tray: bool,
 
     #[serde(default = "default_true")]
 
@@ -406,8 +432,6 @@ impl Default for Config {
 
             custom_themes: serde_json::Value::Object(serde_json::Map::new()),
 
-            kanan_cfg_path: String::new(),
-
             patcher_game_path: String::new(),
 
             patcher_hyddwn_enabled: false,
@@ -426,6 +450,12 @@ impl Default for Config {
             launch_cmd_override: String::new(),
 
             pre_patch_cmd: String::new(),
+            post_patch_cmd: String::new(),
+            shared_config_migrated: false,
+            api_enabled: false,
+            api_port: api::DEFAULT_PORT,
+            product_id: default_product_id(),
+            minimize_to_tray: false,
 
             parallel_ops: true,
 
@@ -787,9 +817,21 @@ fn get_config(app: tauri::AppHandle) -> Config {
 
 #[tauri::command]
 
-fn save_config(app: tauri::AppHandle, config: Config) {
+fn save_config(app: tauri::AppHandle, mut config: Config) {
 
     let path = get_config_path(&app);
+
+    // The frontend may still hold a copy loaded before the shared-config migration:
+    // never undo the migration marker or write the moved legacy values back.
+    let migrated_on_disk = fs::read_to_string(&path).ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["shared_config_migrated"].as_bool())
+        .unwrap_or(false);
+    if migrated_on_disk || config.shared_config_migrated {
+        config.shared_config_migrated = true;
+        config.pre_patch_cmd.clear();
+        config.post_patch_cmd.clear();
+    }
 
     if let Ok(content) = serde_json::to_string_pretty(&config) {
 
@@ -811,8 +853,32 @@ fn set_config(app: tauri::AppHandle, config: Config) {
 
     log::set_max_level(log::LevelFilter::Info);
 
+    apply_runtime_settings(&app, &config);
+
     save_config(app, config);
 
+}
+
+/// Whether a "Start with Windows" (HKCU Run) entry exists for mabi-patcher.
+#[tauri::command]
+fn get_start_with_windows() -> bool {
+    mabi_pack2::launcher::autostart::is_enabled()
+}
+
+/// Add/remove the Run entry: the quoted exe path plus `--minimized` (starts in the tray).
+#[tauri::command]
+fn set_start_with_windows(enabled: bool) -> Result<(), String> {
+    mabi_pack2::launcher::autostart::set_enabled(enabled).map_err(|e| e.to_string())
+}
+
+/// Push settings that live outside the config file into the running process:
+/// the Nexon product id and the minimize-to-tray behaviour (+ tray icon visibility).
+fn apply_runtime_settings(app: &tauri::AppHandle, config: &Config) {
+    mabi_pack2::launcher::auth::set_product_id(config.product_id);
+    MINIMIZE_TO_TRAY.store(config.minimize_to_tray, std::sync::atomic::Ordering::Relaxed);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_visible(config.minimize_to_tray);
+    }
 }
 
 
@@ -2267,6 +2333,99 @@ async fn get_preview_ext(
 
 
 
+fn usable_key(k: Option<String>) -> Option<String> {
+    match k {
+        Some(k) if k.is_empty() || k == "Search/Default" || k == "N/A" || k == "UNENCRYPTED" => None,
+        other => other,
+    }
+}
+
+/// Full decrypted bytes of one archive entry, sent as a binary IPC response so the
+/// 3D preview can parse PMG/DDS/GM data in the frontend (as the website preview does).
+#[tauri::command]
+async fn get_entry_bytes(
+    archive_path: String,
+    entry_name: String,
+    key: Option<String>,
+    entries_key: Option<String>,
+    iv0: Option<u32>,
+    h_off: Option<u64>,
+    mode: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let key = usable_key(key);
+    let entries_key = usable_key(entries_key);
+    let bytes = if let (Some(iv), Some(off), Some(m_str)) = (iv0, h_off, mode) {
+        let m = match m_str.as_str() {
+            "Xor"      => encryption::Snow2Mode::Xor,
+            "ModernBE" => encryption::Snow2Mode::ModernBE,
+            "ModernLE" => encryption::Snow2Mode::ModernLE,
+            "LegacyBE" => encryption::Snow2Mode::LegacyBE,
+            "LegacyLE" => encryption::Snow2Mode::LegacyLE,
+            _          => encryption::Snow2Mode::Sub,
+        };
+        common_ext::get_entry_data_exact(&archive_path, &entry_name, key, entries_key, iv, off, m).map_err(|e| e.to_string())?.0
+    } else {
+        common_ext::get_entry_data(&archive_path, &entry_name, key).map_err(|e| e.to_string())?.0
+    };
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Raw bytes of a loose file on disk (binary IPC response).
+#[tauri::command]
+async fn read_loose_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    std::fs::read(&path).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
+}
+
+/// Finds `<texture>.dds` for a loose model: the model's folder first, then up to three
+/// parent folders searched recursively (stopping at a folder named `data`, the user's
+/// home folder or a drive root).
+#[tauri::command]
+async fn find_loose_texture(model_path: String, texture: String) -> Option<String> {
+    // The name comes from the model file, so it must be a bare file name.
+    if texture.is_empty() || texture.contains(['/', '\\', ':']) || texture.contains("..") {
+        return None;
+    }
+    tauri::async_runtime::spawn_blocking(move || find_loose_texture_blocking(&model_path, &texture))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn find_loose_texture_blocking(model_path: &str, texture: &str) -> Option<String> {
+    let wanted = format!("{}.dds", texture.to_lowercase());
+    let matches = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase() == wanted).unwrap_or(false);
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['/', '\\']).to_lowercase();
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| norm(Path::new(&h)));
+    let mut dir = Path::new(model_path).parent()?.to_path_buf();
+    let direct = dir.join(&wanted);
+    if direct.is_file() {
+        return Some(direct.to_string_lossy().into_owned());
+    }
+    let mut searched: Option<PathBuf> = None;
+    for _ in 0..4 {
+        let skip = searched.clone();
+        let found = walkdir::WalkDir::new(&dir)
+            .max_depth(8)
+            .into_iter()
+            // Don't walk the subtree the previous level already covered.
+            .filter_entry(|e| skip.as_deref() != Some(e.path()))
+            .filter_map(|e| e.ok())
+            .take(50_000)
+            .find(|e| e.file_type().is_file() && matches(e.path()));
+        if let Some(e) = found {
+            return Some(e.path().to_string_lossy().into_owned());
+        }
+        let is_data = dir.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("data")).unwrap_or(false);
+        let parent = dir.parent()?.to_path_buf();
+        if is_data || home.as_deref() == Some(norm(&dir).as_str()) || parent.parent().is_none() {
+            break;
+        }
+        searched = Some(dir);
+        dir = parent;
+    }
+    None
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 
 pub struct PmgGeometry {
@@ -3313,6 +3472,13 @@ fn get_app_exe_dir() -> String {
 
 
 
+/// The app version (from gui/src-tauri/Cargo.toml, kept in step with tauri.conf.json
+/// by scripts/set-version). The GUI shows it in the title and sidebar tag.
+#[tauri::command]
+fn get_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 #[tauri::command]
 
 fn get_all_salts() -> Vec<String> {
@@ -4051,16 +4217,256 @@ fn get_mod_template() -> String {
 
 }
 
+// ── Website mod catalog (https://shaggyze.website/mabipatcher/mods) ─────────
+//
+// The website's Mods page is a Vite SPA: its catalog is an array literal baked
+// into the page's `assets/index-*.js` bundle (no JSON list endpoint), and a
+// package is built server-side by `POST <origin>/api/pack` with
+// `{"selected":[ids],"format":"it"|"pack"}`, which returns the archive bytes.
+// These commands run in Rust so the webview's CORS policy doesn't apply.
 
+/// `mods/web/` next to the exe — where website packages are installed.
+fn web_mods_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mods")))
+        .unwrap_or_else(|| std::path::Path::new("mods").to_path_buf())
+        .join("web")
+}
 
-/// Return the current API server port.
+/// `https://host/path` → `https://host`.
+fn url_origin(url: &str) -> String {
+    match url.find("://") {
+        Some(i) => match url[i + 3..].find('/') {
+            Some(j) => url[..i + 3 + j].to_string(),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    }
+}
 
+fn http_get_text(url: &str) -> Result<String, String> {
+    match ureq::get(url).timeout(std::time::Duration::from_secs(30)).call() {
+        Ok(r) => r.into_string().map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(code, _)) => Err(format!("HTTP {} from {}", code, url)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Convert a minified JS array/object literal (unquoted keys, backtick or
+/// quoted strings, `!0`/`!1` booleans) into JSON text.
+fn js_literal_to_json(src: &str) -> Result<String, String> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len() + src.len() / 4);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' || c == '"' || c == '\'' {
+            let mut s = String::new();
+            i += 1;
+            while i < chars.len() && chars[i] != c {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    s.push(match chars[i] { 'n' => '\n', 't' => '\t', 'r' => '\r', o => o });
+                } else if c == '`' && chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+                    return Err("template expression in catalog string".into());
+                } else {
+                    s.push(chars[i]);
+                }
+                i += 1;
+            }
+            i += 1; // closing quote
+            out.push_str(&serde_json::to_string(&s).map_err(|e| e.to_string())?);
+        } else if c == '!' && matches!(chars.get(i + 1), Some('0') | Some('1')) {
+            out.push_str(if chars[i + 1] == '0' { "true" } else { "false" });
+            i += 2;
+        } else if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$') { i += 1; }
+            let ident: String = chars[start..i].iter().collect();
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() { j += 1; }
+            if chars.get(j) == Some(&':') {
+                out.push_str(&serde_json::to_string(&ident).map_err(|e| e.to_string())?);
+            } else if matches!(ident.as_str(), "true" | "false" | "null") {
+                out.push_str(&ident);
+            } else {
+                return Err(format!("unsupported identifier `{}` in catalog", ident));
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Find the mod catalog array (`[{id:1,name:…,category:…},…]`) in a bundle.
+fn extract_catalog_literal(js: &str) -> Option<&str> {
+    let bytes = js.as_bytes();
+    let mut from = 0;
+    while let Some(off) = js[from..].find("[{id:") {
+        let start = from + off;
+        // Walk to the matching `]`, skipping string contents.
+        let (mut depth, mut i, mut quote): (i32, usize, u8) = (0, start, 0);
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quote != 0 {
+                if b == b'\\' { i += 1; } else if b == quote { quote = 0; }
+            } else {
+                match b {
+                    b'`' | b'"' | b'\'' => quote = b,
+                    b'[' | b'{' => depth += 1,
+                    b']' | b'}' => { depth -= 1; if depth == 0 { break; } }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        if depth == 0 && i < bytes.len() {
+            let lit = &js[start..=i];
+            let head = &lit[..lit.len().min(400)];
+            if head.contains("name:") && head.contains("category:") { return Some(lit); }
+        }
+        from = start + 5;
+    }
+    None
+}
+
+/// Fetch the website's mod catalog. `url` may be a JSON endpoint (returned
+/// as-is) or the Mods page itself, whose JS bundle is scanned for the catalog.
 #[tauri::command]
+fn fetch_web_mods_catalog(url: String) -> Result<serde_json::Value, String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("catalog URL must be http(s)".into());
+    }
+    let body = http_get_text(&url)?;
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        return serde_json::from_str(trimmed).map_err(|e| e.to_string());
+    }
+    // HTML page: locate the module bundle `…/assets/index-<hash>.js`.
+    let pos = body.find("assets/index-").ok_or("no app bundle referenced by the mods page")?;
+    let s = body[..pos].rfind(|c| c == '"' || c == '\'').map(|p| p + 1).unwrap_or(pos);
+    let e = body[pos..].find(|c| c == '"' || c == '\'').map(|p| pos + p).ok_or("malformed bundle URL")?;
+    let src = &body[s..e];
+    let bundle_url = if src.starts_with("http") {
+        src.to_string()
+    } else if src.starts_with('/') {
+        format!("{}{}", url_origin(&url), src)
+    } else {
+        format!("{}/{}", url.rsplit_once('/').map(|(b, _)| b).unwrap_or(&url), src)
+    };
+    let js = http_get_text(&bundle_url)?;
+    let lit = extract_catalog_literal(&js).ok_or("mod catalog not found in the site bundle")?;
+    let json = js_literal_to_json(lit)?;
+    serde_json::from_str(&json).map_err(|e| format!("catalog parse error: {}", e))
+}
 
+/// Build one website mod via `POST pack_url` and save it to `mods/web/`.
+/// Returns the saved file path.
+#[tauri::command]
+fn install_web_mod(pack_url: String, id: u32, name: String, format: String) -> Result<String, String> {
+    if format != "it" && format != "pack" { return Err("format must be 'it' or 'pack'".into()); }
+    if !pack_url.starts_with("https://") && !pack_url.starts_with("http://") {
+        return Err("pack URL must be http(s)".into());
+    }
+    let req = serde_json::json!({ "selected": [id], "format": format }).to_string();
+    let resp = match ureq::post(&pack_url)
+        .timeout(std::time::Duration::from_secs(180))
+        .set("Content-Type", "application/json")
+        .send_string(&req)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let msg: String = r.into_string().unwrap_or_default().chars().take(200).collect();
+            return Err(if code == 401 || code == 403 {
+                format!("HTTP {}: the website requires a logged-in account to build packages", code)
+            } else {
+                format!("HTTP {}: {}", code, msg.trim())
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    if resp.content_type().starts_with("text/html") {
+        return Err("the website returned a web page instead of a package".into());
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), 1 << 30), &mut bytes).map_err(|e| e.to_string())?;
+    if bytes.is_empty() { return Err("the website returned an empty package".into()); }
+    let dir = web_mods_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = name.chars()
+        .map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' })
+        .collect::<String>().trim().chars().take(80).collect();
+    let dest = dir.join(format!("MOD{:04} - {}.{}", id, safe, format));
+    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Ids of website mods present in `mods/web/` (files named `MOD0001 - ….it`).
+#[tauri::command]
+fn list_installed_web_mods() -> Vec<u32> {
+    let mut ids: Vec<u32> = std::fs::read_dir(web_mods_dir())
+        .map(|rd| rd.filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                if n.len() >= 7 && n.starts_with("MOD") { n[3..7].parse::<u32>().ok() } else { None }
+            })
+            .collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Delete an installed website mod's files from `mods/web/`.
+#[tauri::command]
+fn remove_web_mod(id: u32) -> Result<u32, String> {
+    let prefix = format!("MOD{:04}", id);
+    let mut removed = 0;
+    for e in std::fs::read_dir(web_mods_dir()).map_err(|e| e.to_string())?.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+
+
+/// The in-app REST API server: (bound port, stop flag) while running.
+static API_SERVER: std::sync::Mutex<Option<(u16, std::sync::Arc<std::sync::atomic::AtomicBool>)>> = std::sync::Mutex::new(None);
+
+/// Return the port the in-app API is running on, or 0 when it is off.
+#[tauri::command]
 fn get_api_port() -> u16 {
+    API_SERVER.lock().unwrap().as_ref().map(|(p, _)| *p).unwrap_or(0)
+}
 
-    api::DEFAULT_PORT
+/// Start the in-app REST API on 127.0.0.1:`port` (restarting it if the port changed).
+#[tauri::command]
+fn api_start(port: u16) -> Result<u16, String> {
+    let mut guard = API_SERVER.lock().unwrap();
+    if let Some((p, stop)) = guard.as_ref() {
+        if *p == port { return Ok(port); }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    *guard = None;
+    let (bound, stop) = api::spawn_bound("127.0.0.1", port).map_err(|e| e.to_string())?;
+    log::info!("[API] Running on http://127.0.0.1:{}", bound);
+    *guard = Some((bound, stop));
+    Ok(bound)
+}
 
+/// Stop the in-app REST API if it is running.
+#[tauri::command]
+fn api_stop() {
+    if let Some((_, stop)) = API_SERVER.lock().unwrap().take() {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        log::info!("[API] Stopped");
+    }
 }
 
 
@@ -4070,72 +4476,25 @@ fn get_api_port() -> u16 {
 
 
 /// Serializable session snapshot passed between frontend and commands.
+/// Same shape as the core NexonSession (extra cookies default when absent).
+pub type SessionInfo = mabi_pack2::launcher::auth::NexonSession;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-
-pub struct SessionInfo {
-
-    pub access_token: String,
-
-    pub g_access_token: String,
-
-    pub session_token: String,
-
-    pub hashed_user_id: String,
-
-}
-
-
-
-impl From<mabi_pack2::launcher::auth::NexonSession> for SessionInfo {
-
-    fn from(s: mabi_pack2::launcher::auth::NexonSession) -> Self {
-
-        Self {
-
-            access_token: s.access_token,
-
-            g_access_token: s.g_access_token,
-
-            session_token: s.session_token,
-
-            hashed_user_id: s.hashed_user_id,
-
-        }
-
+/// Map launcher errors to a frontend-friendly value: MFA/CAPTCHA come back as data.
+fn login_response(r: anyhow::Result<mabi_pack2::launcher::auth::LoginResult>) -> Result<serde_json::Value, String> {
+    use mabi_pack2::launcher::auth::AuthError;
+    match r {
+        Ok(result) => Ok(serde_json::json!({ "session": result.session, "expiresIn": result.session_expires_in })),
+        Err(e) => match e.downcast_ref::<AuthError>() {
+            Some(AuthError::MfaRequired { mfa_key, mfa_type }) => Ok(serde_json::json!({
+                "mfa_required": true, "mfa_key": mfa_key, "mfa_type": mfa_type,
+            })),
+            Some(AuthError::CaptchaRequired(code)) => Ok(serde_json::json!({
+                "captcha_required": true, "code": code, "message": e.to_string(),
+            })),
+            _ => Err(e.to_string()),
+        },
     }
-
 }
-
-
-
-impl From<SessionInfo> for mabi_pack2::launcher::auth::NexonSession {
-
-    fn from(s: SessionInfo) -> Self {
-
-        Self {
-
-            access_token: s.access_token,
-
-            g_access_token: s.g_access_token,
-
-            session_token: s.session_token,
-
-            hashed_user_id: s.hashed_user_id,
-
-        }
-
-    }
-
-}
-
-
-
-/// Login with username + password. Returns session info on success.
-
-
-
-/// Import session from Nexon Launcher cookie store.
 
 fn delete_webview_cookies() {
     let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -4149,11 +4508,13 @@ fn delete_webview_cookies() {
     let _ = std::fs::remove_file(&cookies_db);
 }
 
+/// Browser (SSO / Google / email) login in an embedded WebView. Polls the WebView2
+/// cookie store; NxLSession is used directly, TpaSession is exchanged.
 #[tauri::command]
-fn nexon_login_webview(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use tauri::WebviewUrl;
-    use tauri::WebviewWindowBuilder;
-  
+async fn nexon_login_webview(app: tauri::AppHandle, profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    let dev = login_device_id(profile_id.as_deref(), "");
     delete_webview_cookies();
     let window = WebviewWindowBuilder::new(
         &app,
@@ -4162,154 +4523,320 @@ fn nexon_login_webview(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
     )
     .title("Nexon Login")
     .inner_size(500.0, 800.0)
-    .resizable(false)
+    .resizable(true)
     .build()
     .map_err(|e| e.to_string())?;
 
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        if let Ok(session) = mabi_pack2::launcher::auth::import_from_tauri_webview() {
-            let _ = window.close();
-            return Ok(serde_json::json!({
-                "access_token": session.access_token,
-                "session_token": session.session_token
-            }));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if app.get_webview_window("nexon_login").is_none() {
+            return Err("Login window closed".to_string());
+        }
+        let d = dev.clone();
+        let polled = tauri::async_runtime::spawn_blocking(move || mabi_pack2::launcher::auth::poll_tauri_webview(&d))
+            .await
+            .map_err(|e| e.to_string())?;
+        match polled {
+            Ok(Some(session)) => {
+                let _ = window.close();
+                return Ok(serde_json::json!({ "session": session, "expiresIn": 86400 }));
+            }
+            Ok(None) => {}
+            // A rejected TpaSession exchange is final (single-use cookie) — stop and report.
+            Err(e) => {
+                let _ = window.close();
+                return Err(e.to_string());
+            }
         }
     }
 }
 
+/// Import session from the official Nexon Launcher's cookie store.
 #[tauri::command]
-fn launcher_import_session() -> Result<serde_json::Value, String> {
-
-    let result = mabi_pack2::launcher::auth::import_from_nexon_launcher()
-
-        .map_err(|e| e.to_string())?;
-
-    let session: SessionInfo = result.into();
-
+fn launcher_import_session(profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    let dev = login_device_id(profile_id.as_deref(), "");
+    let session = mabi_pack2::launcher::auth::import_from_nexon_launcher(&dev).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "session": session }))
-
 }
 
+/// Device id for a login, matching the CLI (`login_device_id`): the selected
+/// profile's own id (its device tag hashed with the machine id; legacy profiles
+/// with an empty tag keep the machine-only id). With no profile the tag is the
+/// email, like `login --email` without `--profile`.
+fn login_device_id(profile_id: Option<&str>, email: &str) -> String {
+    if let Some(id) = profile_id.filter(|s| !s.is_empty()) {
+        if let Ok(store) = mabi_pack2::launcher::profile::ProfileStore::load() {
+            if let Some(p) = store.get(id) {
+                return p.device_id();
+            }
+        }
+    }
+    mabi_pack2::launcher::auth::device_id(email)
+}
+
+/// Import a Nexon session from the user's installed browsers (Firefox, Chrome,
+/// Edge, Brave). Returns `{ session?, browser?, v20_found, notes }`.
 #[tauri::command]
-fn launcher_login(username: String, password: String, remember: bool, _verification_code: Option<String>) -> Result<serde_json::Value, String> {
-    let result = mabi_pack2::launcher::auth::login(&username, &password, remember)
-        .map_err(|e| e.to_string())?;
-    
-    let tauri_session: SessionInfo = result.session.into();
-
-    Ok(serde_json::json!({
-        "session": tauri_session,
-        "expiresIn": result.session_expires_in
-    }))
+async fn launcher_import_browser(profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dev = login_device_id(profile_id.as_deref(), "");
+        let r = mabi_pack2::launcher::cookies::import_from_browsers(&dev).map_err(|e| e.to_string())?;
+        for note in &r.notes {
+            log::info!("[Launcher] Browser import: {}", note);
+        }
+        serde_json::to_value(&r).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
-
-
-/// Refresh using a stored session token (no password needed).
-
+/// Store a full session (cookies + NxLSession) on a profile, like the CLI does.
 #[tauri::command]
-
-fn launcher_autologin(session_token: String) -> Result<serde_json::Value, String> {
-
-    let result = mabi_pack2::launcher::auth::autologin(&session_token)
-
-        .map_err(|e| e.to_string())?;
-
-    let session: SessionInfo = result.session.into();
-
-    Ok(serde_json::json!({
-
-        "session": session,
-
-        "expiresIn": result.session_expires_in,
-
-    }))
-
+fn launcher_save_profile_session(id: String, session: SessionInfo, expires_in: Option<i32>) -> Result<(), String> {
+    mabi_pack2::launcher::profile::save_session(&id, &session, expires_in.unwrap_or(86400))
+        .map_err(|e| e.to_string())
 }
 
-
-
-/// Fetch a passport token for launching the game.
-
+/// Email/password login. Returns {session} or {mfa_required, mfa_key} or {captcha_required}.
 #[tauri::command]
-
-fn launcher_get_passport(session: SessionInfo) -> Result<String, String> {
-
-    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
-
-    mabi_pack2::launcher::auth::get_passport(&nexon_session).map_err(|e| e.to_string())
-
+async fn launcher_login(username: String, password: String, _remember: Option<bool>, _verification_code: Option<String>, profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dev = login_device_id(profile_id.as_deref(), &username);
+        login_response(mabi_pack2::launcher::auth::login(&username, &password, &dev))
+    }).await.map_err(|e| e.to_string())?
 }
 
+/// Submit the emailed / authenticator code after an MFA challenge.
+/// `profile_id` / `email` must match the `launcher_login` call so the device id does.
+#[tauri::command]
+async fn launcher_login_otp(mfa_key: String, otp: String, profile_id: Option<String>, email: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dev = login_device_id(profile_id.as_deref(), email.as_deref().unwrap_or(""));
+        login_response(mabi_pack2::launcher::auth::login_otp(&mfa_key, &otp, &dev))
+    }).await.map_err(|e| e.to_string())?
+}
 
+/// Refresh using a stored NxLSession (email/password accounts only), with the
+/// profile's own device id.
+#[tauri::command]
+async fn launcher_autologin(session_token: String, profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dev = match profile_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => login_device_id(Some(id), ""),
+            None => mabi_pack2::launcher::auth::device_id(""),
+        };
+        login_response(mabi_pack2::launcher::auth::autologin_with(&session_token, &dev))
+    }).await.map_err(|e| e.to_string())?
+}
+
+// ── Shared launcher config (hooks + update ignore list, shared with CLI/REST) ──
+
+/// Hooks + ignore list from the shared `config.json` next to profiles.json.
+/// Once (on the first load, if the shared config is empty) the GUI's older
+/// per-app values are migrated into it and blanked in the GUI config, so CLI
+/// and GUI agree from then on.
+#[tauri::command]
+fn shared_config_load(app: tauri::AppHandle) -> Result<mabi_pack2::launcher::config::Config, String> {
+    use mabi_pack2::launcher::config::Config as SharedConfig;
+    let mut cfg = SharedConfig::load().map_err(|e| e.to_string())?;
+    let gui_path = get_config_path(&app);
+    let mut old: serde_json::Value = fs::read_to_string(&gui_path).ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    // Migrate at most once: afterwards the shared config is the only source, so
+    // hooks / ignore entries the user clears there stay cleared.
+    if !old.is_object() || old["shared_config_migrated"].as_bool().unwrap_or(false) {
+        return Ok(cfg);
+    }
+    let h = &cfg.hooks;
+    let empty = cfg.ignore.is_empty() && h.before_patch.is_empty() && h.after_patch.is_empty()
+        && h.before_launch.is_empty() && h.after_launch.is_empty();
+    if empty {
+        let text = |k: &str| old[k].as_str().unwrap_or("").trim().to_string();
+        cfg.hooks.before_patch = text("pre_patch_cmd");
+        cfg.hooks.after_patch = text("post_patch_cmd");
+        cfg.hooks.before_launch = text("pre_launch_cmd");
+        cfg.hooks.after_launch = text("post_launch_cmd");
+        cfg.ignore = old["patcher_ignore_list"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        let h = &cfg.hooks;
+        let migrated = !cfg.ignore.is_empty() || !h.before_patch.is_empty() || !h.after_patch.is_empty()
+            || !h.before_launch.is_empty() || !h.after_launch.is_empty();
+        if migrated {
+            cfg.save().map_err(|e| e.to_string())?;
+            log::info!("[Config] Migrated GUI hooks/ignore list into {}", SharedConfig::path().display());
+        }
+    }
+    // Blank the legacy fields and mark the GUI config as migrated.
+    if let Some(obj) = old.as_object_mut() {
+        for k in ["pre_patch_cmd", "post_patch_cmd", "pre_launch_cmd", "post_launch_cmd"] {
+            if obj.contains_key(k) { obj.insert(k.into(), serde_json::Value::String(String::new())); }
+        }
+        if obj.contains_key("patcher_ignore_list") {
+            obj.insert("patcher_ignore_list".into(), serde_json::Value::Array(Vec::new()));
+        }
+        obj.insert("shared_config_migrated".into(), serde_json::Value::Bool(true));
+    }
+    match serde_json::to_string_pretty(&old) {
+        Ok(text) => if let Err(e) = fs::write(&gui_path, text) {
+            log::warn!("[Config] Could not mark GUI config as migrated: {}", e);
+        },
+        Err(e) => log::warn!("[Config] Could not mark GUI config as migrated: {}", e),
+    }
+    Ok(cfg)
+}
+
+/// Save hooks + ignore list to the shared config.
+#[tauri::command]
+fn shared_config_save(config: mabi_pack2::launcher::config::Config) -> Result<(), String> {
+    config.save().map_err(|e| e.to_string())
+}
+
+// ── News feed ─────────────────────────────────────────────────────────────────
+
+/// Nexon news for the active product (Dashboard card).
+#[tauri::command]
+async fn fetch_news() -> Result<Vec<mabi_pack2::launcher::news::NewsItem>, String> {
+    tauri::async_runtime::spawn_blocking(|| mabi_pack2::launcher::news::fetch_news().map_err(|e| e.to_string()))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// Open an http(s) link in the default browser (news items).
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Only http(s) links can be opened".to_string());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+// ── System tray (minimize to tray on close) ──────────────────────────────────
+
+const TRAY_ID: &str = "main";
+static MINIMIZE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tray menu items, kept so the frontend can set their translated labels.
+struct TrayItems {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Create the (initially hidden) tray icon: left click restores the window,
+/// the menu has Show / Quit.
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let show = MenuItem::with_id(app, "tray_show", "Show", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip("mabi-patcher")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => show_main_window(app),
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    let tray = builder.build(app)?;
+    let _ = tray.set_visible(MINIMIZE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed));
+    app.manage(TrayItems { show, quit });
+    Ok(())
+}
+
+/// Set the tray menu's translated labels (called by the frontend after translating).
+#[tauri::command]
+fn set_tray_labels(app: tauri::AppHandle, show: String, quit: String) {
+    if let Some(items) = app.try_state::<TrayItems>() {
+        let _ = items.show.set_text(show);
+        let _ = items.quit.set_text(quit);
+    }
+}
+
+/// Fetch a passport (runs the full account → access → playable → passport chain).
+#[tauri::command]
+async fn launcher_get_passport(session: SessionInfo) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        mabi_pack2::launcher::auth::get_passport(&session).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
 
 /// Check if the game is in maintenance.
-
 #[tauri::command]
-
-fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String> {
-
-    let nexon_session: mabi_pack2::launcher::auth::NexonSession = session.into();
-
-    mabi_pack2::launcher::patch::is_maintenance(&nexon_session).map_err(|e| e.to_string())
-
+async fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        mabi_pack2::launcher::patch::is_maintenance(&session).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
+/// Prefix on command errors meaning "the Nexon session expired and could not be
+/// refreshed". The GUI looks for it and asks the user to log in again.
+const RELOGIN_MARKER: &str = "[RELOGIN] ";
 
+/// Error text for the GUI; session-expired errors carry [`RELOGIN_MARKER`].
+fn auth_err(e: anyhow::Error) -> String {
+    if mabi_pack2::launcher::auth::is_session_expired(&e) {
+        format!("{}{}", RELOGIN_MARKER, e)
+    } else {
+        e.to_string()
+    }
+}
 
-/// Get the latest game version number.
+/// Error for a step that failed after the session may have been refreshed in
+/// place (401 → autologin). A refreshed session is saved to the profile and
+/// returned as `{ message, session }` so the UI replaces its copy; otherwise the
+/// error stays a plain string.
+fn session_err(msg: String, token_before: &str, session: Option<&SessionInfo>, profile_id: Option<&str>) -> serde_json::Value {
+    match session.filter(|s| s.access_token != token_before || s.refreshed_expires_in.is_some()) {
+        Some(s) => {
+            if let Some(id) = profile_id.filter(|i| !i.is_empty()) {
+                if let Err(e) = mabi_pack2::launcher::profile::save_session(id, s, 0) {
+                    log::warn!("[Launcher] Could not save the refreshed session: {}", e);
+                }
+            }
+            serde_json::json!({ "message": msg, "session": s })
+        }
+        None => serde_json::Value::String(msg),
+    }
+}
 
+/// Latest game version: current manifest (branch API) → buildtime → managed version number.
 #[tauri::command]
-
-fn launcher_get_version(_session: SessionInfo) -> Result<i32, String> {
-
-    use std::io::Read;
-
-    let hash = ureq::get("http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash")
-
-        .timeout(std::time::Duration::from_secs(10))
-
-        .call().map_err(|e| e.to_string())?
-
-        .into_string().map_err(|e| e.to_string())?;
-
-    let hash = hash.trim();
-
-    if hash.is_empty() { return Err("empty CDN hash".to_string()); }
-
-    let manifest_url = format!("http://download2.nexon.net/Game/nxl/games/10200/{}", hash);
-
-    let m_resp = ureq::get(&manifest_url)
-
-        .timeout(std::time::Duration::from_secs(15))
-
-        .call().map_err(|e| e.to_string())?;
-
-    let mut m_bytes: Vec<u8> = Vec::new();
-
-    m_resp.into_reader().read_to_end(&mut m_bytes).map_err(|e| e.to_string())?;
-
-    if m_bytes.len() <= 2 { return Err("manifest too short".to_string()); }
-
-    let mut dec = flate2::read::DeflateDecoder::new(&m_bytes[2..]);
-
-    let mut json_bytes = Vec::new();
-
-    dec.read_to_end(&mut json_bytes).map_err(|e| e.to_string())?;
-
-    let manifest: serde_json::Value = serde_json::from_slice(&json_bytes).map_err(|e| e.to_string())?;
-
-    let buildtime = manifest["buildtime"].as_f64()
-
-        .ok_or_else(|| "no buildtime in manifest".to_string())?;
-
-    get_managed_version(buildtime.round() as i64)
-
-        .map(|v| v as i32)
-
-        .ok_or_else(|| "version lookup failed".to_string())
-
+/// Returns `{ version, session }`; `session` is refreshed in place if a 401 forced an autologin.
+async fn launcher_get_version(session: SessionInfo) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use mabi_pack2::launcher::patch;
+        let mut session = session;
+        let hash = patch::remote_manifest_hash(Some(&mut session)).map_err(auth_err)?;
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        ureq::get(&format!("{}{}", patch::CDN_BASE, hash))
+            .timeout(std::time::Duration::from_secs(30))
+            .call().map_err(|e| e.to_string())?
+            .into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let m = patch::Manifest::parse(&hash, &bytes).map_err(|e| e.to_string())?;
+        let version = get_managed_version(m.buildtime.round() as i64)
+            .map(|v| v as i32)
+            .ok_or_else(|| "version lookup failed".to_string())?;
+        Ok(serde_json::json!({ "version": version, "session": session }))
+    }).await.map_err(|e| e.to_string())?
 }
 
 
@@ -4551,6 +5078,34 @@ fn launcher_update_profile_session(
 
 
 
+/// Run the user's custom launch command. Placeholders: {client_dir}, {exe},
+/// {passport}, {args}. The template is split first (quote-aware), then each
+/// token is expanded, so a path with spaces stays one argument; a bare `{args}`
+/// token expands to the separate launch arguments.
+fn launch_custom_command(template: &str, client_dir: &Path, passport: &str, args: &[String]) -> Result<usize, String> {
+    let exe = client_dir.join("Client.exe");
+    let expand = |t: &str| t
+        .replace("{client_dir}", &client_dir.to_string_lossy())
+        .replace("{exe}", &exe.to_string_lossy())
+        .replace("{passport}", passport)
+        .replace("{args}", &args.join(" "));
+    let mut parts: Vec<String> = Vec::new();
+    for tok in mabi_pack2::launcher::launch::split_command_line(template) {
+        if tok == "{args}" { parts.extend(args.iter().cloned()); } else { parts.push(expand(&tok)); }
+    }
+    let (prog, rest) = parts.split_first().ok_or_else(|| "Empty launch command".to_string())?;
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(rest).current_dir(client_dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0008); // DETACHED_PROCESS
+    }
+    log::info!("[Launcher] Direct launch (custom): {} ({} args)", prog, rest.len());
+    cmd.spawn().map_err(|e| format!("Launch failed: {}", e))?;
+    Ok(rest.len())
+}
+
 /// Fetch launch config and spawn Client.exe. Returns launch argument info.
 
 /// When login_ip is provided (custom/hyddwn server): skips Nexon auth API entirely.
@@ -4558,7 +5113,7 @@ fn launcher_update_profile_session(
 
 #[tauri::command]
 
-fn launcher_launch(
+async fn launcher_launch(
 
     session: Option<SessionInfo>,
 
@@ -4576,114 +5131,125 @@ fn launcher_launch(
 
     use_nexon_launcher: Option<bool>,
 
-) -> Result<serde_json::Value, String> {
+    profile_id: Option<String>,
 
-    use std::path::Path;
+    profile_name: Option<String>,
 
-    use mabi_pack2::launcher::launch as launcher_mod;
+) -> Result<serde_json::Value, serde_json::Value> {
+    // launch_official does blocking HTTP and waits up to ~63 s on the SDK pipe,
+    // and the hooks run synchronously: keep all of it off the async runtime.
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, serde_json::Value> {
 
-    let dir = Path::new(&client_dir);
+        use std::path::Path;
 
-    if !dir.join("Client.exe").exists() {
+        use mabi_pack2::launcher::launch as launcher_mod;
 
-        return Err(format!("Client.exe not found in: {}", client_dir));
+        let dir = Path::new(&client_dir);
 
-    }
+        if !dir.join("Client.exe").exists() {
 
-    // Run pre-launch hook
-    if let Some(ref cmd) = pre_launch_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Err(format!("Client.exe not found in: {}", client_dir).into());
 
-        launcher_mod::run_hook_cmd(cmd, dir).map_err(|e| format!("Pre-launch hook failed: {}", e))?;
+        }
 
-    }
+        // Run pre-launch hook
+        if let Some(ref cmd) = pre_launch_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
 
-    let result = if let Some(ip) = login_ip.as_ref().filter(|s| !s.is_empty()) {
+            launcher_mod::run_hook(cmd, dir, profile_name.as_deref().unwrap_or("")).map_err(|e| format!("Pre-launch hook failed: {}", e))?;
 
-        let port = login_port.unwrap_or(11000);
+        }
 
-        let args = vec![
-            format!("/login {}:{}", ip, port),
-            "/P:0".to_string(),
-        ];
+        // Session after the official flow (possibly refreshed), kept if a later step fails.
+        let token_before = session.as_ref().map(|s| s.access_token.clone()).unwrap_or_default();
+        let mut launched_session: Option<SessionInfo> = None;
 
-        launcher_mod::launch_direct(dir, "0", &args, launch_cmd_override.as_deref())
-            .map_err(|e| e.to_string())?;
+        let result = if let Some(ip) = login_ip.as_ref().filter(|s| !s.is_empty()) {
 
-        serde_json::json!({
-            "executable": "Client.exe",
-            "argumentCount": 2,
-            "patchAvailable": false,
-        })
+            let port = login_port.unwrap_or(11000);
 
-    } else if use_nexon_launcher.unwrap_or(false) {
+            let args = vec![
+                format!("/login {}:{}", ip, port),
+                "/P:0".to_string(),
+            ];
 
-        let launcher_paths = [
-            std::env::var("LOCALAPPDATA").unwrap_or_default() + r"\Programs\Nexon\Nexon Launcher\NexonLauncher.exe",
-            r"C:\Program Files (x86)\Nexon\Nexon Launcher\NexonLauncher.exe".to_string(),
-        ];
+            match launch_cmd_override.as_deref().filter(|s| !s.trim().is_empty()) {
+                // Custom command: parsed here with quote-aware splitting so paths with spaces work.
+                Some(over) => { launch_custom_command(over, dir, "0", &args)?; }
+                None => {
+                    launcher_mod::launch_direct(dir, "0", &args, None).map_err(|e| e.to_string())?;
+                }
+            }
 
-        let launcher_exe = launcher_paths.iter()
-            .find(|p| std::path::Path::new(p.as_str()).exists())
-            .ok_or_else(|| "Nexon Launcher not found. Install it or use Direct mode.".to_string())?;
+            serde_json::json!({
+                "executable": "Client.exe",
+                "argumentCount": 2,
+                "patchAvailable": false,
+            })
 
-        std::process::Command::new(launcher_exe)
-            .arg("--game=10200")
-            .spawn()
-            .map_err(|e| format!("Failed to start Nexon Launcher: {}", e))?;
+        } else if use_nexon_launcher.unwrap_or(false) {
 
-        serde_json::json!({
-            "executable": "NexonLauncher.exe",
-            "argumentCount": 1,
-            "patchAvailable": false,
-        })
+            let launcher_paths = [
+                std::env::var("LOCALAPPDATA").unwrap_or_default() + r"\Programs\Nexon\Nexon Launcher\NexonLauncher.exe",
+                r"C:\Program Files (x86)\Nexon\Nexon Launcher\NexonLauncher.exe".to_string(),
+            ];
 
-    } else {
+            let launcher_exe = launcher_paths.iter()
+                .find(|p| std::path::Path::new(p.as_str()).exists())
+                .ok_or_else(|| "Nexon Launcher not found. Install it or use Direct mode.".to_string())?;
 
-        let session = session.ok_or_else(|| "Login required for official Nexon server".to_string())?;
+            std::process::Command::new(launcher_exe)
+                .arg(format!("--game={}", mabi_pack2::launcher::auth::product_id()))
+                .spawn()
+                .map_err(|e| format!("Failed to start Nexon Launcher: {}", e))?;
 
-        use mabi_pack2::launcher::auth;
+            serde_json::json!({
+                "executable": "NexonLauncher.exe",
+                "argumentCount": 1,
+                "patchAvailable": false,
+            })
 
-        let mut nexon_session: auth::NexonSession = session.into();
+        } else {
 
-        let config = match launcher_mod::fetch_launch_config(&nexon_session) {
-            Ok(c) => c,
-            Err(e) if e.to_string().contains("401") => {
-                let refreshed = auth::autologin(&nexon_session.session_token)
-                    .map_err(|re| format!("Launch failed (401) and token refresh failed: {}", re))?;
-                nexon_session = refreshed.session;
-                launcher_mod::fetch_launch_config(&nexon_session).map_err(|e| e.to_string())?
-            },
-            Err(e) => return Err(e.to_string()),
+            let mut session = session;
+            fill_session_device_id(&mut session, profile_id.as_deref());
+            let mut nexon_session = session.ok_or_else(|| "Login required for official Nexon server".to_string())?;
+            // Official flow: account → access → playable → passport (401 → autologin + retry),
+            // then the nexon_client.exe stub + nexon_x64.dll shim + SDK pipe so Client.exe
+            // can fetch its ticket the way it does from the official launcher.
+            let exe = dir.join("Client.exe");
+            let info = match launcher_mod::launch_official(&mut nexon_session, &exe, false) {
+                Ok(info) => info,
+                // The session could not be refreshed: ask the user to log in again
+                // instead of showing a bare error.
+                Err(e) if mabi_pack2::launcher::auth::is_session_expired(&e) => {
+                    log::warn!("[Launcher] Session refresh failed: {}", e);
+                    return Ok(serde_json::json!({ "relogin_required": true, "error": e.to_string() }));
+                }
+                Err(e) => return Err(session_err(auth_err(e), &token_before, Some(&nexon_session), profile_id.as_deref())),
+            };
+            launched_session = Some(nexon_session.clone());
+            serde_json::json!({
+                "executable": info.executable,
+                "argumentCount": info.argument_count,
+                "patchAvailable": info.patch_available,
+                "pid": info.pid,
+                "sessionExpiresIn": info.session_expires_in,
+                "session": nexon_session,
+            })
+
         };
 
-        let passport = auth::get_passport(&nexon_session).map_err(|e| e.to_string())?;
+        // Run post-launch hook
+        if let Some(ref cmd) = post_launch_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
 
-        let patch_available = config.patch_available;
+            launcher_mod::run_hook(cmd, dir, profile_name.as_deref().unwrap_or("")).map_err(|e| {
+                session_err(format!("Post-launch hook failed: {}", e), &token_before, launched_session.as_ref(), profile_id.as_deref())
+            })?;
 
-        let arg_count = launcher_mod::launch_direct(
-            dir,
-            &passport,
-            &config.arguments,
-            launch_cmd_override.as_deref(),
-        ).map_err(|e| e.to_string())?;
+        }
 
-        serde_json::json!({
-            "executable": config.executable_path,
-            "argumentCount": arg_count,
-            "patchAvailable": patch_available,
-        })
-
-    };
-
-    // Run post-launch hook
-    if let Some(ref cmd) = post_launch_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
-
-        launcher_mod::run_hook_cmd(cmd, dir).map_err(|e| format!("Post-launch hook failed: {}", e))?;
-
-    }
-
-    Ok(result)
-
+        Ok(result)
+    }).await.map_err(|e| e.to_string())?
 }
 
 
@@ -4950,9 +5516,9 @@ fn get_features_from_archive(archive: String, key: Option<String>) -> Result<ser
 
     // Extract only features.xml.compiled to a temp dir, then parse
 
-    let tmp_dir = std::env::temp_dir().join(format!("mabi_feat_load_{}", std::process::id()));
-
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    // Unique, pre-wiped temp dir removed on drop (every error path included).
+    let tmp_guard = VfsTempDir::new("mabi_feat_load")?;
+    let tmp_dir = tmp_guard.0.clone();
 
     let tmp_str = tmp_dir.to_string_lossy().to_string();
 
@@ -5046,9 +5612,9 @@ fn save_features_to_archive(
 
     let salts = mabi_pack2::load_salts();
 
-    let tmp_dir = std::env::temp_dir().join(format!("mabi_feat_{}", std::process::id()));
-
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    // Unique, pre-wiped temp dir removed on drop (every error path included).
+    let tmp_guard = VfsTempDir::new("mabi_feat")?;
+    let tmp_dir = tmp_guard.0.clone();
 
     let tmp_str = tmp_dir.to_string_lossy().to_string();
 
@@ -5064,23 +5630,20 @@ fn save_features_to_archive(
 
 
 
-    // Write the re-encoded features.xml.compiled
-
-    let candidates = [
-
-        tmp_dir.join("data").join("xml").join("features.xml.compiled"),
-
-        tmp_dir.join("xml").join("features.xml.compiled"),
-
-        tmp_dir.join("features.xml.compiled"),
-
-    ];
-
-    let dest = candidates.iter()
-
-        .find(|p| p.exists())
-
-        .ok_or_else(|| "Could not find features.xml.compiled in extracted data".to_string())?;
+    // Write the re-encoded features.xml.compiled wherever it was extracted
+    // (data/features.xml.compiled in the client; the path varies, as in load).
+    let dest_buf = walkdir::WalkDir::new(&tmp_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_type().is_file() && e.file_name().to_string_lossy().to_lowercase() == "features.xml.compiled")
+        .map(|e| e.into_path());
+    let dest = match dest_buf.as_ref() {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err("Could not find features.xml.compiled in extracted data".to_string());
+        }
+    };
 
 
 
@@ -5506,126 +6069,6 @@ fn apply_mod(
 
 
 
-/// Generate a .mod TOML file from selected entries in a uotiaralist.ini.
-
-/// `ini_path`: path to uotiaralist.ini
-
-/// `it_path`: path to the source uotiara .it archive (written into [[files]] source fields)
-
-/// `selected_ids`: array of mod IDs (1-based) to include
-
-/// Returns the TOML string of the generated .mod file.
-
-#[tauri::command]
-
-fn ini_to_mod(ini_path: String, it_path: String, selected_ids: Vec<u32>) -> Result<String, String> {
-
-    let text = std::fs::read_to_string(&ini_path)
-
-        .map_err(|e| format!("cannot read {}: {}", ini_path, e))?;
-
-
-
-    // Minimal INI parser (duplicates the api.rs helper — keep them independent)
-
-    let mut sections: std::collections::HashMap<String, std::collections::HashMap<String, String>> = Default::default();
-
-    let mut section = String::new();
-
-    for line in text.lines() {
-
-        let line = line.trim();
-
-        if line.is_empty() || line.starts_with(';') || line.starts_with('#') { continue; }
-
-        if line.starts_with('[') && line.ends_with(']') {
-
-            section = line[1..line.len()-1].to_string();
-
-        } else if let Some(eq) = line.find('=') {
-
-            sections.entry(section.clone()).or_default()
-
-                .insert(line[..eq].trim().to_string(), line[eq+1..].trim().to_string());
-
-        }
-
-    }
-
-
-
-    let mods_sec = sections.get("Mods").cloned().unwrap_or_default();
-
-    let selected_set: std::collections::HashSet<u32> = selected_ids.iter().cloned().collect();
-
-
-
-    let mut toml = format!(
-
-        "[meta]\nname = \"uotiara-custom\"\nversion = \"1.0.0\"\nauthor = \"uotiara\"\ndescription = \"Auto-generated from {}\"\n\n",
-
-        std::path::Path::new(&ini_path).file_name().and_then(|n| n.to_str()).unwrap_or("uotiaralist.ini")
-
-    );
-
-
-
-    for id in &selected_ids {
-
-        let name = match mods_sec.get(&id.to_string()) {
-
-            Some(n) if !n.is_empty() => n.clone(),
-
-            _ => continue,
-
-        };
-
-        let file_sec = sections.get(&name).cloned().unwrap_or_default();
-
-        if file_sec.is_empty() { continue; }
-
-
-
-        toml.push_str(&format!("# Mod {}: {}\n", id, name));
-
-        let mut file_nums: Vec<u32> = file_sec.keys()
-
-            .filter_map(|k| k.strip_prefix("File").and_then(|n| n.parse().ok()))
-
-            .collect();
-
-        file_nums.sort_unstable();
-
-
-
-        for fnum in file_nums {
-
-            if let Some(path) = file_sec.get(&format!("File{}", fnum)) {
-
-                let norm = path.replace('\\', "/").trim_start_matches('/').to_string();
-
-                toml.push_str(&format!(
-
-                    "[[files]]\narchive_path = \"{}\"\nop = \"replace\"\nsource = \"{}\"\n\n",
-
-                    norm, it_path.replace('\\', "/")
-
-                ));
-
-            }
-
-        }
-
-    }
-
-    let _ = selected_set; // suppress unused warning
-
-    Ok(toml)
-
-}
-
-
-
 /// VFS change descriptor — one op per file operation.
 
 #[derive(serde::Deserialize, Debug)]
@@ -5640,11 +6083,42 @@ enum VfsChange {
 
     Add { dest: String, local_src: String },
 
-    Merge { src_archive: String, src_key: Option<String> },
+    /// `skip` / `rename` hold per-entry conflict decisions made in the List tab
+    /// (entry paths compared case-insensitively with `/` separators).
+    Merge {
+        src_archive: String,
+        src_key: Option<String>,
+        #[serde(default)]
+        skip: Vec<String>,
+        #[serde(default)]
+        rename: std::collections::HashMap<String, String>,
+    },
 
 }
 
 
+
+/// Fresh, uniquely named temp folder for one VFS operation, deleted on drop
+/// (success and every error path alike).
+struct VfsTempDir(PathBuf);
+
+impl VfsTempDir {
+    fn new(tag: &str) -> Result<Self, String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("{}_{}_{}", tag, std::process::id(), n));
+        // A leftover from a crashed run with the same pid must not leak into this one.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(VfsTempDir(dir))
+    }
+}
+
+impl Drop for VfsTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Apply a list of VFS changes (delete/rename/add/merge) to an archive in-place.
 
@@ -5666,9 +6140,9 @@ fn apply_vfs_changes(
 
     let salts = mabi_pack2::load_salts();
 
-    let tmp_dir = std::env::temp_dir().join(format!("mabi_vfs_{}", std::process::id()));
+    let tmp_guard = VfsTempDir::new("mabi_vfs")?;
 
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_dir = tmp_guard.0.clone();
 
     let tmp_str = tmp_dir.to_string_lossy().to_string();
 
@@ -5682,7 +6156,7 @@ fn apply_vfs_changes(
 
         vec![], None, false, false, false, None,
 
-    ).map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+    ).map_err(|e| e.to_string())?;
 
 
 
@@ -5690,10 +6164,15 @@ fn apply_vfs_changes(
 
 
 
-    let normalize = |p: &str| -> String {
-
-        p.replace('\\', "/").trim_start_matches('/').to_string()
-
+    // Entry path -> file under `root`, refusing `..`, absolute and drive paths.
+    let join = |root: &Path, p: &str| -> Result<PathBuf, String> {
+        mabi_pack2::common::safe_join(root, p.trim_start_matches(['/', '\\'])).map_err(|e| e.to_string())
+    };
+    // Same for a new entry name (rename / add target): also must be a valid entry path.
+    let join_new = |root: &Path, p: &str| -> Result<PathBuf, String> {
+        let rel = p.trim_start_matches(['/', '\\']);
+        mabi_pack2::common::validate_entry_path(rel).map_err(|e| e.to_string())?;
+        join(root, rel)
     };
 
 
@@ -5704,9 +6183,7 @@ fn apply_vfs_changes(
 
             VfsChange::Delete { path } => {
 
-                let rel = normalize(path);
-
-                let target = tmp_dir.join(&rel);
+                let target = join(&tmp_dir, path)?;
 
                 if target.exists() {
 
@@ -5720,9 +6197,9 @@ fn apply_vfs_changes(
 
             VfsChange::Rename { from, to } => {
 
-                let src = tmp_dir.join(normalize(from));
+                let src = join(&tmp_dir, from)?;
 
-                let dst = tmp_dir.join(normalize(to));
+                let dst = join_new(&tmp_dir, to)?;
 
                 if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
 
@@ -5738,7 +6215,7 @@ fn apply_vfs_changes(
 
             VfsChange::Add { dest, local_src } => {
 
-                let dst = tmp_dir.join(normalize(dest));
+                let dst = join_new(&tmp_dir, dest)?;
 
                 if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
 
@@ -5748,11 +6225,17 @@ fn apply_vfs_changes(
 
             }
 
-            VfsChange::Merge { src_archive, src_key } => {
+            VfsChange::Merge { src_archive, src_key, skip, rename } => {
 
-                let merge_tmp = std::env::temp_dir().join(format!("mabi_vfs_merge_{}", std::process::id()));
+                let key_of = |p: &str| p.replace(['\\', '₩', '¥'], "/").trim_start_matches('/').to_lowercase();
 
-                std::fs::create_dir_all(&merge_tmp).map_err(|e| e.to_string())?;
+                let skip: std::collections::HashSet<String> = skip.iter().map(|p| key_of(p)).collect();
+
+                let rename: std::collections::HashMap<String, &String> = rename.iter().map(|(k, v)| (key_of(k), v)).collect();
+
+                let merge_guard = VfsTempDir::new("mabi_vfs_merge")?;
+
+                let merge_tmp = merge_guard.0.clone();
 
                 let merge_str = merge_tmp.to_string_lossy().to_string();
 
@@ -5762,7 +6245,7 @@ fn apply_vfs_changes(
 
                     vec![], None, false, false, false, None,
 
-                ).map_err(|e| { let _ = std::fs::remove_dir_all(&merge_tmp); e.to_string() })?;
+                ).map_err(|e| e.to_string())?;
 
                 // Copy all files from merge_tmp into tmp_dir (overwrite = newer wins)
 
@@ -5774,7 +6257,17 @@ fn apply_vfs_changes(
 
                         let rel = entry.path().strip_prefix(&merge_tmp).unwrap();
 
-                        let dst = tmp_dir.join(rel);
+                        let rel_key = key_of(&rel.to_string_lossy());
+
+                        if skip.contains(&rel_key) { continue; }
+
+                        let dst = match rename.get(&rel_key) {
+
+                            Some(to) => join_new(&tmp_dir, to)?,
+
+                            None => tmp_dir.join(rel),
+
+                        };
 
                         if let Some(p) = dst.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
 
@@ -5786,7 +6279,7 @@ fn apply_vfs_changes(
 
                 }
 
-                let _ = std::fs::remove_dir_all(&merge_tmp);
+                drop(merge_guard);
 
                 stats["merged"] = (stats["merged"].as_i64().unwrap_or(0) + count as i64).into();
 
@@ -5810,9 +6303,9 @@ fn apply_vfs_changes(
 
     mabi_pack2::pack::run_pack(&tmp_str, &archive, key_str, vec![], false, 0, prefix, None)
 
-        .map_err(|e| { let _ = std::fs::remove_dir_all(&tmp_dir); e.to_string() })?;
+        .map_err(|e| e.to_string())?;
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    drop(tmp_guard);
 
 
 
@@ -5821,20 +6314,6 @@ fn apply_vfs_changes(
 }
 
 
-
-
-
-/// Convert a uotiaralist.ini (or .nsi) into a .mod TOML — frontend-facing alias.
-
-/// it_path defaults to empty; the [[files]] source field can be edited manually.
-
-#[tauri::command]
-
-fn nsi_to_mod(nsi_path: String, selected_ids: Vec<u32>) -> Result<String, String> {
-
-    ini_to_mod(nsi_path, String::new(), selected_ids)
-
-}
 
 
 
@@ -5887,90 +6366,6 @@ fn load_pending_changes(archive: String) -> Result<Vec<serde_json::Value>, Strin
     let raw = fs::read_to_string(&pending_path).map_err(|e| e.to_string())?;
 
     Ok(serde_json::from_str(&raw).unwrap_or_default())
-
-}
-
-
-
-/// Kanan LibLoader mod entry.
-
-#[derive(Serialize, Deserialize, Clone)]
-
-pub struct KananMod {
-
-    pub name: String,
-
-    pub enabled: bool,
-
-}
-
-
-
-/// Read a Kanan LibLoader Loader.cfg (INI-style) and return mod list.
-
-#[tauri::command]
-
-fn read_kanan_cfg(path: String) -> Result<Vec<KananMod>, String> {
-
-    let content = fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-
-    let mut mods: Vec<KananMod> = Vec::new();
-
-    let mut current_name: Option<String> = None;
-
-    for line in content.lines() {
-
-        let line = line.trim();
-
-        if line.starts_with('[') && line.ends_with(']') {
-
-            current_name = Some(line[1..line.len() - 1].trim().to_string());
-
-        } else if let Some(ref name) = current_name {
-
-            if let Some(rest) = line.strip_prefix("Enabled=") {
-
-                let enabled = rest.trim().eq_ignore_ascii_case("true");
-
-                mods.push(KananMod { name: name.clone(), enabled });
-
-                current_name = None;
-
-            }
-
-        }
-
-    }
-
-    Ok(mods)
-
-}
-
-
-
-/// Write updated mod list back to a Kanan LibLoader Loader.cfg.
-
-#[tauri::command]
-
-fn write_kanan_cfg(path: String, mods: Vec<KananMod>) -> Result<(), String> {
-
-    let mut out = String::new();
-
-    for m in &mods {
-
-        out.push('[');
-
-        out.push_str(&m.name);
-
-        out.push_str("]\r\nEnabled=");
-
-        out.push_str(if m.enabled { "true" } else { "false" });
-
-        out.push_str("\r\n\r\n");
-
-    }
-
-    fs::write(&path, out.trim_end()).map_err(|e| format!("Cannot write {}: {}", path, e))
 
 }
 
@@ -6038,14 +6433,18 @@ fn convert_xml_compiled(archive_path: String, entry_path: String, key: Option<St
 
 
 
-    // Emit as human-readable XML. FeatureEntry only carries hash/hash_hex/
+    // Emit as human-readable XML. FeatureEntry carries hash/hash_hex/conditions
 
-    // conditions (no name field) — a feature with no conditions listed is
+    // and a readable name when the embedded name list knows the hash — a feature with no conditions listed is
 
     // enabled by default; ["FALSE"] is how apply_mod/handle_features_save
 
     // represent "disabled" (see their feature-toggle logic).
 
+    // Names come from the embedded list and are plain identifiers, so no escaping is needed.
+    let name_attr = |f: &mabi_pack2::common_ext::FeatureEntry| {
+        f.name.as_deref().map(|n| format!(" name=\"{}\"", n)).unwrap_or_default()
+    };
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<features>\n");
 
     for f in &parsed.features {
@@ -6054,15 +6453,15 @@ fn convert_xml_compiled(archive_path: String, entry_path: String, key: Option<St
 
         if f.conditions.is_empty() {
 
-            xml.push_str(&format!("  <feature hash=\"{}\" enabled=\"{}\" />\n",
+            xml.push_str(&format!("  <feature hash=\"{}\"{} enabled=\"{}\" />\n",
 
-                f.hash_hex, enabled));
+                f.hash_hex, name_attr(f), enabled));
 
         } else {
 
-            xml.push_str(&format!("  <feature hash=\"{}\" enabled=\"{}\">\n",
+            xml.push_str(&format!("  <feature hash=\"{}\"{} enabled=\"{}\">\n",
 
-                f.hash_hex, enabled));
+                f.hash_hex, name_attr(f), enabled));
 
             for c in &f.conditions {
 
@@ -6226,608 +6625,346 @@ struct PatchWorkerEvent {
     parts_total: usize,
 }
 
-struct PartTask {
-    sha1: String,
-    output_path: std::path::PathBuf,
-    filename: String,
-    _part_idx: usize,
-}
+/// Cancel flag for the running patch (Stop button).
+static PATCH_CANCEL: once_cell::sync::Lazy<std::sync::Mutex<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+    once_cell::sync::Lazy::new(Default::default);
+/// Shared pause flag for the running patch (next to PATCH_CANCEL), driven by the
+/// Pause/Resume button; the core honours it in run_patcher.
+static PATCH_PAUSE: once_cell::sync::Lazy<std::sync::Mutex<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+    once_cell::sync::Lazy::new(Default::default);
 
-// Verify a local file by re-compressing each decompressed part and checking SHA1 against manifest objects[].
-// objects: slice of lowercase hex SHA1 strings from manifest (= SHA1 of the zlib-compressed part bytes)
-// part_sizes: decompressed sizes from objects_fsize[] (sum = fsize); if empty, falls back to false (needs download)
-// Returns true = file is intact, false = needs (re-)download
-fn verify_file_parts(full_path: &std::path::Path, objects: &[&str], part_sizes: &[u64]) -> bool {
-    use std::io::Read;
-    use sha1::Digest;
-    if objects.is_empty() || part_sizes.len() != objects.len() { return false; }
-    let f = match std::fs::File::open(full_path) { Ok(f) => f, Err(_) => return false };
-    let mut reader = std::io::BufReader::new(f);
-    for (part_sha1, &part_sz) in objects.iter().zip(part_sizes.iter()) {
-        let mut buf = vec![0u8; part_sz as usize];
-        if reader.read_exact(&mut buf).is_err() { return false; }
-        // Re-compress and SHA1 the result
-        let mut compressed: Vec<u8> = Vec::new();
-        {
-            let mut enc = flate2::write::ZlibEncoder::new(&mut compressed, flate2::Compression::default());
-            use std::io::Write;
-            if enc.write_all(&buf).is_err() { return false; }
-            if enc.finish().is_err() { return false; }
-        }
-        let mut hasher = sha1::Sha1::new();
-        hasher.update(&compressed);
-        let hash = format!("{:x}", hasher.finalize());
-        if hash != *part_sha1 { return false; }
-    }
+#[tauri::command]
+fn patch_cancel() -> bool {
+    PATCH_CANCEL.lock().unwrap().store(true, std::sync::atomic::Ordering::Relaxed);
     true
 }
-fn download_and_decompress(url: &str, output: &std::path::Path) -> Result<(), String> {
-    if output.exists() { return Ok(()); }
-    let resp = ureq::get(url)
-        .timeout(std::time::Duration::from_secs(120))
-        .call()
-        .map_err(|e| format!("GET {}: {}", url, e))?;
-    let mut compressed: Vec<u8> = Vec::new();
-    use std::io::Read;
-    resp.into_reader().read_to_end(&mut compressed)
-        .map_err(|e| format!("read body: {}", e))?;
-    let mut decoder = flate2::read::ZlibDecoder::new(&compressed[..]);
-    let mut decompressed: Vec<u8> = Vec::new();
-    decoder.read_to_end(&mut decompressed)
-        .map_err(|e| format!("zlib decompress: {}", e))?;
-    std::fs::write(output, &decompressed)
-        .map_err(|e| format!("write part: {}", e))?;
-    Ok(())
+
+/// Pause the running patch (workers block before their next file).
+#[tauri::command]
+fn patch_pause() -> bool {
+    PATCH_PAUSE.lock().unwrap().store(true, std::sync::atomic::Ordering::Relaxed);
+    log::info!("[Patcher] Paused");
+    true
 }
 
+/// Resume a paused patch.
 #[tauri::command]
-fn check_patch_version(game_path: String) -> Result<serde_json::Value, String> {
-    use std::io::Read;
-    let game_dir = std::path::Path::new(&game_path);
+fn patch_resume() -> bool {
+    PATCH_PAUSE.lock().unwrap().store(false, std::sync::atomic::Ordering::Relaxed);
+    log::info!("[Patcher] Resumed");
+    true
+}
 
-    // Local hash and local version from patchdata manifest
-    let local_hash = std::fs::read_to_string(game_dir.join("10200.manifest.hash"))
-        .unwrap_or_default().trim().to_string();
+/// Cancel flag of the running file scan ("choose files"), separate from the patch's.
+static SCAN_CANCEL: once_cell::sync::Lazy<std::sync::Mutex<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+    once_cell::sync::Lazy::new(Default::default);
 
-    let local_version: Option<i64> = (|| -> Option<i64> {
-        if local_hash.is_empty() { return None; }
-        let blob_bytes = std::fs::read(game_dir.join(&local_hash)).ok()?;
-        if blob_bytes.len() <= 2 { return None; }
-        let mut dec = flate2::read::DeflateDecoder::new(&blob_bytes[2..]);
-        let mut json_bytes = Vec::new();
-        dec.read_to_end(&mut json_bytes).ok()?;
-        let manifest: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
-        let buildtime = manifest["buildtime"].as_f64()?;
-        get_managed_version(buildtime.round() as i64)
-    })();
+/// Stop the running file scan.
+#[tauri::command]
+fn patch_scan_cancel() -> bool {
+    SCAN_CANCEL.lock().unwrap().store(true, std::sync::atomic::Ordering::Relaxed);
+    true
+}
 
-    // Remote version check: fetch CDN hash, compare with local
-    let remote_version: Option<i64> = (|| -> Option<i64> {
-        let hash_resp = ureq::get("http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash")
-            .timeout(std::time::Duration::from_secs(10))
-            .call().ok()?;
-        let remote_hash = hash_resp.into_string().ok()?.trim().to_string();
-        if remote_hash.is_empty() { return None; }
-        // If remote hash == local hash, version is the same
-        if remote_hash == local_hash { return local_version; }
-        // Download remote manifest (blob is at /Game/nxl/games/10200/{hash})
-        let manifest_url = format!("http://download2.nexon.net/Game/nxl/games/10200/{}", remote_hash);
-        let m_resp = ureq::get(&manifest_url)
-            .timeout(std::time::Duration::from_secs(15))
-            .call().ok()?;
-        let mut m_bytes: Vec<u8> = Vec::new();
-        m_resp.into_reader().read_to_end(&mut m_bytes).ok()?;
-        if m_bytes.len() <= 2 { return None; }
-        let mut dec = flate2::read::DeflateDecoder::new(&m_bytes[2..]);
-        let mut json_bytes = Vec::new();
-        dec.read_to_end(&mut json_bytes).ok()?;
-        let manifest: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
-        let remote_buildtime = manifest["buildtime"].as_f64()?;
-        // Get local buildtime to compare
-        let local_blob = std::fs::read(game_dir.join(&local_hash)).ok()?;
-        if local_blob.len() > 2 {
-            let mut ld = flate2::read::DeflateDecoder::new(&local_blob[2..]);
-            let mut lj = Vec::new();
-            if ld.read_to_end(&mut lj).is_ok() {
-                if let Ok(lm) = serde_json::from_slice::<serde_json::Value>(&lj) {
-                    let local_bt = lm["buildtime"].as_f64().unwrap_or(0.0);
-                    // If CDN manifest is older/same, we are already at latest - return local
-                    if remote_buildtime <= local_bt { return local_version; }
+/// Set while a patch or scan runs: only one may touch the install (and the
+/// shared Stop / Pause flags) at a time.
+static PATCH_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Error code returned when a patch/scan is already running (the UI translates it).
+const PATCH_BUSY_ERR: &str = "patch_busy";
+
+/// Holds PATCH_RUNNING for one patch/scan; released on drop (any return path).
+struct PatchRunGuard;
+
+impl PatchRunGuard {
+    fn acquire() -> Result<Self, String> {
+        PATCH_RUNNING
+            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .map(|_| PatchRunGuard)
+            .map_err(|_| PATCH_BUSY_ERR.to_string())
+    }
+}
+
+impl Drop for PatchRunGuard {
+    fn drop(&mut self) {
+        PATCH_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Fresh cancel + pause flags for a new patch run (shared with Stop / Pause).
+fn new_patch_flags() -> (std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *PATCH_CANCEL.lock().unwrap() = cancel.clone();
+    *PATCH_PAUSE.lock().unwrap() = pause.clone();
+    (cancel, pause)
+}
+
+/// Fill in the session's device id from the profile (same rule as the CLI's
+/// profile_session): only when the session has none and the profile has a tag.
+fn fill_session_device_id(session: &mut Option<SessionInfo>, profile_id: Option<&str>) {
+    if let (Some(s), Some(id)) = (session.as_mut(), profile_id.filter(|s| !s.is_empty())) {
+        if s.device_id.is_empty() {
+            if let Ok(store) = mabi_pack2::launcher::profile::ProfileStore::load() {
+                if let Some(p) = store.get(id).filter(|p| !p.device_tag.is_empty()) {
+                    s.device_id = p.device_id();
                 }
             }
         }
-        get_managed_version(remote_buildtime.round() as i64)
-    })();
+    }
+}
 
-    let needs_update = match (local_version, remote_version) {
-        (Some(lv), Some(rv)) => lv < rv,
-        _ => false,
+/// Scan an install and list the files that need updating (no download), for the
+/// "choose which files to update" dialog. Returns `{ need: [NeedItem], session }`.
+#[tauri::command]
+async fn patch_scan(
+    game_path: String,
+    verify: Option<bool>,
+    max_workers: Option<u32>,
+    ignore: Option<Vec<String>>,
+    session: Option<SessionInfo>,
+    profile_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use mabi_pack2::launcher::patch::{self, PatchMode, PatchOptions};
+    let guard = PatchRunGuard::acquire()?;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *SCAN_CANCEL.lock().unwrap() = cancel.clone();
+    let opts = PatchOptions {
+        mode: if verify == Some(true) { PatchMode::Verify } else { PatchMode::Update },
+        max_workers: max_workers.unwrap_or(8).clamp(1, 32) as usize,
+        ignore: ignore.unwrap_or_default(),
+        cancel,
+        ..PatchOptions::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let roots = patch::GameRoots::resolve(&game_path);
+        let mut session = session;
+        fill_session_device_id(&mut session, profile_id.as_deref());
+        let need = patch::scan(&roots, session.as_mut(), &opts).map_err(|e| e.to_string())?;
+        // A stopped scan returns a partial list: flag it so the UI doesn't offer it.
+        let cancelled = opts.cancel.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(serde_json::json!({ "need": need, "session": session, "cancelled": cancelled }))
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Every detected Mabinogi install (Nexon config, uninstall entries, well-known
+/// folders) plus `extra` folders, de-duplicated, as install-root paths.
+fn collect_install_folders(extra: &[String]) -> Vec<PathBuf> {
+    use mabi_pack2::launcher::{detect, patch::GameRoots};
+    let mut out: Vec<PathBuf> = Vec::new();
+    let detected = detect::find_all_game_exes().into_iter().map(|exe| GameRoots::resolve(exe).install_root);
+    let extras = extra.iter().filter(|s| !s.trim().is_empty()).map(|s| GameRoots::resolve(s.trim()).install_root);
+    for p in extras.chain(detected) {
+        let key = p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+        if !out.iter().any(|o| o.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase() == key) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// "Check all installs": detect every install (plus `extra` folders) and report
+/// whether each is up to date. Returns `{ folders: [FolderStatus], session }`.
+#[tauri::command]
+async fn patch_check_all_installs(
+    extra: Option<Vec<String>>,
+    session: Option<SessionInfo>,
+    profile_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folders = collect_install_folders(&extra.unwrap_or_default());
+        let mut session = session;
+        fill_session_device_id(&mut session, profile_id.as_deref());
+        let statuses = mabi_pack2::launcher::patch::check_folders(&folders, session.as_mut());
+        // Add the folder holding Client.exe (what the Launch tab wants) to each row.
+        let rows: Vec<serde_json::Value> = statuses.into_iter().map(|st| {
+            let client_dir = mabi_pack2::launcher::detect::exe_in_dir(std::path::Path::new(&st.path))
+                .and_then(|exe| exe.parent().map(|d| d.display().to_string()))
+                .unwrap_or_default();
+            let mut v = serde_json::to_value(&st).unwrap_or_default();
+            v["client_dir"] = serde_json::Value::String(client_dir);
+            v
+        }).collect();
+        Ok(serde_json::json!({ "folders": rows, "session": session }))
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Local vs. remote manifest. `game_path` may be the install root, appdata, patchdata
+/// or Client.exe. The remote check needs a session (branch API).
+#[tauri::command]
+async fn check_patch_version(game_path: String, session: Option<SessionInfo>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use mabi_pack2::launcher::patch;
+        let roots = patch::GameRoots::resolve(&game_path);
+        let local_hash = roots.local_hash();
+        let local_manifest = local_hash.as_ref()
+            .and_then(|h| std::fs::read(roots.patchdata.join(h)).ok().and_then(|b| patch::Manifest::parse(h, &b).ok()));
+        let local_version = local_manifest.as_ref().and_then(|m| get_managed_version(m.buildtime.round() as i64));
+
+        let mut session = session;
+        let (remote_hash, remote_version, remote_error) = match patch::remote_manifest_hash(session.as_mut()) {
+            Ok(h) if Some(&h) == local_hash.as_ref() => (Some(h), local_version, None),
+            Ok(h) => {
+                let v = patch::load_manifest(&roots, &h).ok()
+                    .and_then(|m| get_managed_version(m.buildtime.round() as i64));
+                (Some(h), v, None)
+            }
+            Err(e) => (None, None, Some(auth_err(e))),
+        };
+        let relogin_required = remote_error.as_deref().is_some_and(|e| e.starts_with(RELOGIN_MARKER));
+        let needs_update = match (&local_hash, &remote_hash) {
+            (_, None) => false,
+            (Some(l), Some(r)) => l != r,
+            (None, Some(_)) => true,
+        };
+        Ok(serde_json::json!({
+            "local_version": local_version,
+            "remote_version": remote_version,
+            "local_hash": local_hash,
+            "remote_hash": remote_hash,
+            "needs_update": needs_update,
+            "error": remote_error,
+            "relogin_required": relogin_required,
+            // Refreshed in place if a 401 forced an autologin; the UI should keep this one.
+            "session": session,
+        }))
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Patch the game from Nexon's NXL CDN (core launcher::patch)
+#[tauri::command]
+async fn patch_game_files(
+    game_path: String,
+    max_workers: Option<u32>,
+    force_repair: Option<bool>,
+    verify: Option<bool>,
+    _parallel_ops: Option<bool>,
+    ignore: Option<Vec<String>>,
+    session: Option<SessionInfo>,
+    pre_patch_cmd: Option<String>,
+    post_patch_cmd: Option<String>,
+    only: Option<Vec<String>>,
+    profile_id: Option<String>,
+    profile_name: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, serde_json::Value> {
+    use mabi_pack2::launcher::patch::{self, PatchEvent, PatchMode, PatchOptions};
+    // Held until this command returns (after the after-patch hook).
+    let _guard = PatchRunGuard::acquire()?;
+    let hook_dir = game_path.clone();
+    let hook_profile = profile_name.unwrap_or_default();
+    let hook = move |cmd: &Option<String>, what: &str| -> Result<(), String> {
+        if let Some(cmd) = cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            let dir = std::path::Path::new(&hook_dir);
+            log::info!("[Patcher] Running {} hook", what);
+            mabi_pack2::launcher::launch::run_hook(cmd, dir, &hook_profile).map_err(|e| format!("{} hook failed: {}", what, e))?;
+        }
+        Ok(())
+    };
+    let (cancel, pause) = new_patch_flags();
+    let mut session = session;
+    fill_session_device_id(&mut session, profile_id.as_deref());
+    let token_before = session.as_ref().map(|s| s.access_token.clone()).unwrap_or_default();
+    let opts = PatchOptions {
+        mode: if force_repair == Some(true) { PatchMode::ForceAll }
+              else if verify == Some(true) { PatchMode::Verify }
+              else { PatchMode::Update },
+        max_workers: max_workers.unwrap_or(8).clamp(1, 32) as usize,
+        ignore: ignore.unwrap_or_default(),
+        scan_only: false,
+        manifest_hash: None,
+        cancel,
+        only: only.filter(|v| !v.is_empty()),
+        pause,
     };
 
-    Ok(serde_json::json!({
-        "local_version": local_version,
-        "remote_version": remote_version,
-        "needs_update": needs_update,
-    }))
-}
-#[tauri::command]
-async fn patch_game_files(game_path: String, max_workers: Option<u32>, force_repair: Option<bool>, parallel_ops: Option<bool>, app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use std::io::{Read, BufWriter, Write};
-    use std::sync::{Arc, Mutex};
-    use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+    // The hooks run synchronously too: keep them off the async runtime.
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        hook(&pre_patch_cmd, "Before-patch")?;
+        let roots = patch::GameRoots::resolve(&game_path);
+        let last_emit = std::sync::atomic::AtomicU64::new(0);
+        let on_event = |ev: PatchEvent| {
+            match ev {
+                PatchEvent::Log { message } => log::info!("[Patcher] {}", message),
+                PatchEvent::Scan { done, total, need, file } => {
+                    let _ = app.emit("patch-progress", PatchProgressEvent {
+                        phase: "scanning".into(), current_file: file,
+                        parts_done: done, parts_total: total, files_done: need, files_total: total,
+                        pct: done as f64 / total.max(1) as f64 * 10.0, speed_bps: None, error: None,
+                    });
+                }
+                PatchEvent::Download { files_done, files_total, bytes, bytes_total, speed_bps, file } => {
+                    // Rate-limit to ~10/s so WebView2 isn't flooded.
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let prev = last_emit.load(std::sync::atomic::Ordering::Relaxed);
+                    if files_done == files_total || now.saturating_sub(prev) >= 100 {
+                        last_emit.store(now, std::sync::atomic::Ordering::Relaxed);
+                        let _ = app.emit("patch-progress", PatchProgressEvent {
+                            phase: "installing".into(), current_file: file,
+                            parts_done: files_done, parts_total: files_total, files_done, files_total,
+                            pct: 10.0 + bytes as f64 / bytes_total.max(1) as f64 * 90.0,
+                            speed_bps: Some(speed_bps), error: None,
+                        });
+                    }
+                }
+                PatchEvent::Worker { worker_id, phase, file, parts_done, parts_total } => {
+                    let phase = if phase == "downloading" && parts_done > 0 { "assembling".to_string() } else { phase };
+                    let _ = app.emit("patch-worker", PatchWorkerEvent {
+                        worker_id, phase, file_name: file, parts_done, parts_total,
+                    });
+                }
+            }
+        };
+        let r = patch::run_patcher(&roots, session.as_mut(), &opts, &on_event);
+        let post_hook = match &r {
+            Ok(r) if r.errors.is_empty() && !r.cancelled => hook(&post_patch_cmd, "After-patch"),
+            _ => Ok(()),
+        };
+        Ok((r, post_hook, app, session))
+    }).await.map_err(|e| e.to_string())?;
+    let (r, post_hook, app, session) = result?;
 
-    let game_dir = std::path::Path::new(&game_path);
-    // game_path is the patchdata dir; game_root is one level up (the actual game install dir)
-    let patchdata = game_dir.to_path_buf();
-    // Nexon NXL layout: patchdata/ is sibling of appdata/ (actual game files)
-    let game_root_buf = patchdata.parent()
-        .map(|p| p.join("appdata"))
-        .unwrap_or_else(|| game_dir.to_path_buf());
-    let _game_root = game_root_buf.as_path();
-
-    // --- Load manifest ---
-    let hash_file = patchdata.join("10200.manifest.hash");
-    let manifest_hash = std::fs::read_to_string(&hash_file)
-        .unwrap_or_default().trim().to_string();
-    if manifest_hash.is_empty() {
-        return Err("No manifest hash found in patchdata".to_string());
-    }
-    let manifest_path = patchdata.join(&manifest_hash);
-    let compressed = std::fs::read(&manifest_path).map_err(|e| e.to_string())?;
-    let mut dec = flate2::read::DeflateDecoder::new(&compressed[2..]);
-    let mut json_bytes = Vec::new();
-    dec.read_to_end(&mut json_bytes).map_err(|e| e.to_string())?;
-    let manifest: serde_json::Value = serde_json::from_slice(&json_bytes)
-        .map_err(|e| e.to_string())?;
-    let files = manifest["files"].as_object()
-        .ok_or_else(|| "no files in manifest".to_string())?;
-    let buildtime = manifest["buildtime"].as_f64().unwrap_or(0.0);
-
-    // --- Determine which files need patching ---
-    let total_manifest_files = files.len();
-    let is_repair = force_repair == Some(true);
-    let use_parallel = parallel_ops.unwrap_or(true);
-    if is_repair {
+    let done = |err: Option<String>| {
         let _ = app.emit("patch-progress", PatchProgressEvent {
-            phase: "scanning".into(),
-            current_file: "Scanning game files...".into(),
-            parts_done: 0, parts_total: total_manifest_files,
-            files_done: 0, files_total: total_manifest_files,
-            pct: 0.0, speed_bps: None, error: None,
+            phase: if err.is_some() { "error".into() } else { "done".into() },
+            current_file: String::new(), parts_done: 0, parts_total: 0, files_done: 0, files_total: 0,
+            pct: 100.0, speed_bps: None, error: err,
         });
-    }
-
-    // Collect all manifest entries into owned data; scan phase runs in spawn_blocking
-    struct ScanEntry {
-        path: String,
-        full_path: std::path::PathBuf,
-        expected_size: u64,
-        part_shas: Vec<String>,
-        part_sizes: Vec<u64>,
-        raw_value: serde_json::Value,
-    }
-    let scan_entries: Vec<ScanEntry> = files.iter().filter_map(|(k, v)| {
-        let objs = v["objects"].as_array()?;
-        if objs.first().and_then(|x| x.as_str()) == Some("__DIR__") { return None; }
-        if objs.is_empty() { return None; }
-        let path = decode_b64_utf16_path(k);
-        let path_native = path.replace('\\', std::path::MAIN_SEPARATOR_STR);
-        let full_path = game_root_buf.join(&path_native);
-        let expected_size = v["fsize"].as_u64().unwrap_or(0);
-        let part_shas: Vec<String> = objs.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-        let part_sizes: Vec<u64> = v["objects_fsize"].as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
-            .unwrap_or_default();
-        Some(ScanEntry { path, full_path, expected_size, part_shas, part_sizes, raw_value: v.clone() })
-    }).collect();
-
-    let total_scan = scan_entries.len();
-    let app_scan = app.clone();
-    let need_patch = tauri::async_runtime::spawn_blocking(move || {
-        if use_parallel {
-            // Parallel SHA1 scan using Rayon - major speedup on SSD / multi-core
-            let atomic_done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let results: Vec<(String, serde_json::Value)> = scan_entries.par_iter()
-                .filter_map(|e| {
-                    let needs = if !e.full_path.exists() {
-                        true
-                    } else if is_repair {
-                        let actual = std::fs::metadata(&e.full_path).map(|m| m.len()).unwrap_or(0);
-                        if actual != e.expected_size {
-                            true
-                        } else {
-                            let sz_ok = e.part_sizes.len() == e.part_shas.len() && !e.part_shas.is_empty();
-                            if sz_ok {
-                                let refs: Vec<&str> = e.part_shas.iter().map(|s| s.as_str()).collect();
-                                !verify_file_parts(&e.full_path, &refs, &e.part_sizes)
-                            } else { false }
-                        }
-                    } else {
-                        std::fs::metadata(&e.full_path).map(|m| m.len() != e.expected_size).unwrap_or(true)
-                    };
-                    let done = atomic_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if is_repair && done % 200 == 0 {
-                        let pct = done as f64 / total_scan as f64 * 20.0;
-                        let _ = app_scan.emit("patch-progress", PatchProgressEvent {
-                            phase: "scanning".into(), current_file: e.path.clone(),
-                            parts_done: done, parts_total: total_scan,
-                            files_done: 0, files_total: total_scan,
-                            pct, speed_bps: None, error: None,
-                        });
-                    }
-                    if needs { Some((e.path.clone(), e.raw_value.clone())) } else { None }
-                })
-                .collect();
-            results
-        } else {
-            // Serial fallback (better for HDDs or memory-constrained systems)
-            let mut results: Vec<(String, serde_json::Value)> = Vec::new();
-            for (scanned, e) in scan_entries.iter().enumerate() {
-                let needs = if !e.full_path.exists() {
-                    true
-                } else if is_repair {
-                    let actual = std::fs::metadata(&e.full_path).map(|m| m.len()).unwrap_or(0);
-                    if actual != e.expected_size {
-                        true
-                    } else {
-                        let sz_ok = e.part_sizes.len() == e.part_shas.len() && !e.part_shas.is_empty();
-                        if sz_ok {
-                            let refs: Vec<&str> = e.part_shas.iter().map(|s| s.as_str()).collect();
-                            !verify_file_parts(&e.full_path, &refs, &e.part_sizes)
-                        } else { false }
-                    }
-                } else {
-                    std::fs::metadata(&e.full_path).map(|m| m.len() != e.expected_size).unwrap_or(true)
-                };
-                if needs { results.push((e.path.clone(), e.raw_value.clone())); }
-                if is_repair && scanned % 200 == 0 {
-                    let pct = scanned as f64 / total_scan as f64 * 20.0;
-                    let _ = app_scan.emit("patch-progress", PatchProgressEvent {
-                        phase: "scanning".into(), current_file: e.path.clone(),
-                        parts_done: scanned, parts_total: total_scan,
-                        files_done: results.len(), files_total: total_scan,
-                        pct, speed_bps: None, error: None,
-                    });
-                }
-            }
-            results
+    };
+    let r = match r {
+        Ok(r) => { done(None); r }
+        Err(e) => {
+            let msg = auth_err(e);
+            done(Some(msg.clone()));
+            return Err(session_err(msg, &token_before, session.as_ref(), profile_id.as_deref()));
         }
-    }).await.map_err(|e| e.to_string())?;
-
-    if need_patch.is_empty() {
-        let managed = get_managed_version(buildtime.round() as i64).unwrap_or(0);
-        return Ok(serde_json::json!({
-            "ok": true, "patched": 0, "managed_version": managed,
-            "message": "Game is already up to date"
-        }));
+    };
+    if let Err(msg) = post_hook {
+        return Err(session_err(msg, &token_before, session.as_ref(), profile_id.as_deref()));
     }
-
-    let total_files = need_patch.len();
-
-    // --- Build part download tasks ---
-    let temp_dir = patchdata.join("Patch").join("_parts");
-    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-
-    let mut tasks: std::collections::VecDeque<PartTask> = std::collections::VecDeque::new();
-    // file_parts_map: filename -> sorted vec of (idx, part_path)
-    let mut file_parts_map: std::collections::HashMap<String, Vec<(usize, std::path::PathBuf)>>
-        = std::collections::HashMap::new();
-
-    for (path, entry) in &need_patch {
-        let objs = entry["objects"].as_array().unwrap();
-        let mut parts = Vec::new();
-        for (idx, obj) in objs.iter().enumerate() {
-            let sha1 = obj.as_str().unwrap_or("").to_string();
-            // Use sha1 as the temp filename (globally unique)
-            let part_path = temp_dir.join(&sha1);
-            tasks.push_back(PartTask {
-                sha1, output_path: part_path.clone(),
-                filename: path.clone(), _part_idx: idx,
-            });
-            parts.push((idx, part_path));
-        }
-        file_parts_map.insert(path.clone(), parts);
-    }
-
-    let total_parts = tasks.len();
-    let tasks = Arc::new(Mutex::new(tasks));
-    let parts_done = Arc::new(AtomicUsize::new(0));
-    let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_progress_emit = Arc::new(AtomicU64::new(0));
-
-    // Emit start event
-    let _ = app.emit("patch-progress", PatchProgressEvent {
-        phase: "downloading".into(),
-        current_file: format!("0/{} files queued", total_files),
-        parts_done: 0, parts_total: total_parts,
-        files_done: 0, files_total: total_files,
-        pct: 0.0, speed_bps: None, error: None,
-    });
-
-    // --- Spawn thread pool ---
-    let num_workers = (max_workers.unwrap_or(10) as usize).max(1).min(32);
-    let mut handles = Vec::new();
-    for worker_id in 0..num_workers {
-        let tasks = Arc::clone(&tasks);
-        let parts_done = Arc::clone(&parts_done);
-        let errors = Arc::clone(&errors);
-        let last_emit = Arc::clone(&last_progress_emit);
-        let app2 = app.clone();
-        let total_parts2 = total_parts;
-        let total_files2 = total_files;
-        handles.push(std::thread::spawn(move || loop {
-            let task = { tasks.lock().unwrap().pop_front() };
-            let task = match task { None => break, Some(t) => t };
-            let url = format!(
-                "https://download2.nexon.net/Game/nxl/games/10200/10200/{}/{}",
-                &task.sha1[..2], task.sha1
-            );
-            let _ = app2.emit("patch-worker", PatchWorkerEvent {
-                worker_id, phase: "start".into(), file_name: task.filename.clone(),
-            parts_done: 0, parts_total: 0,
-            });
-            match download_and_decompress(&url, &task.output_path) {
-                Ok(_) => {
-                    let done = parts_done.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = app2.emit("patch-worker", PatchWorkerEvent {
-                        worker_id, phase: "done".into(), file_name: task.filename.clone(),
-            parts_done: 0, parts_total: 0,
-                    });
-                    // Rate-limit global progress to ~10 emits/sec to avoid flooding WebView2
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default().as_millis() as u64;
-                    let prev = last_emit.load(Ordering::Relaxed);
-                    if done == total_parts2 || now_ms.saturating_sub(prev) >= 100 {
-                        if last_emit.compare_exchange(prev, now_ms, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                            let _ = app2.emit("patch-progress", PatchProgressEvent {
-                                phase: "downloading".into(),
-                                current_file: task.filename.clone(),
-                                parts_done: done, parts_total: total_parts2,
-                                files_done: 0, files_total: total_files2,
-                                pct: done as f64 / total_parts2 as f64 * 80.0,
-                                speed_bps: None, error: None,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = app2.emit("patch-worker", PatchWorkerEvent {
-                        worker_id, phase: "error".into(), file_name: task.filename.clone(),
-            parts_done: 0, parts_total: 0,
-                    });
-                    errors.lock().unwrap().push(format!("{}: {}", task.filename, e));
-                }
-            }
-        }));
-    }
-    for h in handles { h.join().ok(); }
-
-    let errs = errors.lock().unwrap().clone();
-    if !errs.is_empty() {
-        // Keep cached parts for retry — do not delete temp_dir on error
-        return Ok(serde_json::json!({ "ok": false, "errors": errs }));
-    }
-
-    // --- Assemble and install files ---
-    let _ = app.emit("patch-progress", PatchProgressEvent {
-        phase: "installing".into(),
-        current_file: "Assembling files...".into(),
-        parts_done: total_parts, parts_total: total_parts,
-        files_done: 0, files_total: total_files,
-        pct: 80.0, speed_bps: None, error: None,
-    });
-
-    let app_asm = app.clone();
-    let game_root_asm = game_root_buf.clone();
-    let need_patch_asm = need_patch.clone();
-    let file_parts_map_asm = file_parts_map;
-    let total_files_asm = total_files;
-    let total_parts_asm = total_parts;
-    let use_parallel_asm = use_parallel;
-
-    let (files_installed, install_errors, needs_elevation) = tauri::async_runtime::spawn_blocking(move || {
-        if use_parallel_asm && total_files_asm > 1 {
-            // Parallel file assembly: each file is independent (different output paths)
-            let inst_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let errors_m = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-            let elev_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-            need_patch_asm.par_iter().enumerate().for_each(|(file_idx, (path, entry))| {
-                let dest = game_root_asm.join(path.replace('\\', std::path::MAIN_SEPARATOR_STR));
-                if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent).ok(); }
-
-                let pct_start = 80.0 + file_idx as f64 / total_files_asm as f64 * 19.0;
-                let _ = app_asm.emit("patch-progress", PatchProgressEvent {
-                    phase: "installing".into(), current_file: path.clone(),
-                    parts_done: total_parts_asm, parts_total: total_parts_asm,
-                    files_done: file_idx, files_total: total_files_asm,
-                    pct: pct_start, speed_bps: None, error: None,
-                });
-
-                let parts = match file_parts_map_asm.get(path) {
-                    Some(p) => p, None => return,
-                };
-                let mut sorted = parts.clone();
-                sorted.sort_by_key(|(idx, _)| *idx);
-                let parts_total_file = sorted.len();
-                let worker_id = rayon::current_thread_index().unwrap_or(0);
-                let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                    worker_id, phase: "assembling".into(), file_name: path.clone(),
-                    parts_done: 0, parts_total: parts_total_file,
-                });
-
-                let tmp = dest.with_extension("_patch_tmp");
-                let result: Result<(), String> = (|| {
-                    let f = std::fs::File::create(&tmp).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            elev_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        format!("{}: create: {}", path, e)
-                    })?;
-                    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, f);
-                    for (part_idx, (_, part_path)) in sorted.iter().enumerate() {
-                        let data = std::fs::read(part_path)
-                            .map_err(|e| format!("{}: read part: {}", path, e))?;
-                        writer.write_all(&data)
-                            .map_err(|_| format!("{}: write part failed", path))?;
-                        let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                            worker_id, phase: "assembling".into(), file_name: path.clone(),
-                            parts_done: part_idx + 1, parts_total: parts_total_file,
-                        });
-                    }
-                    writer.flush().map_err(|e| format!("{}: flush: {}", path, e))?;
-                    Ok(())
-                })();
-
-                if let Err(e) = result {
-                    let _ = std::fs::remove_file(&tmp);
-                    errors_m.lock().unwrap().push(e);
-                    return;
-                }
-
-                let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                    worker_id, phase: "done".into(), file_name: path.clone(),
-                    parts_done: parts_total_file, parts_total: parts_total_file,
-                });
-
-                if let Err(e) = std::fs::rename(&tmp, &dest) {
-                    if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        elev_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    errors_m.lock().unwrap().push(format!("{}: rename: {}", path, e));
-                    return;
-                }
-
-                let mtime_secs = entry["mtime"].as_f64().unwrap_or(0.0) as u64;
-                let mtime_sys = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs);
-                filetime::set_file_mtime(&dest, filetime::FileTime::from_system_time(mtime_sys)).ok();
-                inst_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            });
-
-            let files_installed = inst_count.load(std::sync::atomic::Ordering::Relaxed);
-            let install_errors = errors_m.lock().unwrap().clone();
-            let needs_elevation = elev_flag.load(std::sync::atomic::Ordering::Relaxed);
-            (files_installed, install_errors, needs_elevation)
-        } else {
-            // Serial assembly
-            let mut files_installed = 0usize;
-            let mut install_errors: Vec<String> = Vec::new();
-            let mut needs_elevation = false;
-            for (file_idx, (path, entry)) in need_patch_asm.iter().enumerate() {
-                let path_native = path.replace('\\', std::path::MAIN_SEPARATOR_STR);
-                let dest = game_root_asm.join(&path_native);
-                if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent).ok(); }
-                let pct_start = 80.0 + file_idx as f64 / total_files_asm as f64 * 19.0;
-                let _ = app_asm.emit("patch-progress", PatchProgressEvent {
-                    phase: "installing".into(), current_file: path.clone(),
-                    parts_done: total_parts_asm, parts_total: total_parts_asm,
-                    files_done: file_idx, files_total: total_files_asm,
-                    pct: pct_start, speed_bps: None, error: None,
-                });
-                let parts = file_parts_map_asm.get(path).unwrap();
-                let mut sorted = parts.clone();
-                sorted.sort_by_key(|(idx, _)| *idx);
-                let parts_total_file = sorted.len();
-                let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                    worker_id: 0, phase: "assembling".into(), file_name: path.clone(),
-                    parts_done: 0, parts_total: parts_total_file,
-                });
-                let tmp = dest.with_extension("_patch_tmp");
-                {
-                    let f = match std::fs::File::create(&tmp) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            if e.kind() == std::io::ErrorKind::PermissionDenied { needs_elevation = true; }
-                            install_errors.push(format!("{}: create: {}", path, e));
-                            continue;
-                        }
-                    };
-                    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, f);
-                    let mut had_err = false;
-                    for (part_idx, (_, part_path)) in sorted.iter().enumerate() {
-                        match std::fs::read(part_path) {
-                            Ok(data) => {
-                                if writer.write_all(&data).is_err() {
-                                    install_errors.push(format!("{}: write part failed", path));
-                                    had_err = true; break;
-                                }
-                                let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                                    worker_id: 0, phase: "assembling".into(), file_name: path.clone(),
-                                    parts_done: part_idx + 1, parts_total: parts_total_file,
-                                });
-                            }
-                            Err(e) => {
-                                install_errors.push(format!("{}: read part: {}", path, e));
-                                had_err = true; break;
-                            }
-                        }
-                    }
-                    if had_err { let _ = std::fs::remove_file(&tmp); continue; }
-                    if let Err(e) = writer.flush() {
-                        install_errors.push(format!("{}: flush: {}", path, e));
-                        let _ = std::fs::remove_file(&tmp); continue;
-                    }
-                }
-                let _ = app_asm.emit("patch-worker", PatchWorkerEvent {
-                    worker_id: 0, phase: "done".into(), file_name: path.clone(),
-                    parts_done: parts_total_file, parts_total: parts_total_file,
-                });
-                if let Err(e) = std::fs::rename(&tmp, &dest) {
-                    if e.kind() == std::io::ErrorKind::PermissionDenied { needs_elevation = true; }
-                    install_errors.push(format!("{}: rename: {}", path, e));
-                    continue;
-                }
-                let mtime_secs = entry["mtime"].as_f64().unwrap_or(0.0) as u64;
-                let mtime_sys = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs);
-                let ft = filetime::FileTime::from_system_time(mtime_sys);
-                filetime::set_file_mtime(&dest, ft).ok();
-                files_installed += 1;
-            }
-            (files_installed, install_errors, needs_elevation)
-        }
-    }).await.map_err(|e| e.to_string())?;
-
-
-    // --- Write managed version to version.dat ---
-    let managed_version = get_managed_version(buildtime.round() as i64).unwrap_or(0);
-    if managed_version > 0 {
-        std::fs::write(game_dir.join("version.dat"),
-            (managed_version as u32).to_le_bytes()).ok();
-    }
-
-    // Clean up temp dir
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    let _ = app.emit("patch-progress", PatchProgressEvent {
-        phase: "done".into(),
-        current_file: format!("Patched {} / {} files", files_installed, total_files),
-        parts_done: total_parts, parts_total: total_parts,
-        files_done: files_installed, files_total: total_files,
-        speed_bps: None, pct: 100.0, error: None,
-    });
-
+    let managed_version = get_managed_version(r.buildtime.round() as i64).unwrap_or(0);
+    let message = if r.cancelled { Some("Patch cancelled — run Update again to resume".to_string()) }
+        else if r.need.is_empty() { Some("Game is already up to date".to_string()) }
+        else { None };
     Ok(serde_json::json!({
-        "ok": install_errors.is_empty(),
-        "patched": files_installed,
-        "total_parts": total_parts,
+        "ok": r.errors.is_empty() && !r.cancelled,
+        "patched": r.patched,
+        "need": r.need.len(),
         "managed_version": managed_version,
-        "errors": install_errors,
-        "needs_elevation": needs_elevation
+        "manifest_hash": r.manifest_hash,
+        "errors": r.errors,
+        "cancelled": r.cancelled,
+        "needs_elevation": r.needs_elevation,
+        "message": message,
+        "session": session,
     }))
 }
 
 
 #[tauri::command]
 fn clear_patch_cache(game_path: String) -> Result<serde_json::Value, String> {
-    let game_dir = std::path::Path::new(&game_path);
-    // game_path is the patchdata dir; game_root is one level up (the actual game install dir)
-    let patchdata = game_dir.to_path_buf();
-    // Nexon NXL layout: patchdata/ is sibling of appdata/ (actual game files)
-    let game_root_buf = patchdata.parent()
-        .map(|p| p.join("appdata"))
-        .unwrap_or_else(|| game_dir.to_path_buf());
-    let _game_root = game_root_buf.as_path();
+    let patchdata = mabi_pack2::launcher::patch::GameRoots::resolve(&game_path).patchdata;
     let cache = patchdata.join("Patch");
     if cache.exists() {
         std::fs::remove_dir_all(&cache).map_err(|e| e.to_string())?;
@@ -6846,112 +6983,48 @@ fn get_managed_version(buildtime: i64) -> Option<i64> {
     let text = resp.into_string().ok()?;
     text.trim().parse::<i64>().ok()
 }
-fn decode_b64_utf16_path(key: &str) -> String {
-    use base64::Engine;
-    match base64::engine::general_purpose::STANDARD.decode(key) {
-        Ok(bytes) if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE => {
-            let chars: Vec<u16> = bytes[2..].chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            String::from_utf16_lossy(&chars).trim_end_matches('\u{0000}').to_string()
-        }
-        _ => key.to_string(),
-    }
-}
 
 #[tauri::command]
 fn verify_game_files(game_path: String) -> Result<serde_json::Value, String> {
-    use std::io::Read;
-    let game_dir = std::path::Path::new(&game_path);
-    // game_path is patchdata dir; actual game files are in sibling appdata dir
-    let patchdata = game_dir.to_path_buf();
-    let game_root = patchdata.parent().map(|p| p.join("appdata"))
-        .unwrap_or_else(|| game_dir.to_path_buf());
-    let version = {
-        let vp = game_root.join("version.dat");
-        if vp.exists() {
-            let b = std::fs::read(&vp).unwrap_or_default();
-            if b.len() >= 4 { u32::from_le_bytes([b[0],b[1],b[2],b[3]]) } else { 0 }
-        } else { 0 }
+    use mabi_pack2::launcher::patch;
+    let roots = patch::GameRoots::resolve(&game_path);
+    let fail = |msg: String| Ok(serde_json::json!({ "ok": false, "version": 0, "error": msg, "missing": [], "mismatched": [] }));
+    if !roots.patchdata.exists() {
+        return fail(format!("patchdata directory not found ({})", roots.patchdata.display()));
+    }
+    let hash = match roots.local_hash() { Some(h) => h, None => return fail("no manifest hash found".into()) };
+    let manifest = match std::fs::read(roots.patchdata.join(&hash)) {
+        Ok(b) => patch::Manifest::parse(&hash, &b).map_err(|e| e.to_string())?,
+        Err(_) => return fail(format!("manifest {} not in patchdata", &hash[..12.min(hash.len())])),
     };
-    if !patchdata.exists() {
-        return Ok(serde_json::json!({
-            "ok": false, "version": version,
-            "error": "patchdata directory not found", "missing": [], "mismatched": []
-        }));
-    }
-    let hash_file = patchdata.join("10200.manifest.hash");
-    let manifest_hash = std::fs::read_to_string(&hash_file)
-        .unwrap_or_default().trim().to_string();
-    if manifest_hash.is_empty() {
-        return Ok(serde_json::json!({
-            "ok": false, "version": version,
-            "error": "no manifest hash found", "missing": [], "mismatched": []
-        }));
-    }
-    let manifest_path = patchdata.join(&manifest_hash);
-    if !manifest_path.exists() {
-        return Ok(serde_json::json!({
-            "ok": false, "version": version,
-            "error": format!("manifest {} not in patchdata", &manifest_hash[..12.min(manifest_hash.len())]),
-            "missing": [], "mismatched": []
-        }));
-    }
-    let compressed = std::fs::read(&manifest_path).map_err(|e| e.to_string())?;
-    let decompressed = if compressed.len() > 2 {
-        let mut dec = flate2::read::DeflateDecoder::new(&compressed[2..]);
-        let mut buf = Vec::new();
-        dec.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        buf
-    } else {
-        return Err("manifest file too small".to_string());
-    };
-    let manifest: serde_json::Value = serde_json::from_slice(&decompressed)
-        .map_err(|e| e.to_string())?;
-    let files = manifest["files"].as_object()
-        .ok_or_else(|| "no files in manifest".to_string())?;
-    let buildtime = manifest["buildtime"].as_f64().unwrap_or(0.0);
-    let total_objs = manifest["total_objects"].as_u64().unwrap_or(0);
+    let root = manifest.content_root(&roots);
     let mut missing: Vec<String> = Vec::new();
     let mut mismatched: Vec<serde_json::Value> = Vec::new();
     let mut ok_count = 0u64;
-    for (key, entry) in files {
-        if let Some(objs) = entry["objects"].as_array() {
-            if objs.first().and_then(|o| o.as_str()) == Some("__DIR__") {
-                continue;
+    for e in manifest.entries.iter().filter(|e| !e.is_dir) {
+        match std::fs::metadata(root.join(&e.path)) {
+            Err(_) => missing.push(e.path.clone()),
+            Ok(m) if e.fsize > 0 && m.len() != e.fsize => {
+                mismatched.push(serde_json::json!({ "path": e.path, "expected": e.fsize, "actual": m.len() }));
             }
-        }
-        let rel = decode_b64_utf16_path(key);
-        let rel_native = rel.replace('\\', std::path::MAIN_SEPARATOR_STR);
-        let expected = entry["fsize"].as_u64().unwrap_or(0);
-        let full = game_root.join(&rel_native);
-        match std::fs::metadata(&full) {
-            Err(_) => missing.push(rel),
-            Ok(m) if expected > 0 && m.len() != expected => {
-                mismatched.push(serde_json::json!({
-                    "path": rel, "expected": expected, "actual": m.len()
-                }));
-            }
-            _ => { ok_count += 1; }
+            _ => ok_count += 1,
         }
     }
-    let miss_slice = &missing[..missing.len().min(50)];
-    let mism_slice = &mismatched[..mismatched.len().min(50)];
-    let buildtime_rounded = buildtime.round() as i64;
-    let managed_version = get_managed_version(buildtime_rounded).unwrap_or(version as i64);
+    let version = std::fs::read(roots.appdata.join("version.dat")).ok()
+        .filter(|b| b.len() >= 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0);
+    let managed_version = get_managed_version(manifest.buildtime.round() as i64).unwrap_or(version as i64);
     Ok(serde_json::json!({
         "ok": missing.is_empty() && mismatched.is_empty(),
         "local_version": version,
         "managed_version": managed_version,
         "version": managed_version,
-        "buildtime": buildtime,
-        "total_objects": total_objs,
-        "manifest_hash": manifest_hash,
+        "buildtime": manifest.buildtime,
+        "manifest_hash": hash,
         "files_ok": ok_count,
         "files_missing": missing.len(),
         "files_mismatched": mismatched.len(),
-        "missing": miss_slice,
-        "mismatched": mism_slice
+        "missing": &missing[..missing.len().min(50)],
+        "mismatched": &mismatched[..mismatched.len().min(50)],
     }))
 }
 
@@ -7010,9 +7083,42 @@ pub fn run() {
 
             init_logging(&handle, &config.log_level);
 
+            mabi_pack2::launcher::auth::set_product_id(config.product_id);
+
+            MINIMIZE_TO_TRAY.store(config.minimize_to_tray, std::sync::atomic::Ordering::Relaxed);
+
+            if let Err(e) = setup_tray(app) {
+                log::warn!("[GUI] Tray icon unavailable: {}", e);
+            }
+
+            // `--minimized` (the Start with Windows entry): start hidden in the tray,
+            // or minimized when there is no tray icon to restore the window from.
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if mabi_pack2::launcher::autostart::wants_minimized(&args) {
+                if let Some(win) = app.get_webview_window("main") {
+                    match app.tray_by_id(TRAY_ID) {
+                        Some(tray) => {
+                            let _ = tray.set_visible(true);
+                            let _ = win.hide();
+                        }
+                        None => {
+                            let _ = win.minimize();
+                        }
+                    }
+                }
+            }
+
             warn!("[GUI] mabi-pack2 started, log_level={}", config.log_level);
 
             start_stats_refresher();
+
+            std::thread::spawn(vfs_ops::remove_stale_dragout_dirs);
+
+            if config.api_enabled {
+                if let Err(e) = api_start(config.api_port) {
+                    log::warn!("[API] Could not start on port {}: {}", config.api_port, e);
+                }
+            }
 
             auto_register_associations_silent(&config);
 
@@ -7044,7 +7150,19 @@ pub fn run() {
 
         })
 
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let tray_ok = window.app_handle().tray_by_id(TRAY_ID).is_some();
+                if window.label() == "main" && tray_ok && MINIMIZE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+
         .invoke_handler(tauri::generate_handler![
+
+            get_app_version,
 
             list_pack_contents, create_archive, extract_pack_to,
 
@@ -7062,13 +7180,15 @@ pub fn run() {
 
             execute_terminal_command, get_initial_file, check_data_folder, detect_data_prefix, log_to_file, drain_log_buffer,
 
-            preview_loose_file,
+            preview_loose_file, get_entry_bytes, read_loose_bytes, find_loose_texture,
 
-            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, nexon_login_webview,
+            get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, api_start, api_stop, nexon_login_webview,
+
+            fetch_web_mods_catalog, install_web_mod, list_installed_web_mods, remove_web_mod,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 
-            launcher_check_maintenance, launcher_get_version, launcher_launch,
+            launcher_check_maintenance, launcher_get_version, launcher_launch, launcher_login_otp, patch_cancel, patch_scan_cancel,
 
             launcher_list_profiles, launcher_save_profile, launcher_delete_profile,
 
@@ -7080,25 +7200,43 @@ pub fn run() {
 
             apply_vfs_changes,
 
-            ini_to_mod, nsi_to_mod,
+            vfs_ops::vfs_stat_paths, vfs_ops::vfs_validate_entry_paths, vfs_ops::vfs_extract_entries, vfs_ops::vfs_drag_out,
+
 
             save_pending_changes, load_pending_changes,
 
-            read_kanan_cfg, write_kanan_cfg,
 
             apply_mod,
 
             get_mabi_version_local, get_mabi_version_remote, get_mabi_version_from_launcher_cache,
 
-            convert_xml_compiled, export_pmg_obj, verify_game_files, repair_game_files, patch_game_files, check_patch_version, clear_patch_cache
+            convert_xml_compiled, export_pmg_obj, verify_game_files, repair_game_files, patch_game_files, check_patch_version, clear_patch_cache,
+
+            patch_pause, patch_resume, patch_scan, patch_check_all_installs,
+
+            launcher_import_browser, launcher_save_profile_session,
+            kanan_import::kanan_default_path, kanan_import::kanan_list_accounts, kanan_import::kanan_import_accounts, kanan_import::kanan_import_otp,
+
+            shared_config_load, shared_config_save, fetch_news, open_external_url, set_tray_labels,
+            get_start_with_windows, set_start_with_windows,
+
+            world_preview::itemdb_load, world_preview::itemdb_for_model, world_preview::itemdb_search,
+
+            world_preview::propdb_load, world_preview::propdb_lookup, world_preview::set_model_names, world_preview::region_load
 
         ])
 
 
 
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
 
-        .expect("error while running tauri application");
+        .expect("error while running tauri application")
+
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                vfs_ops::remove_own_dragout_dir();
+            }
+        });
 
 }
 

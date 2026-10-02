@@ -213,7 +213,7 @@ function vertexColorsVary(colors: number[]): boolean {
     return false;
 }
 
-function parseCssColor(css: string): number | null {
+export function parseCssColor(css: string): number | null {
     if (!css) return null;
     // hex: #rrggbb or #rgb
     const hex = css.match(/^#([0-9a-f]{6})/i);

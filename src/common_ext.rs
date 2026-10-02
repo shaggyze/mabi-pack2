@@ -31,6 +31,10 @@ pub fn get_preview_ext(entry_name: &str) -> Option<&str> {
         Some("pmg")
     } else if name.ends_with(".wav") || name.ends_with(".mp3") || name.ends_with(".ogg") || name.ends_with(".nxa") {
         Some("audio")
+    } else if name.ends_with(".gm") {
+        Some("gm")
+    } else if name.ends_with(".eff") {
+        Some("text")
     } else if name.ends_with(".anievent") {
         Some("anievent")
     } else if name.ends_with(".ani") || name.ends_with(".mov") || name.ends_with(".frm") ||
@@ -645,6 +649,54 @@ pub struct FeatureEntry {
     pub hash: u32,
     pub hash_hex: String,
     pub conditions: Vec<String>,
+    /// Readable name, when one in `src/data/feature_names.txt` hashes to `hash`.
+    /// Display only: the compiled file stores just the hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Hash of a feature name as stored in features.xml.compiled (djb2 over UTF-16
+/// code units with 32-bit signed wrap-around, the same as the game and Fetitor).
+pub fn feature_hash(name: &str) -> u32 {
+    let mut h: i32 = 5381;
+    for unit in name.encode_utf16() {
+        h = h.wrapping_mul(33).wrapping_add(unit as i32);
+    }
+    h as u32
+}
+
+/// Known feature names (embedded at compile time), keyed by [`feature_hash`].
+static FEATURE_NAMES: once_cell::sync::Lazy<std::collections::HashMap<u32, &'static str>> =
+    once_cell::sync::Lazy::new(|| parse_feature_names(include_str!("data/feature_names.txt")));
+
+/// Parse a feature-name list: one name per line, `//` comments. The list is
+/// hand-collected and not always clean, so it is read defensively: a line that
+/// joins several names (`a & b`, `a, b`) gives each name, and tokens that can't be
+/// a feature name (spaces, quotes, markup, over-long) are skipped. The first name
+/// seen for a hash wins.
+fn parse_feature_names(text: &str) -> std::collections::HashMap<u32, &str> {
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        let line = line.trim_start_matches('\u{feff}');
+        let line = line.split("//").next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        for tok in line.split(|c: char| c.is_whitespace() || matches!(c, '&' | '|' | ',' | ';')) {
+            let ok = !tok.is_empty()
+                && tok.len() <= 128
+                && tok.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+            if ok {
+                map.entry(feature_hash(tok)).or_insert(tok);
+            }
+        }
+    }
+    map
+}
+
+/// The readable name for a feature hash, if the embedded list knows it.
+pub fn feature_name(hash: u32) -> Option<&'static str> {
+    FEATURE_NAMES.get(&hash).copied()
 }
 
 /// Parse features.xml.compiled binary into a structured `FeaturesData`.
@@ -706,6 +758,7 @@ pub fn parse_features_compiled(data: &[u8]) -> Option<FeaturesData> {
             hash,
             hash_hex: format!("{:#010x}", hash),
             conditions: conds,
+            name: feature_name(hash).map(str::to_string),
         });
     }
 
@@ -848,4 +901,35 @@ pub fn decode_features_compiled(data: &[u8]) -> Option<String> {
     }
     xml.push_str("  </features>\n</features_compiled>\n");
     Some(xml)
+}
+
+#[cfg(test)]
+mod feature_name_tests {
+    use super::*;
+
+    #[test]
+    fn hash_matches_djb2_with_signed_wrap() {
+        assert_eq!(feature_hash(""), 5381);
+        assert_eq!(feature_hash("a"), 5381 * 33 + 97);
+        // Long names wrap the signed 32-bit accumulator like the C# original.
+        let mut h: i32 = 5381;
+        for c in "featureAlchemyBag".chars() { h = h.wrapping_mul(33).wrapping_add(c as i32); }
+        assert_eq!(feature_hash("featureAlchemyBag"), h as u32);
+    }
+
+    #[test]
+    fn parser_skips_comments_and_bad_lines_and_splits_joined_names() {
+        let text = "\u{feff}// header\n\nfeatureA\r\n  featureB  // trailing\ngfOne & gfTwo\nhas space here\n\"quoted\"\n<tag>\n";
+        let map = parse_feature_names(text);
+        for n in ["featureA", "featureB", "gfOne", "gfTwo", "has", "space", "here"] {
+            assert_eq!(map.get(&feature_hash(n)).copied(), Some(n), "{n}");
+        }
+        assert!(!map.values().any(|v| v.contains('"') || v.contains('<') || v.contains('/')));
+    }
+
+    #[test]
+    fn embedded_list_loads() {
+        assert_eq!(feature_name(feature_hash("featureAlchemyBag")), Some("featureAlchemyBag"));
+        assert_eq!(feature_name(feature_hash("gfPetResetTime")), Some("gfPetResetTime"));
+    }
 }

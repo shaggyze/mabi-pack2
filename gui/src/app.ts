@@ -1,9 +1,12 @@
 import { invoke } from "./platform/invoke";
 import { open, save, ask, message } from "./platform/dialog";
-import { writeTextFile } from "./platform/fs";
+import { writeTextFile, writeFile } from "./platform/fs";
 import { listen } from "./platform/event";
+import { isTauri } from "./platform/isTauri";
 import { locales as TRANSLATIONS } from "./locales";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
+import type { Mounted3d } from "./preview3d/panel";
+import type { AssetHost } from "./preview3d/worldData";
 
 interface JobEntry {
     id: number;
@@ -26,6 +29,9 @@ interface FileEntry {
     key: number[];
 }
 
+/** Answer to a "target already exists" conflict in the List tab editor. */
+type VfsConflictAction = "overwrite" | "newer" | "size" | "rename" | "skip";
+
 interface AggregateEntry extends FileEntry {
     source_archive: string;
     salt_used: string;
@@ -33,6 +39,12 @@ interface AggregateEntry extends FileEntry {
     iv0: number;
     h_off: number;
     mode: string;
+}
+
+/** Where a preview's bytes come from, captured when the preview was requested. */
+interface PreviewSource {
+    entry?: AggregateEntry;
+    loosePath?: string;
 }
 
 interface ArchiveDetails {
@@ -96,7 +108,6 @@ interface Config {
     sequence_ignore_list: string[];
     theme_overrides: ThemeOverrides;
     custom_themes: Record<string, ThemeOverrides>;
-    kanan_cfg_path: string;
     patcher_game_path: string;
     patcher_hyddwn_enabled: boolean;
     patcher_hyddwn_url: string;
@@ -104,13 +115,58 @@ interface Config {
     patcher_focus_on_start: boolean;
     patcher_max_workers: number;
     patcher_run_elevated: boolean;
+    /** Wildcard paths (`*`, `?`) the patcher never touches — keeps local mods safe. */
+    patcher_ignore_list?: string[];
     launch_use_nexon_launcher: boolean;
     launch_cmd_override: string;
     pre_patch_cmd: string;
+    post_patch_cmd: string;
+    api_enabled: boolean;
+    api_port: number;
     pre_launch_cmd: string;
     post_launch_cmd: string;
     parallel_ops: boolean;
     mod_remote_url: string;
+    /** Nexon product id (advanced; default 10200). */
+    product_id: number;
+    /** Hide to the tray instead of exiting when the window is closed. */
+    minimize_to_tray: boolean;
+}
+
+/** Hooks + update ignore list, stored in the config shared with the CLI/REST API. */
+interface SharedConfig {
+    ignore: string[];
+    hooks: { before_patch?: string; after_patch?: string; before_launch?: string; after_launch?: string };
+}
+
+/** One item of the Nexon news feed (core launcher::news::NewsItem). */
+interface NewsItem {
+    id: number;
+    category: string;
+    title: string;
+    summary: string;
+    url: string;
+    date: string;
+    image: string;
+    maintenance: boolean;
+}
+
+/** A file the patcher would update (core launcher::patch::NeedItem). */
+interface NeedItem {
+    path: string;
+    size: number;
+    local_size: number;
+    reason: string;
+}
+
+/** One install from "Check all installs" (core FolderStatus + client_dir). */
+interface InstallStatus {
+    path: string;
+    client_dir: string;
+    local_hash: string | null;
+    remote_hash: string | null;
+    update_available: boolean | null;
+    error?: string;
 }
 
 interface PreviewData {
@@ -139,6 +195,30 @@ interface RgnData {
     width: number;
     height: number;
     heights: number[];   // normalized 0.0–1.0, row-major
+}
+
+/** One package from the website's Mods catalog (https://shaggyze.website/mabipatcher/mods). */
+interface WebMod {
+    id: number;
+    name: string;
+    category?: string;
+    version?: string;
+    author?: string;
+    description?: string;
+    files?: number;
+    hasDelete?: boolean;
+    tags?: string[];
+}
+
+/** Default catalog source: the website's Mods page (its bundle carries the catalog). */
+const DEFAULT_MOD_CATALOG_URL = "https://shaggyze.website/mabipatcher/mods";
+
+/** Build a DOM element with a class and plain-text content (never innerHTML for mod metadata). */
+function elText<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text !== undefined) el.textContent = text;
+    return el;
 }
 
 class App {
@@ -175,26 +255,45 @@ class App {
         sequence_ignore_list: [],
         theme_overrides: {},
         custom_themes: {},
-        kanan_cfg_path: "",
         patcher_game_path: "",
         patcher_hyddwn_enabled: false,
         patcher_hyddwn_url: "http://127.0.0.1:11000",
         patcher_auto_update: false,
         patcher_focus_on_start: false,
         patcher_run_elevated: false,
+        patcher_ignore_list: [],
         patcher_max_workers: 10,
         launch_use_nexon_launcher: false,
         launch_cmd_override: "",
         pre_patch_cmd: "",
+        post_patch_cmd: "",
+        api_enabled: false,
+        api_port: 7331,
         pre_launch_cmd: "",
         post_launch_cmd: "",
         parallel_ops: true,
         mod_remote_url: "",
+        product_id: 10200,
+        minimize_to_tray: false,
     };
+    private sharedConfig: SharedConfig = { ignore: [], hooks: {} };
+    private sharedConfigLoaded: Promise<void> | null = null;
+    private patchPaused = false;
+    /** A patch or file scan is running (backend allows only one at a time). */
+    private patchBusy = false;
+    private patchBusyOwner = 0;
+    private patchBusySeq = 0;
+    /** The running job is a file scan (Stop cancels the scan, not a patch). */
+    private scanRunning = false;
 
     private loadedEntries: AggregateEntry[] = [];
     private selectedEntry: AggregateEntry | null = null;
     private pmgViewer?: PMGViewer;
+    private viewer3d?: Mounted3d;
+    private previewGen = 0;
+    private selectGen = 0;
+    private textureIndex?: Map<string, AggregateEntry[]>;
+    private textureIndexSource?: AggregateEntry[];
     private currentArchive: string = "";
     private engineSalts: string[] = [];
     private previewCache = new Map<string, PreviewData>();
@@ -204,6 +303,11 @@ class App {
     private _mmlAudioCtx: AudioContext | null = null;
     private _mmlStopFlag: boolean = false;
     private modBrowserMode: 'local' | 'remote' = 'local';
+    /** Website mod catalog (fetched once per session via fetch_web_mods_catalog). */
+    private webModCatalog: WebMod[] | null = null;
+    private webModsInstalled = new Set<number>();
+    /** App version from the exe (get_app_version); fills {version} in locale strings. */
+    private appVersion: string = "";
 
     private previewKey(e: AggregateEntry) { return `${e.source_archive}::${e.name}`; }
     
@@ -336,21 +440,33 @@ class App {
     }
 
     private async init() {
-        this.translateUI();
-        this.syncSettingsUI();
-        this.initTooltip();
-        this.setupNavigation();
-        this.setupDashboard();
-        this.setupJobQueue();
-        this.setupVfsEditing();
-        this.setupLauncher();
-        this.setupFeaturesEditor();
-        this.setupThemeCustomizer();
-        this.setupPatcherTab();
-        this.setupResizableList();
-        this.setup3dPreviewResize();
-        this.setupForms();
+        // Register the Tauri event listeners (log, progress, drag-drop, open-file) first,
+        // and isolate every other setup step, so one broken section can't leave the
+        // window deaf to dropped files.
         this.setupEventListen();
+        // The version comes from the exe, so index.html and locales.ts never hold it.
+        try { this.appVersion = await invoke("get_app_version") as string; } catch (_) {}
+        this.applyVersionLabels();
+        const steps: Array<[string, () => void]> = [
+            ["translateUI", () => this.translateUI()],
+            ["syncSettingsUI", () => this.syncSettingsUI()],
+            ["initTooltip", () => this.initTooltip()],
+            ["setupNavigation", () => this.setupNavigation()],
+            ["setupDashboard", () => this.setupDashboard()],
+            ["setupJobQueue", () => this.setupJobQueue()],
+            ["setupVfsEditing", () => this.setupVfsEditing()],
+            ["setupLauncher", () => this.setupLauncher()],
+            ["setupFeaturesEditor", () => this.setupFeaturesEditor()],
+            ["setupThemeCustomizer", () => this.setupThemeCustomizer()],
+            ["setupPatcherTab", () => this.setupPatcherTab()],
+            ["setupResizableList", () => this.setupResizableList()],
+            ["setup3dPreviewResize", () => this.setup3dPreviewResize()],
+            ["setupForms", () => this.setupForms()],
+            ["setupNews", () => this.setupNews()],
+        ];
+        for (const [name, step] of steps) {
+            try { step(); } catch (e) { console.error(`[INIT] ${name} failed`, e); this.log(`[INIT] ${name} failed: ${e}`, "error"); }
+        }
 
         // Flush any log messages that were emitted before the JS listener was ready
         invoke("drain_log_buffer").then((entries) => {
@@ -380,6 +496,10 @@ class App {
         }
 
         const isAdmin: boolean = await invoke("is_ran_as_admin");
+        if (isAdmin) {
+            // Windows (UIPI) blocks drag-and-drop from a normal Explorer window into an elevated one.
+            this.log(this.t("msg_admin_no_dragdrop"), "warn");
+        }
         if (this.config.patcher_run_elevated && !isAdmin) {
             await invoke("request_elevation");
             return;
@@ -401,7 +521,7 @@ class App {
         }
 
         if (this.config.patcher_auto_update && this.config.patcher_game_path) {
-            this.log("[Patcher] Auto-update enabled — starting patch on launch", "info");
+            this.log(this.t("log_patcher_autoupdate"), "info");
             this.runPatcher(this.config.patcher_game_path, false);
         }
         this.log(this.t("engineInit"), "success");
@@ -413,7 +533,15 @@ class App {
         args.forEach((val, i) => {
             text = text.replace(`{${i}}`, val);
         });
+        if (text.includes("{version}")) text = text.split("{version}").join(this.appVersion);
         return text;
+    }
+
+    /** Window title and sidebar tag show the exe's version. */
+    private applyVersionLabels() {
+        document.title = this.t("title");
+        const tag = document.getElementById("version-tag");
+        if (tag) tag.textContent = this.appVersion ? `v${this.appVersion}` : "";
     }
 
     private translateUI() {
@@ -462,6 +590,20 @@ class App {
             if (val && val !== key) (el as HTMLInputElement).placeholder = val;
         });
 
+        // Translate <optgroup label> attributes
+        document.querySelectorAll<HTMLOptGroupElement>("optgroup[data-i18n-label]").forEach(el => {
+            const key = el.dataset.i18nLabel!;
+            const val = this.t(key);
+            if (val && val !== key) el.label = val;
+        });
+
+        // Tray menu labels live in Rust; hand them the translated text.
+        invoke("set_tray_labels", { show: this.t("tray_show"), quit: this.t("tray_quit") }).catch(() => {});
+
+        // Pause/Resume reflects the current state, not the static label
+        const pauseBtn = document.getElementById("btn-patcher-pause");
+        if (pauseBtn) pauseBtn.textContent = this.t(this.patchPaused ? "patcher_resume" : "patcher_pause");
+
         // Empty file tree placeholder
         const treeEmpty = document.getElementById("file-tree-empty");
         if (treeEmpty) treeEmpty.textContent = this.t("tree_empty");
@@ -469,6 +611,7 @@ class App {
         // Main title
         const mainTitle = document.getElementById("main-title");
         if (mainTitle) mainTitle.textContent = this.t("title");
+        this.applyVersionLabels();
 
         // Run buttons whose IDs don't match locale keys
         const runBtnMap: [string, string][] = [
@@ -562,7 +705,7 @@ class App {
         });
 
         // Tabs + sidebar tooltips
-        ["dashboard", "extract", "pack", "list", "differ", "jobs", "patcher", "features", "launcher", "settings"].forEach(tab => {
+        ["dashboard", "extract", "pack", "list", "differ", "jobs", "mods", "patcher", "features", "launcher", "settings"].forEach(tab => {
             const btn = document.querySelector(`.nav-item[data-tab="${tab}"]`) as HTMLElement;
             if (btn) {
                 const label = this.t(`tab_${tab}`);
@@ -673,7 +816,9 @@ class App {
         // Set tooltips on .sys-stat spans — use the ID as the key so the resolver
         // translates dynamically at display time (survives locale changes without re-calling this)
         document.querySelectorAll<HTMLElement>(".sys-stat > span[id]").forEach(span => {
-            if (span.id) span.dataset.tooltip = span.id;
+            // Prefer the element's locale key; fall back to the id (which is a key for older labels).
+            const key = span.dataset.i18n || span.id;
+            if (key) span.dataset.tooltip = key;
         });
 
         // Set tooltips on radio labels
@@ -696,45 +841,53 @@ class App {
 
     private applyThemeOverrides() {
         const o = this.config.theme_overrides ?? {};
-        const s = document.documentElement.style;
-        const set = (v: string | undefined, prop: string) => v ? s.setProperty(prop, v) : s.removeProperty(prop);
+        // The theme class (.theme-*) is on BOTH <html> and <body> and redefines every
+        // color var. A var set only inline on <html> is therefore shadowed by <body>'s
+        // class rule and never reaches the UI, so the overrides go inline on both.
+        const targets = [document.documentElement.style, document.body.style];
+        const managed = ['--bg-deep', '--bg-sidebar', '--bg-input', '--bg-terminal', '--bg-surface',
+            '--accent-cyan', '--accent-blue', '--accent-neon', '--text-primary', '--text-muted',
+            '--border-glass', '--grad-body', '--ui-font'];
+        // Clear first so the theme's own values can be read as defaults below.
+        for (const s of targets) for (const p of managed) s.removeProperty(p);
 
-        set(o.bg_deep, '--bg-deep');
-        set(o.bg_sidebar, '--bg-sidebar');
-        set(o.bg_input, '--bg-input');
-        set(o.bg_deep ?? o.bg_surface_color, '--bg-terminal');
-        set(o.accent_cyan, '--accent-cyan');
-        set(o.accent_blue, '--accent-blue');
-        set(o.accent_cyan, '--accent-neon');
-        set(o.text_primary, '--text-primary');
-        set(o.text_muted, '--text-muted');
+        const vars: Record<string, string> = {};
+        const put = (v: string | undefined, prop: string) => { if (v) vars[prop] = v; };
+        put(o.bg_deep, '--bg-deep');
+        put(o.bg_deep, '--grad-body'); // light themes paint body with a gradient instead of --bg-deep
+        put(o.bg_sidebar, '--bg-sidebar');
+        put(o.bg_input, '--bg-input');
+        put(o.bg_deep ?? o.bg_surface_color, '--bg-terminal');
+        put(o.accent_cyan, '--accent-cyan');
+        put(o.accent_blue, '--accent-blue');
+        put(o.accent_cyan, '--accent-neon');
+        put(o.text_primary, '--text-primary');
+        put(o.text_muted, '--text-muted');
+        put(o.font_family, '--ui-font');
 
+        const rgba = (color: string, alpha: number) => {
+            const hex = this.cssColorToHex(color);
+            const r = parseInt(hex.slice(1,3), 16);
+            const g = parseInt(hex.slice(3,5), 16);
+            const b = parseInt(hex.slice(5,7), 16);
+            return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+        };
         if (o.bg_surface_color !== undefined || o.surface_opacity !== undefined) {
-            const base = o.bg_surface_color ?? this.getCssVar('--bg-deep');
-            const alpha = ((o.surface_opacity ?? 60) / 100).toFixed(2);
-            const hex = base.startsWith('#') ? base : '#011627';
-            const r = parseInt(hex.slice(1,3), 16);
-            const g = parseInt(hex.slice(3,5), 16);
-            const b = parseInt(hex.slice(5,7), 16);
-            s.setProperty('--bg-surface', `rgba(${r},${g},${b},${alpha})`);
-        } else {
-            s.removeProperty('--bg-surface');
+            const themeSurface = this.getCssVar('--bg-surface');
+            const base = o.bg_surface_color ?? themeSurface;
+            const pct = o.surface_opacity ?? this.rgbaOpacity(themeSurface);
+            vars['--bg-surface'] = rgba(base, pct / 100);
         }
-
         if (o.border_color !== undefined || o.border_opacity !== undefined) {
-            const base = o.border_color ?? this.getCssVar('--accent-cyan');
-            const alpha = ((o.border_opacity ?? 30) / 100).toFixed(2);
-            const hex = base.startsWith('#') ? base : '#7fdbca';
-            const r = parseInt(hex.slice(1,3), 16);
-            const g = parseInt(hex.slice(3,5), 16);
-            const b = parseInt(hex.slice(5,7), 16);
-            s.setProperty('--border-glass', `rgba(${r},${g},${b},${alpha})`);
-        } else {
-            s.removeProperty('--border-glass');
+            const themeBorder = this.getCssVar('--border-glass');
+            const base = o.border_color ?? themeBorder;
+            const pct = o.border_opacity ?? this.rgbaOpacity(themeBorder);
+            vars['--border-glass'] = rgba(base, pct / 100);
         }
 
-        if (o.font_family) s.setProperty('--ui-font', o.font_family);
-        else s.removeProperty('--ui-font');
+        for (const s of targets) for (const [p, v] of Object.entries(vars)) s.setProperty(p, v);
+
+        const s = document.documentElement.style;
         if (o.font_size) s.fontSize = `${o.font_size}px`;
         else s.fontSize = '';
     }
@@ -770,7 +923,7 @@ class App {
         setColor('tc-bg-sidebar',    o.bg_sidebar,       '--bg-sidebar');
         setColor('tc-bg-input',      o.bg_input,         '--bg-input');
         setColor('tc-bg-surface',    o.bg_surface_color, '--bg-surface');
-        setColor('tc-border-color',  o.border_color,     '--accent-cyan');
+        setColor('tc-border-color',  o.border_color,     '--border-glass');
         setColor('tc-accent-cyan',   o.accent_cyan,      '--accent-cyan');
         setColor('tc-accent-blue',   o.accent_blue,      '--accent-blue');
         setColor('tc-text-primary',  o.text_primary,     '--text-primary');
@@ -796,7 +949,12 @@ class App {
         // Populate saved themes dropdown
         const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
         if (sel) {
-            sel.innerHTML = '<option value="">— saved themes —</option>';
+            sel.innerHTML = '';
+            const none = document.createElement('option');
+            none.value = '';
+            none.dataset.i18n = 'theme_saved_themes';
+            none.textContent = this.t('theme_saved_themes');
+            sel.appendChild(none);
             for (const name of Object.keys(this.config.custom_themes ?? {})) {
                 const opt = document.createElement('option');
                 opt.value = name;
@@ -808,15 +966,19 @@ class App {
 
     private setupThemeCustomizer() {
         const update = (key: keyof ThemeOverrides, value: any) => {
+            if (!this.config.theme_overrides || typeof this.config.theme_overrides !== 'object') this.config.theme_overrides = {};
             (this.config.theme_overrides as any)[key] = value;
             this.applyThemeOverrides();
             this.saveConfig();
         };
 
         const bindColor = (id: string, key: keyof ThemeOverrides) => {
-            document.getElementById(id)?.addEventListener('input', (e) => {
-                update(key, (e.target as HTMLInputElement).value);
-            });
+            // 'input' fires live while dragging in the picker; some WebView color
+            // dialogs only fire 'change' when they close, so listen to both.
+            const el = document.getElementById(id);
+            const onPick = (e: Event) => update(key, (e.target as HTMLInputElement).value);
+            el?.addEventListener('input', onPick);
+            el?.addEventListener('change', onPick);
         };
         const bindSlider = (id: string, valId: string, key: keyof ThemeOverrides, suffix: string) => {
             document.getElementById(id)?.addEventListener('input', (e) => {
@@ -855,7 +1017,7 @@ class App {
         document.getElementById('btn-theme-save')?.addEventListener('click', () => {
             const nameEl = document.getElementById('custom-theme-name') as HTMLInputElement | null;
             const name = nameEl?.value.trim();
-            if (!name) { alert('Enter a theme name first.'); return; }
+            if (!name) { alert(this.t("theme_name_required")); return; }
             if (!this.config.custom_themes) this.config.custom_themes = {};
             this.config.custom_themes[name] = { ...this.config.theme_overrides };
             this.saveConfig();
@@ -865,8 +1027,8 @@ class App {
             if (sel) sel.value = name;
             if (nameEl) {
                 nameEl.value = '';
-                nameEl.placeholder = `Saved: ${name}`;
-                setTimeout(() => { nameEl.placeholder = 'My Theme Name'; }, 2000);
+                nameEl.placeholder = this.t("theme_saved_as", [name]);
+                setTimeout(() => { nameEl.placeholder = this.t("theme_name_placeholder"); }, 2000);
             }
         });
 
@@ -884,7 +1046,7 @@ class App {
             const sel = document.getElementById('custom-theme-select') as HTMLSelectElement | null;
             const name = sel?.value;
             if (!name || !this.config.custom_themes?.[name]) return;
-            if (!confirm(`Delete theme "${name}"?`)) return;
+            if (!confirm(this.t("confirm_delete_theme", [name]))) return;
             delete this.config.custom_themes[name];
             this.saveConfig();
             this.syncCustomizerUI();
@@ -935,7 +1097,7 @@ class App {
 
         // Folder browse (directory picker)
         document.getElementById("btn-patcher-browse")?.addEventListener("click", async () => {
-            const chosen = await open({ directory: true, title: "Select Mabinogi folder" });
+            const chosen = await open({ directory: true, title: this.t("dlg_select_mabi_folder") });
             if (!chosen) return;
             const p = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
             const el = gamePathEl();
@@ -951,80 +1113,132 @@ class App {
         // Check for updates
         document.getElementById("btn-patcher-check")?.addEventListener("click", async () => {
             const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
-            setText("Checking...");
-            this.log("Checking for updates...");
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
+            setText(this.t("patcher_checking"));
+            this.log(this.t("log_patcher_checking_updates"));
             try {
-                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const res = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
+                this.keepRefreshedSession(res.session);
+                if (res.relogin_required) {
+                    setText(this.t("launcher_session_expired"), false);
+                    await this.promptRelogin();
+                    return;
+                }
                 const localEl = document.getElementById("patcher-version-local");
                 const remoteEl = document.getElementById("patcher-version-remote");
                 if (localEl) localEl.textContent = String(res.local_version ?? "—");
                 if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
+                if (res.error && res.remote_version == null && !res.remote_hash) {
+                    this.log(this.t("log_patcher_remote_check", [String(res.error)]));
+                }
                 if (res.needs_update) {
-                    setText(`Update available: v${res.remote_version}`, false);
-                    this.log(`Update available: local v${res.local_version} → v${res.remote_version}`);
+                    setText(this.t("patcher_update_available", [String(res.remote_version)]), false);
+                    this.log(this.t("log_patcher_update_available", [String(res.local_version), String(res.remote_version)]));
                 } else if (res.remote_version == null) {
-                    setText(`Installed: v${res.local_version ?? "?"}`, true);
-                    this.log(`Local version: v${res.local_version ?? "?"} (remote check unavailable)`);
+                    setText(this.t("patcher_installed_ver", [String(res.local_version ?? "?")]), true);
+                    this.log(this.t("log_patcher_local_ver_no_remote", [String(res.local_version ?? "?")]));
                 } else {
-                    setText("Up to date ✓", true);
-                    this.log(`Up to date (v${res.local_version})`);
+                    setText(this.t("patcher_up_to_date"), true);
+                    this.log(this.t("log_patcher_up_to_date", [String(res.local_version)]));
                 }
             } catch(e) {
-                setText(`Check failed: ${e}`, false);
-                this.log(`Check error: ${e}`);
+                if (this.isReloginError(e)) {
+                    setText(this.t("launcher_session_expired"), false);
+                    await this.promptRelogin();
+                    return;
+                }
+                setText(this.t("patcher_check_failed", [this.cleanErr(e)]), false);
+                this.log(this.t("log_patcher_check_error", [this.cleanErr(e)]));
             }
         });
 
         // Patch / Repair buttons
         document.getElementById("btn-patcher-patch")?.addEventListener("click", async () => {
             const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
             await this.runPatcher(gp, false);
         });
         document.getElementById("btn-patcher-repair")?.addEventListener("click", async () => {
             const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
-            await this.runPatcher(gp, true);
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
+            // Repair = SHA1-check every file and re-download only bad ones.
+            await this.runPatcher(gp, false, true);
         });
 
         // Verify button
         document.getElementById("btn-patcher-verify")?.addEventListener("click", async () => {
             const gp = getGamePath();
-            if (!gp) { setText("Set game path first.", false); return; }
-            setText("Verifying...");
-            this.log(`Verifying: ${gp}`);
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
+            setText(this.t("patcher_verifying"));
+            this.log(this.t("log_patcher_verifying", [gp]));
             try {
                 const res = await invoke("verify_game_files", { gamePath: gp }) as any;
-                if (res.error && !res.version) { setText(`Error: ${res.error}`, false); this.log(`Error: ${res.error}`); return; }
+                if (res.error && !res.version) { setText(this.t("msg_error_fmt", [String(res.error)]), false); this.log(this.t("msg_error_fmt", [String(res.error)])); return; }
                 const managed = res.managed_version ?? res.version ?? 0;
                 const local = res.local_version ?? res.version ?? 0;
                 const bt = res.buildtime ? new Date(res.buildtime * 1000).toLocaleDateString() : "";
-                const verLabel = (managed !== local) ? `v${managed} (local: v${local})` : `v${managed}`;
-                const header = verLabel + (bt ? ` (${bt})` : "") + ` — ${res.files_ok ?? 0} ok, ${res.files_missing ?? 0} missing, ${res.files_mismatched ?? 0} wrong`;
+                const verLabel = (managed !== local) ? this.t("patcher_ver_local", [String(managed), String(local)]) : `v${managed}`;
+                const header = verLabel + (bt ? ` (${bt})` : "") + " — " + this.t("patcher_verify_summary", [String(res.files_ok ?? 0), String(res.files_missing ?? 0), String(res.files_mismatched ?? 0)]);
                 if (res.ok) {
                     setText(header, true);
-                    this.log(`Verify OK: ${header}`);
+                    this.log(this.t("log_patcher_verify_ok", [header]));
                     const localEl = document.getElementById("patcher-version-local");
                     if (localEl && local) localEl.textContent = String(local);
                 } else {
                     const missStr = (res.missing ?? []).slice(0, 5).join(", ");
                     const mismStr = (res.mismatched ?? []).slice(0, 3).map((m: any) => m.path ?? m).join(", ");
                     setText(header, false);
-                    this.log(`Verify issues: ${header}`);
-                    if (missStr) this.log(`Missing: ${missStr}`);
-                    if (mismStr) this.log(`Wrong: ${mismStr}`);
+                    this.log(this.t("log_patcher_verify_issues", [header]));
+                    if (missStr) this.log(this.t("log_patcher_missing", [missStr]));
+                    if (mismStr) this.log(this.t("log_patcher_wrong", [mismStr]));
                 }
             } catch(e) {
-                setText(`Error: ${e}`, false);
-                this.log(`Verify error: ${e}`);
+                setText(this.t("msg_error_fmt", [String(e)]), false);
+                this.log(this.t("log_patcher_verify_error", [String(e)]));
             }
         });
 
         // Stop button
         document.getElementById("btn-patcher-stop")?.addEventListener("click", () => {
-            this.log("Stop requested — cancellation not yet implemented");
+            this.log(this.t("log_patcher_stop_requested"));
+            invoke(this.scanRunning ? "patch_scan_cancel" : "patch_cancel").catch(() => {});
         });
+
+        // Pause / Resume button (shown next to Stop while patching)
+        document.getElementById("btn-patcher-pause")?.addEventListener("click", async () => {
+            const pause = !this.patchPaused;
+            try {
+                await invoke(pause ? "patch_pause" : "patch_resume");
+                this.setPatchPaused(pause);
+                this.log(this.t(pause ? "log_patcher_paused" : "log_patcher_resumed"));
+            } catch (e) {
+                this.log(this.t("msg_error_fmt", [String(e)]), "error");
+            }
+        });
+
+        // Choose which files to update
+        document.getElementById("btn-patcher-scan")?.addEventListener("click", () => {
+            const gp = getGamePath();
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
+            this.scanPatchFiles(gp);
+        });
+        document.getElementById("btn-scan-select-all")?.addEventListener("click", () => this.setScanSelection(true));
+        document.getElementById("btn-scan-select-none")?.addEventListener("click", () => this.setScanSelection(false));
+        document.getElementById("btn-scan-close")?.addEventListener("click", () => {
+            document.getElementById("patcher-scan-panel")?.classList.add("hidden");
+        });
+        document.getElementById("btn-scan-patch-selected")?.addEventListener("click", async () => {
+            const gp = getGamePath();
+            if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
+            const only = Array.from(document.querySelectorAll<HTMLInputElement>("#patcher-scan-list input[type=checkbox]:checked"))
+                .map(cb => cb.dataset.path || "").filter(Boolean);
+            if (only.length === 0) { setText(this.t("patcher_nothing_selected"), false); return; }
+            document.getElementById("patcher-scan-panel")?.classList.add("hidden");
+            await this.runPatcher(gp, false, false, only);
+        });
+
+        // Check all installs (Patcher tab)
+        document.getElementById("btn-patcher-installs")?.addEventListener("click", () => this.checkAllInstalls("patcher-installs-panel"));
 
         // Settings > Patcher subtab wiring (elements live in stab-patcher but found by ID)
         const autoUpdateChk = document.getElementById("patcher-auto-update") as HTMLInputElement | null;
@@ -1035,8 +1249,11 @@ class App {
         const launchNexonEl = document.getElementById("launch-use-nexon-launcher") as HTMLInputElement | null;
         const launchCmdEl = document.getElementById("launch-cmd-override") as HTMLTextAreaElement | null;
         const prePatchEl = document.getElementById("pre-patch-cmd") as HTMLTextAreaElement | null;
+        const postPatchEl = document.getElementById("post-patch-cmd") as HTMLTextAreaElement | null;
         const preLaunchEl = document.getElementById("pre-launch-cmd") as HTMLTextAreaElement | null;
         const postLaunchEl = document.getElementById("post-launch-cmd") as HTMLTextAreaElement | null;
+        const ignoreListEl = document.getElementById("patcher-ignore-list") as HTMLTextAreaElement | null;
+        const productIdEl = document.getElementById("settings-product-id") as HTMLInputElement | null;
 
         if (autoUpdateChk) autoUpdateChk.checked = this.config.patcher_auto_update;
         if (focusOnStartChk) focusOnStartChk.checked = this.config.patcher_focus_on_start;
@@ -1045,9 +1262,16 @@ class App {
         if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
         if (launchNexonEl) launchNexonEl.checked = this.config.launch_use_nexon_launcher ?? false;
         if (launchCmdEl) launchCmdEl.value = this.config.launch_cmd_override ?? "";
-        if (prePatchEl) prePatchEl.value = this.config.pre_patch_cmd ?? "";
-        if (preLaunchEl) preLaunchEl.value = this.config.pre_launch_cmd ?? "";
-        if (postLaunchEl) postLaunchEl.value = this.config.post_launch_cmd ?? "";
+        if (productIdEl) productIdEl.value = String(this.config.product_id || 10200);
+        // Hooks + ignore list come from the config shared with the CLI/REST API.
+        this.loadSharedConfig().then(() => {
+            const h = this.sharedConfig.hooks;
+            if (prePatchEl) prePatchEl.value = h.before_patch ?? "";
+            if (postPatchEl) postPatchEl.value = h.after_patch ?? "";
+            if (preLaunchEl) preLaunchEl.value = h.before_launch ?? "";
+            if (postLaunchEl) postLaunchEl.value = h.after_launch ?? "";
+            if (ignoreListEl) ignoreListEl.value = this.sharedConfig.ignore.join("\n");
+        });
 
         autoUpdateChk?.addEventListener("change", () => { this.config.patcher_auto_update = autoUpdateChk.checked; this.saveConfig(); });
         focusOnStartChk?.addEventListener("change", () => { this.config.patcher_focus_on_start = focusOnStartChk.checked; this.saveConfig(); });
@@ -1064,18 +1288,32 @@ class App {
         });
         launchNexonEl?.addEventListener("change", () => { this.config.launch_use_nexon_launcher = launchNexonEl.checked; this.saveConfig(); });
         launchCmdEl?.addEventListener("blur", () => { this.config.launch_cmd_override = launchCmdEl.value.trim(); this.saveConfig(); });
-        prePatchEl?.addEventListener("blur", () => { this.config.pre_patch_cmd = prePatchEl.value.trim(); this.saveConfig(); });
-        preLaunchEl?.addEventListener("blur", () => { this.config.pre_launch_cmd = preLaunchEl.value.trim(); this.saveConfig(); });
-        postLaunchEl?.addEventListener("blur", () => { this.config.post_launch_cmd = postLaunchEl.value.trim(); this.saveConfig(); });
+        prePatchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.before_patch = prePatchEl.value.trim(); this.saveSharedConfig(); });
+        postPatchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.after_patch = postPatchEl.value.trim(); this.saveSharedConfig(); });
+        preLaunchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.before_launch = preLaunchEl.value.trim(); this.saveSharedConfig(); });
+        postLaunchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.after_launch = postLaunchEl.value.trim(); this.saveSharedConfig(); });
+        ignoreListEl?.addEventListener("blur", () => {
+            this.sharedConfig.ignore = ignoreListEl.value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+            this.saveSharedConfig();
+        });
+        productIdEl?.addEventListener("change", () => {
+            const v = parseInt(productIdEl.value, 10);
+            this.config.product_id = isNaN(v) || v <= 0 ? 10200 : v;
+            productIdEl.value = String(this.config.product_id);
+            this.saveConfig();
+            this.refreshNews();
+        });
 
         // Patcher settings: version refresh + force re-download + clear cache
         document.getElementById("btn-patcher-settings-check")?.addEventListener("click", async () => {
             const gp = this.config.patcher_game_path;
             if (!gp) return;
             try {
-                const res = await invoke("check_patch_version", { gamePath: gp }) as any;
+                const res = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
+                this.keepRefreshedSession(res.session);
                 const el = document.getElementById("patcher-settings-version");
                 if (el) el.textContent = `v${res.local_version ?? "?"}`;
+                if (res.relogin_required) await this.promptRelogin();
             } catch {}
         });
         document.getElementById("btn-patcher-force-repair")?.addEventListener("click", async () => {
@@ -1090,9 +1328,9 @@ class App {
             const el = document.getElementById("patcher-settings-version");
             try {
                 const res = await invoke("clear_patch_cache", { gamePath: gp }) as any;
-                if (el) el.textContent = res.deleted ? "Cache cleared" : "No cache";
+                if (el) el.textContent = res.deleted ? this.t("patcher_cache_cleared") : this.t("patcher_no_cache");
             } catch(e) {
-                if (el) el.textContent = `Error: ${e}`;
+                if (el) el.textContent = this.t("msg_error_fmt", [String(e)]);
             }
         });
 
@@ -1119,9 +1357,10 @@ class App {
                     if (wrap) wrap.style.display = "none";
                     if (pipeCard) pipeCard.style.display = "none";
                     if (pipeBar) pipeBar.style.width = "0%";
-                    if (pipeLabel) pipeLabel.textContent = "Idle";
+                    if (pipeLabel) pipeLabel.textContent = this.t("dash_pipe_idle");
                     if (stopBtn) stopBtn.style.display = "none";
-                    if (e.error) this.log(`Error: ${e.error}`);
+                    this.setPatchPaused(false, true);
+                    if (e.error) this.log(this.t("msg_error_fmt", [this.cleanErr(e.error)]));
                     // Clear all worker bars on completion
                     const barsEl = document.getElementById("patcher-bars");
                     if (barsEl) barsEl.innerHTML = "";
@@ -1131,21 +1370,23 @@ class App {
                     if (wrap) wrap.style.display = "block";
                     if (bar) bar.style.width = pct + "%";
                     if (stopBtn) stopBtn.style.display = "";
+                    const pauseBtnEl = document.getElementById("btn-patcher-pause");
+                    if (pauseBtnEl) pauseBtnEl.style.display = "";
                     const info = e.phase === "downloading"
-                        ? `${e.parts_done}/${e.parts_total} parts (${pct}%)`
+                        ? this.t("patcher_prog_parts", [String(e.parts_done), String(e.parts_total), String(pct)])
                         : e.phase === "scanning"
-                        ? `Scanning ${e.parts_done}/${e.parts_total} — ${e.files_done} need update`
-                        : `${e.files_done}/${e.files_total} files (${pct}%)`;
+                        ? this.t("patcher_prog_scanning", [String(e.parts_done), String(e.parts_total), String(e.files_done)])
+                        : this.t("patcher_prog_files", [String(e.files_done), String(e.files_total), String(pct)]);
                     const fileShort = e.current_file.length > 55 ? "..." + e.current_file.slice(-52) : e.current_file;
                     if (detail) detail.textContent = info + " — " + fileShort;
                     if (e.phase === "scanning" && e.parts_done === e.parts_total) {
-                        this.log(`Scan complete: ${e.files_done} of ${e.parts_total} files need update`);
+                        this.log(this.t("log_patcher_scan_complete", [String(e.files_done), String(e.parts_total)]));
                     }
                     if (e.phase === "installing" && e.files_done > 0 && e.files_done % 50 === 0) {
-                        this.log(`Installing: ${e.files_done}/${e.files_total} files (${pct}%)`);
+                        this.log(this.t("log_patcher_installing_progress", [String(e.files_done), String(e.files_total), String(pct)]));
                     }
                     if (pipeBar) pipeBar.style.width = pct + "%";
-                    if (pipeLabel) pipeLabel.textContent = "Patching: " + info;
+                    if (pipeLabel) pipeLabel.textContent = this.t("dash_pipe_patching", [info]);
                     if (speedEl && e.speed_bps) {
                         const mb = (e.speed_bps / 1048576).toFixed(1);
                         speedEl.textContent = `${mb} MB/s`;
@@ -1199,18 +1440,18 @@ class App {
                     if (e.phase === "assembling") {
                         const pct = e.parts_total > 0 ? Math.round(e.parts_done / e.parts_total * 100) : 0;
                         if (fill) { fill.style.animation = "none"; fill.style.width = pct + "%"; }
-                        if (phaseEl) phaseEl.textContent = `installing ${e.parts_done}/${e.parts_total}`;
-                        if (e.parts_done === 1) this.log(`Installing: ${fileShort}`);
+                        if (phaseEl) phaseEl.textContent = this.t("patcher_worker_installing", [String(e.parts_done), String(e.parts_total)]);
+                        if (e.parts_done === 1) this.log(this.t("log_patcher_installing_file", [fileShort]));
                     } else {
                         if (fill) { fill.style.animation = "patcher-sweep 1.5s linear infinite"; fill.style.width = "40%"; }
-                        if (phaseEl) phaseEl.textContent = "downloading";
+                        if (phaseEl) phaseEl.textContent = this.t("patcher_worker_downloading");
                     }
                 }
             });
         });
     }
 
-    async runPatcher(gamePath: string, forceRepair: boolean) {
+    async runPatcher(gamePath: string, forceRepair: boolean, verifyOnly = false, only: string[] | null = null) {
         const statusEl = document.getElementById("patcher-status");
         const wrap = document.getElementById("patcher-progress-wrap");
         const bar = document.getElementById("patcher-progress-bar");
@@ -1220,32 +1461,51 @@ class App {
         const setText = (msg: string, ok?: boolean) => {
             if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)"; }
         };
+        if (this.patchBusy) { setText(this.t("patcher_err_busy"), false); return; }
+        const busyToken = this.setPatchBusy(true);
         if (pipeCard) pipeCard.style.display = "";
         if (wrap) wrap.style.display = "block";
         if (bar) bar.style.width = "0%";
-        if (detail) detail.textContent = "Starting...";
+        if (detail) detail.textContent = this.t("patcher_starting");
         if (stopBtn) stopBtn.style.display = "";
-        setText(forceRepair ? "Repairing..." : "Patching...");
-        this.log(forceRepair ? "Starting full repair — scanning files for changes..." : "Starting patch...");
+        this.setPatchPaused(false);
+        const pauseBtn = document.getElementById("btn-patcher-pause");
+        if (pauseBtn) pauseBtn.style.display = "";
+        setText(forceRepair ? this.t("patcher_repairing") : this.t("patcher_patching"));
+        this.log(forceRepair ? this.t("log_patcher_start_repair") : this.t("log_patcher_start_patch"));
         try {
             const maxWorkers = this.config.patcher_max_workers ?? 10;
             const parallelOps = this.config.parallel_ops ?? true;
-            const res = await invoke("patch_game_files", { gamePath, maxWorkers, forceRepair, parallelOps }) as any;
+            if (!this.launcherSession) {
+                throw new Error(this.t("patcher_err_login_first"));
+            }
+            await this.loadSharedConfig();
+            const res = await invoke("patch_game_files", {
+                gamePath, maxWorkers, forceRepair, verify: verifyOnly, parallelOps,
+                ignore: this.sharedConfig.ignore, session: this.launcherSession,
+                prePatchCmd: this.sharedConfig.hooks.before_patch || null,
+                postPatchCmd: this.sharedConfig.hooks.after_patch || null,
+                only: only && only.length ? only : null,
+                profileId: this.activeProfileId || null,
+                profileName: this.activeProfileName() || null,
+            }) as any;
+            this.keepRefreshedSession(res.session);
             if (wrap) wrap.style.display = "none";
             if (pipeCard) pipeCard.style.display = "none";
             if (stopBtn) stopBtn.style.display = "none";
+            this.setPatchPaused(false, true);
             if (res.managed_version) {
                 const localEl = document.getElementById("patcher-version-local");
                 if (localEl) localEl.textContent = String(res.managed_version);
             }
             if (res.needs_elevation) {
-                setText("Requires administrator â€” relaunching...", false);
-                this.log("Permission denied â€” relaunching as administrator...");
+                setText(this.t("patcher_needs_admin"), false);
+                this.log(this.t("log_patcher_perm_denied"));
                 await invoke("request_elevation");
             } else if (res.ok) {
                 const msg = res.patched === 0
-                    ? `Up to date (v${res.managed_version ?? "?"})`
-                    : `Patched ${res.patched} files  v${res.managed_version ?? "?"}`;
+                    ? this.t("log_patcher_up_to_date", [String(res.managed_version ?? "?")])
+                    : this.t("patcher_patched_files", [String(res.patched), String(res.managed_version ?? "?")]);
                 setText(msg, true);
                 this.log(msg);
             } else if (res.message) {
@@ -1253,26 +1513,321 @@ class App {
                 this.log(res.message);
             } else {
                 const errs = (res.errors ?? []).slice(0, 3).join("; ");
-                setText(`Errors: ${errs}`, false);
-                this.log(`Errors: ${errs}`);
+                setText(this.t("patcher_errors", [errs]), false);
+                this.log(this.t("patcher_errors", [errs]));
             }
         } catch(e) {
+            e = this.errWithSession(e);
+            // Another patch/scan owns the install: leave its progress, Stop and
+            // Pause controls alone.
+            if (String(e) === "patch_busy") {
+                setText(this.t("patcher_err_busy"), false);
+                return;
+            }
             if (wrap) wrap.style.display = "none";
             if (pipeCard) pipeCard.style.display = "none";
             if (stopBtn) stopBtn.style.display = "none";
+            this.setPatchPaused(false, true);
+            if (this.isReloginError(e)) {
+                setText(this.t("launcher_session_expired"), false);
+                this.log(this.t("msg_error_fmt", [this.cleanErr(e)]));
+                await this.promptRelogin();
+                return;
+            }
             const errStr = String(e).toLowerCase();
             if (errStr.includes("access is denied") || errStr.includes("permissiondenied") || errStr.includes("permission denied")) {
-                setText("Requires administrator â€” relaunching...", false);
-                this.log("Permission denied â€” relaunching as administrator...");
+                setText(this.t("patcher_needs_admin"), false);
+                this.log(this.t("log_patcher_perm_denied"));
                 await invoke("request_elevation");
             } else {
-                setText(`Failed: ${e}`, false);
-                this.log(`Error: ${e}`);
+                setText(this.t("patcher_failed", [String(e)]), false);
+                this.log(this.t("msg_error_fmt", [String(e)]));
             }
+        } finally {
+            this.releasePatchBusy(busyToken);
         }
     }
 
+    /** Clear the busy state only if `token`'s run is the one that set it. */
+    private releasePatchBusy(token: number) {
+        if (this.patchBusy && this.patchBusyOwner === token) this.setPatchBusy(false);
+    }
 
+    /** Disable every button that starts a patch/scan while one runs. Returns
+     *  the owner token for a `true` call (pass it to releasePatchBusy). */
+    private setPatchBusy(busy: boolean): number {
+        this.patchBusy = busy;
+        this.patchBusyOwner = busy ? ++this.patchBusySeq : 0;
+        for (const id of ["btn-patcher-patch", "btn-patcher-repair", "btn-patcher-scan", "btn-scan-patch-selected", "btn-patcher-force-repair"]) {
+            const b = document.getElementById(id) as HTMLButtonElement | null;
+            if (b) b.disabled = busy;
+        }
+        return this.patchBusyOwner;
+    }
+
+
+
+    /** Load the shared hooks/ignore config once (migrates old GUI values on first run). */
+    private loadSharedConfig(): Promise<void> {
+        if (!this.sharedConfigLoaded) {
+            this.sharedConfigLoaded = invoke<SharedConfig>("shared_config_load").then(cfg => {
+                this.sharedConfig = { ignore: cfg?.ignore ?? [], hooks: cfg?.hooks ?? {} };
+            }).catch(e => {
+                this.log(this.t("log_shared_config_failed", [String(e)]), "warn");
+            });
+        }
+        return this.sharedConfigLoaded;
+    }
+
+    private async saveSharedConfig() {
+        try {
+            await invoke("shared_config_save", { config: this.sharedConfig });
+        } catch (e) {
+            this.log(this.t("log_shared_config_failed", [String(e)]), "warn");
+        }
+    }
+
+    private activeProfileName(): string {
+        return this.launcherProfiles.find(p => p.id === this.activeProfileId)?.name ?? "";
+    }
+
+    /** Reflect the pause state on the Pause/Resume button (optionally hiding it). */
+    private setPatchPaused(paused: boolean, hide = false) {
+        this.patchPaused = paused;
+        const btn = document.getElementById("btn-patcher-pause");
+        if (!btn) return;
+        btn.textContent = this.t(paused ? "patcher_resume" : "patcher_pause");
+        if (hide) btn.style.display = "none";
+        else if (paused) btn.style.display = "";
+    }
+
+    private formatBytes(n: number): string {
+        if (n >= 1073741824) return `${(n / 1073741824).toFixed(2)} GB`;
+        if (n >= 1048576) return `${(n / 1048576).toFixed(1)} MB`;
+        if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+        return `${n} B`;
+    }
+
+    /** Scan the install and list the files that need updating, with checkboxes. */
+    private async scanPatchFiles(gamePath: string) {
+        const statusEl = document.getElementById("patcher-status");
+        const panel = document.getElementById("patcher-scan-panel");
+        const list = document.getElementById("patcher-scan-list");
+        const setText = (msg: string, ok?: boolean) => {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)"; }
+        };
+        if (!this.launcherSession) { setText(this.t("patcher_err_login_first"), false); return; }
+        if (this.patchBusy) { setText(this.t("patcher_err_busy"), false); return; }
+        const busyToken = this.setPatchBusy(true);
+        let busyRejected = false;
+        this.scanRunning = true;
+        const stopBtn = document.getElementById("btn-patcher-stop");
+        if (stopBtn) stopBtn.style.display = "";
+        setText(this.t("patcher_scanning_files"));
+        this.log(this.t("log_patcher_scan_start", [gamePath]));
+        try {
+            await this.loadSharedConfig();
+            const res = await invoke("patch_scan", {
+                gamePath, verify: false, maxWorkers: this.config.patcher_max_workers ?? 10,
+                ignore: this.sharedConfig.ignore, session: this.launcherSession,
+                profileId: this.activeProfileId || null,
+            }) as { need: NeedItem[]; session?: any; cancelled?: boolean };
+            this.keepRefreshedSession(res.session);
+            if (res.cancelled) {
+                setText(this.t("patcher_scan_cancelled"), false);
+                this.log(this.t("patcher_scan_cancelled"));
+                panel?.classList.add("hidden");
+                return;
+            }
+            const need = res.need ?? [];
+            if (need.length === 0) {
+                setText(this.t("patcher_up_to_date"), true);
+                this.log(this.t("patcher_up_to_date"));
+                panel?.classList.add("hidden");
+                return;
+            }
+            if (list) {
+                list.innerHTML = "";
+                for (const item of need) {
+                    const row = document.createElement("label");
+                    row.className = "patcher-scan-row";
+                    const cb = document.createElement("input");
+                    cb.type = "checkbox";
+                    cb.checked = true;
+                    cb.dataset.path = item.path;
+                    cb.dataset.size = String(item.size);
+                    cb.addEventListener("change", () => this.updateScanSummary());
+                    row.appendChild(cb);
+                    row.appendChild(elText("span", "patcher-scan-path", item.path));
+                    row.appendChild(elText("span", "patcher-scan-reason", this.scanReasonText(item.reason)));
+                    row.appendChild(elText("span", "patcher-scan-size", this.formatBytes(item.size)));
+                    list.appendChild(row);
+                }
+            }
+            panel?.classList.remove("hidden");
+            this.updateScanSummary();
+            setText(this.t("patcher_scan_found", [String(need.length)]), false);
+            this.log(this.t("patcher_scan_found", [String(need.length)]));
+        } catch (e) {
+            if (String(e) === "patch_busy") {
+                // Another patch/scan owns the install: leave its Stop button alone.
+                busyRejected = true;
+                setText(this.t("patcher_err_busy"), false);
+            } else {
+                setText(this.t("patcher_check_failed", [String(e)]), false);
+                this.log(this.t("msg_error_fmt", [String(e)]), "error");
+            }
+        } finally {
+            if (stopBtn && !busyRejected) stopBtn.style.display = "none";
+            this.scanRunning = false;
+            this.releasePatchBusy(busyToken);
+        }
+    }
+
+    private scanReasonText(reason: string): string {
+        const map: Record<string, string> = {
+            "New": "scan_reason_new",
+            "Size changed": "scan_reason_size",
+            "Content changed": "scan_reason_content",
+            "Re-download": "scan_reason_redownload",
+        };
+        return map[reason] ? this.t(map[reason]) : reason;
+    }
+
+    private setScanSelection(checked: boolean) {
+        document.querySelectorAll<HTMLInputElement>("#patcher-scan-list input[type=checkbox]").forEach(cb => { cb.checked = checked; });
+        this.updateScanSummary();
+    }
+
+    private updateScanSummary() {
+        const boxes = Array.from(document.querySelectorAll<HTMLInputElement>("#patcher-scan-list input[type=checkbox]"));
+        const sel = boxes.filter(cb => cb.checked);
+        const bytes = sel.reduce((sum, cb) => sum + (parseInt(cb.dataset.size || "0", 10) || 0), 0);
+        const el = document.getElementById("patcher-scan-summary");
+        if (el) el.textContent = this.t("patcher_scan_selected", [String(sel.length), String(boxes.length), this.formatBytes(bytes)]);
+    }
+
+    /** Detect every install on this PC, check each against Nexon, and list them in `panelId`. */
+    private async checkAllInstalls(panelId: string) {
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        panel.classList.remove("hidden");
+        panel.innerHTML = "";
+        panel.appendChild(elText("div", "installs-note", this.t("installs_checking")));
+        this.log(this.t("log_installs_checking"));
+        const extra = [
+            this.config.patcher_game_path,
+            (document.getElementById("launcher-client-dir") as HTMLInputElement | null)?.value?.trim() ?? "",
+            ...this.launcherProfiles.map(p => p.client_dir || ""),
+        ].filter(Boolean);
+        try {
+            const res = await invoke("patch_check_all_installs", {
+                extra, session: this.launcherSession || null, profileId: this.activeProfileId || null,
+            }) as { folders: InstallStatus[]; session?: any };
+            this.keepRefreshedSession(res.session);
+            this.renderInstalls(panel, res.folders ?? []);
+        } catch (e) {
+            panel.innerHTML = "";
+            panel.appendChild(elText("div", "installs-note", this.t("msg_error_fmt", [String(e)])));
+            this.log(this.t("msg_error_fmt", [String(e)]), "error");
+        }
+    }
+
+    private renderInstalls(panel: HTMLElement, folders: InstallStatus[]) {
+        panel.innerHTML = "";
+        const head = document.createElement("div");
+        head.className = "installs-head";
+        head.appendChild(elText("span", "", this.t("installs_title", [String(folders.length)])));
+        const close = elText("button", "tab-btn", this.t("btn_close"));
+        close.addEventListener("click", () => panel.classList.add("hidden"));
+        head.appendChild(close);
+        panel.appendChild(head);
+        if (folders.length === 0) {
+            panel.appendChild(elText("div", "installs-note", this.t("installs_none")));
+            return;
+        }
+        for (const f of folders) {
+            const row = document.createElement("div");
+            row.className = "installs-row";
+            const status = f.error
+                ? (this.launcherSession ? this.t("installs_status_error") : this.t("installs_status_login"))
+                : f.update_available ? this.t("installs_status_update") : this.t("installs_status_ok");
+            const cls = f.error ? "unknown" : f.update_available ? "update" : "ok";
+            const badge = elText("span", `installs-badge ${cls}`, status);
+            if (f.error) badge.title = f.error;
+            row.appendChild(badge);
+            row.appendChild(elText("span", "installs-path", f.path));
+            const patchBtn = elText("button", "tab-btn", this.t("installs_use_patch"));
+            patchBtn.addEventListener("click", () => {
+                const el = document.getElementById("patcher-game-path") as HTMLInputElement | null;
+                if (el) el.value = f.path;
+                this.config.patcher_game_path = f.path;
+                this.saveConfig();
+                this.log(this.t("log_installs_selected_patch", [f.path]));
+                document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
+            });
+            row.appendChild(patchBtn);
+            const launchBtn = elText("button", "tab-btn", this.t("installs_use_launch"));
+            launchBtn.disabled = !f.client_dir;
+            launchBtn.addEventListener("click", () => {
+                const el = document.getElementById("launcher-client-dir") as HTMLInputElement | null;
+                if (el) el.value = f.client_dir;
+                this.log(this.t("log_installs_selected_launch", [f.client_dir]));
+                document.querySelector('.nav-item[data-tab="launcher"]')?.dispatchEvent(new Event('click'));
+            });
+            row.appendChild(launchBtn);
+            panel.appendChild(row);
+        }
+    }
+
+    // ── News (Dashboard) ────────────────────────────────────────────────────
+
+    private setupNews() {
+        document.getElementById("btn-news-refresh")?.addEventListener("click", () => this.refreshNews());
+        this.refreshNews();
+    }
+
+    private async refreshNews() {
+        const list = document.getElementById("dash-news-list");
+        if (!list) return;
+        let items: NewsItem[];
+        try {
+            items = await invoke<NewsItem[]>("fetch_news");
+        } catch (e) {
+            // Failures are a quiet log line; keep whatever is shown.
+            this.log(this.t("log_news_failed", [String(e)]), "warn");
+            if (!list.querySelector(".news-item")) {
+                list.innerHTML = "";
+                list.appendChild(elText("div", "activity-item no-activity", this.t("news_unavailable")));
+            }
+            return;
+        }
+        list.innerHTML = "";
+        if (!items || items.length === 0) {
+            list.appendChild(elText("div", "activity-item no-activity", this.t("news_empty")));
+            return;
+        }
+        for (const n of items.slice(0, 12)) {
+            const row = document.createElement("div");
+            row.className = "news-item" + (n.maintenance ? " maintenance" : "");
+            row.tabIndex = 0;
+            row.title = n.summary || n.title;
+            const meta = document.createElement("div");
+            meta.className = "news-meta";
+            const d = n.date ? new Date(n.date) : null;
+            meta.appendChild(elText("span", "news-date", d && !isNaN(d.getTime()) ? d.toLocaleDateString() : n.date));
+            meta.appendChild(elText("span", "news-cat", n.maintenance ? this.t("news_maintenance") : n.category));
+            row.appendChild(meta);
+            row.appendChild(elText("div", "news-title", n.title));
+            const openIt = () => {
+                if (!n.url) return;
+                invoke("open_external_url", { url: n.url }).catch(e => this.log(this.t("msg_error_fmt", [String(e)]), "warn"));
+            };
+            row.addEventListener("click", openIt);
+            row.addEventListener("keydown", (ev) => { if (ev.key === "Enter") openIt(); });
+            list.appendChild(row);
+        }
+    }
 
     private setupDashboard() {
         const pollStats = async () => {
@@ -1308,119 +1863,236 @@ class App {
         this.setupModsActions();
     }
 
+    /** Reflect modBrowserMode in the Mods tab: toggle buttons + online toolbar. */
+    private syncModsViewUI() {
+        const remote = this.modBrowserMode === 'remote';
+        document.getElementById("btn-mods-view-local")?.classList.toggle("active", !remote);
+        document.getElementById("btn-mods-view-online")?.classList.toggle("active", remote);
+        const toolbar = document.getElementById("mods-online-toolbar");
+        if (toolbar) toolbar.style.display = remote ? "" : "none";
+    }
+
+    /** Show the in-app API's state on the Mods tab badge. */
+    private async refreshApiBadge() {
+        const badge = document.getElementById("mods-api-badge");
+        if (!badge) return;
+        try {
+            const port = await invoke<number>("get_api_port");
+            badge.textContent = port > 0 ? `API :${port}` : this.t("api_badge_off");
+            badge.classList.toggle("api-badge-off", port === 0);
+        } catch (_) {
+            badge.style.display = "none";
+        }
+    }
+
     private async refreshModsList() {
+        this.syncModsViewUI();
         if (this.modBrowserMode === 'remote') {
             await this.refreshRemoteMods();
             return;
         }
-        const list  = document.getElementById("dash-mods-list");
-        const empty = document.getElementById("dash-mods-empty");
-        const path  = document.getElementById("dash-mods-path");
+        const list  = document.getElementById("mods-list");
+        const empty = document.getElementById("mods-empty");
+        const path  = document.getElementById("mods-path");
         if (!list) return;
+        list.querySelectorAll(".mod-item").forEach(el => el.remove());
+        if (empty) { empty.textContent = this.t("mods_empty_local"); empty.style.display = ""; }
         try {
             const dir  = await invoke("get_mods_dir") as string;
             const mods = await invoke("list_mod_files") as Array<{
                 file: string; name: string; version?: string; author?: string;
                 description?: string; tags?: string[]; file_count: number; is_public: boolean; error?: string;
             }>;
+            if (this.modBrowserMode !== 'local') return; // switched views while loading
             if (path) path.textContent = dir;
             list.querySelectorAll(".mod-item").forEach(el => el.remove());
-            if (mods.length === 0) {
-                if (empty) empty.style.display = "";
-            } else {
-                if (empty) empty.style.display = "none";
-                for (const m of mods) {
-                    const el = document.createElement("div");
-                    el.className = "mod-item";
-                    if (m.error) {
-                        el.innerHTML = `<span class="mod-item-name">${m.file}</span><span class="mod-item-err">${m.error}</span>`;
-                    } else {
-                        const pub = m.is_public ? `<span class="mod-item-badge-pub">PUBLIC</span>` : "";
-                        const tagsHtml = m.tags && m.tags.length
-                            ? m.tags.map(t => `<span class="mod-tag">${t}</span>`).join("")
-                            : "";
-                        const desc = m.description ? `<div class="mod-item-desc">${m.description}</div>` : "";
-                        const byline = [m.version, m.author].filter(Boolean).join(" · ");
-                        el.innerHTML = `
-                            <div class="mod-item-header">
-                                <span class="mod-item-name">${m.name}</span>
-                                ${pub}
-                                <button class="tab-btn mod-apply-btn" data-modfile="${m.file}" style="margin-left:auto;font-size:11px;padding:2px 8px;">Apply</button>
-                            </div>
-                            <div class="mod-item-meta">${byline} · ${m.file_count} files ${tagsHtml}</div>
-                            ${desc}`;
-                        el.querySelector(".mod-apply-btn")?.addEventListener("click", async () => {
-                            await this.applyModFromDashboard(dir + "/" + m.file);
-                        });
-                    }
-                    list.insertBefore(el, empty!);
+            if (empty) empty.style.display = mods.length === 0 ? "" : "none";
+            // .mod metadata is user-supplied: build rows with textContent only.
+            for (const m of mods) {
+                const el = elText("div", "mod-item");
+                if (m.error) {
+                    el.append(elText("span", "mod-item-name", m.file), elText("span", "mod-item-err", m.error));
+                } else {
+                    const header = elText("div", "mod-item-header");
+                    header.append(elText("span", "mod-item-name", m.name));
+                    if (m.is_public) header.append(elText("span", "mod-item-badge-pub", this.t("mod_public")));
+                    const btn = elText("button", "tab-btn mod-apply-btn", this.t("mod_apply"));
+                    btn.style.marginLeft = "auto";
+                    btn.addEventListener("click", async () => {
+                        await this.applyModFromDashboard(dir + "/" + m.file);
+                    });
+                    header.append(btn);
+                    const byline = [m.version, m.author].filter(Boolean) as string[];
+                    byline.push(this.t("mod_file_count", [String(m.file_count)]));
+                    const meta = elText("div", "mod-item-meta", byline.join(" · "));
+                    for (const tag of m.tags ?? []) meta.append(elText("span", "mod-tag", tag));
+                    el.append(header, meta);
+                    if (m.description) el.append(elText("div", "mod-item-desc", m.description));
                 }
-            }
-        } catch (_) {}
-    }
-
-    private async refreshRemoteMods() {
-        const list  = document.getElementById("dash-mods-list");
-        const empty = document.getElementById("dash-mods-empty");
-        const path  = document.getElementById("dash-mods-path");
-        if (!list) return;
-        list.querySelectorAll(".mod-item").forEach(el => el.remove());
-        const url = this.config.mod_remote_url || "https://shaggyze.website/mabipatcher/api/mods";
-        if (path) path.textContent = url;
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const remoteMods = await resp.json() as Array<{
-                name: string; description?: string; url: string; version?: string; author?: string;
-            }>;
-            if (remoteMods.length === 0) {
-                if (empty) { empty.textContent = this.t("mod_no_remote"); empty.style.display = ""; }
-                return;
-            }
-            if (empty) empty.style.display = "none";
-            const dir = await invoke("get_mods_dir") as string;
-            for (const m of remoteMods) {
-                const el = document.createElement("div");
-                el.className = "mod-item";
-                const byline = [m.version, m.author].filter(Boolean).join(" · ");
-                const desc = m.description ? `<div class="mod-item-desc">${m.description}</div>` : "";
-                el.innerHTML = `
-                    <div class="mod-item-header">
-                        <span class="mod-item-name">${m.name}</span>
-                        <button class="tab-btn mod-install-btn" style="margin-left:auto;font-size:11px;padding:2px 8px;">${this.t("mod_install")}</button>
-                    </div>
-                    <div class="mod-item-meta">${byline}</div>
-                    ${desc}`;
-                const btn = el.querySelector(".mod-install-btn") as HTMLButtonElement;
-                btn.addEventListener("click", async () => {
-                    btn.textContent = this.t("mod_installing");
-                    btn.disabled = true;
-                    try {
-                        const r = await fetch(m.url);
-                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                        const content = await r.text();
-                        const filename = m.name.replace(/[^\w\-.]/g, "_") + ".mod";
-                        await writeTextFile(dir + "\\" + filename, content);
-                        btn.textContent = this.t("mod_install_ok");
-                    } catch (e) {
-                        btn.textContent = this.t("mod_install");
-                        btn.disabled = false;
-                        this.log(`[Mods] Install failed: ${e}`, "error");
-                    }
-                });
-                list.insertBefore(el, empty!);
+                list.insertBefore(el, empty);
             }
         } catch (e) {
-            if (empty) { empty.textContent = `${this.t("mod_no_remote")}: ${e}`; empty.style.display = ""; }
+            if (empty) { empty.textContent = String(e); empty.style.display = ""; }
         }
+    }
+
+    /** Catalog source: config override or the website's Mods page. http(s) only. */
+    private modCatalogUrl(): string {
+        const u = (this.config.mod_remote_url || "").trim();
+        return /^https?:\/\//i.test(u) ? u : DEFAULT_MOD_CATALOG_URL;
+    }
+
+    /** The website builds packages at `<origin>/api/pack` (POST {selected, format}). */
+    private modPackUrl(): string {
+        try { return new URL(this.modCatalogUrl()).origin + "/api/pack"; }
+        catch { return new URL(DEFAULT_MOD_CATALOG_URL).origin + "/api/pack"; }
+    }
+
+    private async refreshRemoteMods(force = false) {
+        const list  = document.getElementById("mods-list");
+        const empty = document.getElementById("mods-empty");
+        const path  = document.getElementById("mods-path");
+        if (!list) return;
+        const url = this.modCatalogUrl();
+        if (path) path.textContent = url;
+        list.querySelectorAll(".mod-item").forEach(el => el.remove());
+        if (!this.webModCatalog || force) {
+            if (empty) { empty.textContent = this.t("mods_loading"); empty.style.display = ""; }
+            try {
+                // Fetched in Rust (no CORS); the site has no JSON list, so the
+                // command reads the catalog out of the Mods page's JS bundle.
+                const raw = await invoke("fetch_web_mods_catalog", { url }) as unknown;
+                const arr: unknown[] = Array.isArray(raw) ? raw
+                    : (raw && Array.isArray((raw as any).mods)) ? (raw as any).mods : [];
+                this.webModCatalog = arr.filter((m): m is WebMod =>
+                    !!m && typeof (m as any).id === "number" && typeof (m as any).name === "string");
+                this.populateModCategories();
+            } catch (e) {
+                if (this.modBrowserMode === 'remote' && empty) {
+                    empty.textContent = this.t("mods_catalog_failed", [String(e)]);
+                    empty.style.display = "";
+                }
+                return;
+            }
+        }
+        await this.refreshInstalledWebMods();
+        if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+    }
+
+    private async refreshInstalledWebMods() {
+        try { this.webModsInstalled = new Set(await invoke("list_installed_web_mods") as number[]); }
+        catch { /* keep previous set */ }
+    }
+
+    private populateModCategories() {
+        const sel = document.getElementById("mods-category") as HTMLSelectElement | null;
+        if (!sel || !this.webModCatalog) return;
+        const current = sel.value;
+        while (sel.options.length > 1) sel.remove(1);
+        const cats = [...new Set(this.webModCatalog.map(m => m.category).filter(Boolean) as string[])].sort();
+        for (const c of cats) {
+            const o = document.createElement("option");
+            o.value = c;
+            o.textContent = c;
+            sel.append(o);
+        }
+        sel.value = cats.includes(current) ? current : "";
+    }
+
+    /** Render the website catalog with the current search / category / installed filters. */
+    private renderRemoteMods() {
+        const list  = document.getElementById("mods-list");
+        const empty = document.getElementById("mods-empty");
+        if (!list || !this.webModCatalog) return;
+        const q   = ((document.getElementById("mods-search") as HTMLInputElement | null)?.value || "").trim().toLowerCase();
+        const cat = (document.getElementById("mods-category") as HTMLSelectElement | null)?.value || "";
+        const installedOnly = (document.getElementById("mods-installed-only") as HTMLInputElement | null)?.checked ?? false;
+        const shown = this.webModCatalog.filter(m =>
+            (!cat || m.category === cat) &&
+            (!installedOnly || this.webModsInstalled.has(m.id)) &&
+            (!q || [m.name, m.description, m.author, m.category, ...(m.tags ?? [])]
+                .some(s => (s || "").toLowerCase().includes(q))));
+
+        const scroll = list.scrollTop;
+        list.querySelectorAll(".mod-item").forEach(el => el.remove());
+        const count = document.getElementById("mods-count");
+        if (count) count.textContent = this.t("mods_count", [
+            String(shown.length), String(this.webModCatalog.length), String(this.webModsInstalled.size)]);
+        if (empty) {
+            empty.textContent = this.webModCatalog.length === 0 ? this.t("mod_no_remote") : this.t("mods_no_match");
+            empty.style.display = shown.length === 0 ? "" : "none";
+        }
+        // Website data is remote: build rows with textContent only.
+        for (const m of shown) list.insertBefore(this.buildWebModRow(m), empty);
+        list.scrollTop = scroll;
+    }
+
+    private buildWebModRow(m: WebMod): HTMLElement {
+        const installed = this.webModsInstalled.has(m.id);
+        const el = elText("div", installed ? "mod-item installed" : "mod-item");
+        const header = elText("div", "mod-item-header");
+        header.append(elText("span", "mod-item-name", m.name));
+        header.append(elText("span", "mod-item-id", `MOD${String(m.id).padStart(4, "0")}`));
+        if (installed) header.append(elText("span", "mod-item-badge-installed", this.t("mod_install_ok")));
+        if (m.hasDelete) header.append(elText("span", "mod-item-badge-delete", this.t("mods_deletes_badge")));
+
+        const actions = elText("span", "mod-item-actions");
+        const installBtn = elText("button", "tab-btn", this.t(installed ? "mods_reinstall" : "mod_install"));
+        installBtn.addEventListener("click", async () => {
+            const format = (document.getElementById("mods-format") as HTMLSelectElement | null)?.value === "pack" ? "pack" : "it";
+            installBtn.disabled = true;
+            installBtn.textContent = this.t("mod_installing");
+            try {
+                const saved = await invoke("install_web_mod", {
+                    packUrl: this.modPackUrl(), id: m.id, name: m.name, format,
+                }) as string;
+                this.webModsInstalled.add(m.id);
+                this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
+                this.renderRemoteMods();
+            } catch (e) {
+                installBtn.disabled = false;
+                installBtn.textContent = this.t(installed ? "mods_reinstall" : "mod_install");
+                this.log(this.t("log_mods_install_failed", [String(e)]), "error");
+            }
+        });
+        actions.append(installBtn);
+        if (installed) {
+            const removeBtn = elText("button", "tab-btn", this.t("mods_remove"));
+            removeBtn.addEventListener("click", async () => {
+                removeBtn.disabled = true;
+                try {
+                    await invoke("remove_web_mod", { id: m.id });
+                    this.webModsInstalled.delete(m.id);
+                    this.log(this.t("log_mods_web_removed", [m.name]), "info");
+                    this.renderRemoteMods();
+                } catch (e) {
+                    removeBtn.disabled = false;
+                    this.log(this.t("log_mods_install_failed", [String(e)]), "error");
+                }
+            });
+            actions.append(removeBtn);
+        }
+        header.append(actions);
+
+        const byline: string[] = [];
+        if (m.version) byline.push(`v${m.version}`);
+        if (m.author) byline.push(m.author);
+        if (typeof m.files === "number") byline.push(this.t("mod_file_count", [String(m.files)]));
+        const meta = elText("div", "mod-item-meta", byline.join(" · "));
+        if (m.category) meta.append(elText("span", "mod-tag", m.category));
+        for (const tag of m.tags ?? []) meta.append(elText("span", "mod-tag", tag));
+        el.append(header, meta);
+        // The site's descriptions often just repeat the name; skip those.
+        if (m.description && m.description !== m.name) el.append(elText("div", "mod-item-desc", m.description));
+        return el;
     }
 
     private async applyModFromDashboard(modFilePath: string) {
         try {
             const { open } = await import("./platform/dialog");
             const archivePath = await open({
-                title: "Select target .it or .pack archive",
-                filters: [{ name: "Archive", extensions: ["it", "pack"] }],
+                title: this.t("dlg_select_target_archive"),
+                filters: [{ name: this.t("dlg_filter_archive"), extensions: ["it", "pack"] }],
             });
             if (!archivePath) return;
             const archStr = typeof archivePath === "string" ? archivePath : (archivePath as any).path ?? (archivePath as any[])[0];
@@ -1432,8 +2104,8 @@ class App {
                 key: null,
                 modDir,
             }) as any;
-            alert(`Applied: ${result.name} → ${result.replaced} replaced, ${result.deleted} deleted, ${result.patched} patched`);
-        } catch (err) { alert("Apply failed: " + err); }
+            alert(this.t("mod_applied_summary", [String(result.name), String(result.replaced), String(result.deleted), String(result.patched)]));
+        } catch (err) { alert(this.t("mod_apply_failed", [String(err)])); }
     }
 
     private setupModsActions() {
@@ -1441,8 +2113,8 @@ class App {
             try {
                 const dir = await invoke("get_mods_dir") as string;
                 await invoke("execute_terminal_command", { command: `explorer "${dir}"` });
-                this.log(`[Mods] Opened mods directory: ${dir}`, "info");
-            } catch (e) { this.log(`[Mods] Failed to open mods dir: ${e}`, "error"); }
+                this.log(this.t("log_mods_opened_dir", [dir]), "info");
+            } catch (e) { this.log(this.t("log_mods_open_dir_failed", [String(e)]), "error"); }
         });
         document.getElementById("btn-new-mod-template")?.addEventListener("click", async () => {
             try {
@@ -1451,62 +2123,144 @@ class App {
                 const dest = dir + "\\new_mod.mod";
                 await writeTextFile(dest, tmpl);
                 await invoke("execute_terminal_command", { command: `explorer /select,"${dest}"` });
-                this.log(`[Mods] Created new mod template: ${dest}`, "info");
-            } catch (e) { this.log(`[Mods] Failed to create template: ${e}`, "error"); }
+                this.log(this.t("log_mods_template_created", [dest]), "info");
+            } catch (e) { this.log(this.t("log_mods_template_failed", [String(e)]), "error"); }
         });
 
-        const toggleBtn = document.getElementById("btn-mod-source-toggle");
-        if (toggleBtn) {
-            toggleBtn.addEventListener("click", () => {
-                this.modBrowserMode = this.modBrowserMode === 'local' ? 'remote' : 'local';
-                toggleBtn.setAttribute("data-i18n", this.modBrowserMode === 'remote' ? "btn_mod_local" : "btn_mod_online");
-                toggleBtn.textContent = this.modBrowserMode === 'remote' ? this.t("btn_mod_local") : this.t("btn_mod_online");
-                this.refreshModsList();
-            });
-        }
+        // Local / Online (website) view toggle
+        const setView = (mode: 'local' | 'remote') => {
+            if (this.modBrowserMode === mode) return;
+            this.modBrowserMode = mode;
+            this.refreshModsList();
+        };
+        document.getElementById("btn-mods-view-local")?.addEventListener("click", () => setView('local'));
+        document.getElementById("btn-mods-view-online")?.addEventListener("click", () => setView('remote'));
+        document.getElementById("btn-mods-refresh")?.addEventListener("click", () => {
+            if (this.modBrowserMode === 'remote') this.refreshRemoteMods(true);
+            else this.refreshModsList();
+        });
+        document.getElementById("mods-search")?.addEventListener("input", () => this.renderRemoteMods());
+        document.getElementById("mods-category")?.addEventListener("change", () => this.renderRemoteMods());
+        document.getElementById("mods-installed-only")?.addEventListener("change", () => this.renderRemoteMods());
     }
 
     // ── VFS editing ─────────────────────────────────────────────────────────────
 
-    private vfsPending: Array<{op: string; [k: string]: string}> = [];
+    private vfsPending: Array<{op: string; [k: string]: any}> = [];
+
+    // Tree selection (keys "f:<entry name>" for files, "d:<folder path>" for folders)
+    private vfsSel = new Set<string>();
+    private vfsSelAnchor: string | null = null;
+    // Pointer-based row drag (HTML5 DnD is swallowed by Tauri's native drop handler)
+    private vfsDrag: {
+        key: string; x: number; y: number; pointerId: number; active: boolean;
+        ghost: HTMLElement | null; target: { folder: string; row: HTMLElement | null } | null;
+    } | null = null;
+    private vfsSuppressClick = false;
 
     private setupVfsEditing() {
         const tree = document.getElementById("file-tree")!;
         const toolbar = document.getElementById("vfs-toolbar")!;
 
-        // Drag-over: highlight drop target
-        tree.addEventListener("dragover", (e) => {
-            if (e.dataTransfer?.types.includes("Files")) {
-                e.preventDefault();
-                tree.classList.add("vfs-drop-active");
+        // Files dragged in from Explorer arrive as tauri://drag-* events (with paths and a
+        // physical-pixel position), not as HTML5 drop events: highlight the hovered folder.
+        listen("tauri://drag-enter", (event) => this.vfsExternalHover((event.payload as any)?.position));
+        listen("tauri://drag-over", (event) => this.vfsExternalHover((event.payload as any)?.position));
+        listen("tauri://drag-leave", () => this.vfsExternalHover(null));
+
+        // Selection: click = single, Ctrl+click = toggle, Shift+click = range
+        tree.addEventListener("click", (e) => {
+            if (this.vfsSuppressClick) { e.stopPropagation(); e.preventDefault(); return; }
+            const t = e.target as HTMLElement;
+            if (t.closest("input")) return;
+            const row = t.closest<HTMLElement>(".tree-row.folder, .tree-item");
+            const key = row ? this.vfsRowKey(row) : null;
+            if (!key) return;
+            if (e.ctrlKey || e.metaKey) {
+                if (this.vfsSel.has(key)) this.vfsSel.delete(key); else this.vfsSel.add(key);
+                this.vfsSelAnchor = key;
+                this.vfsPaintSelection();
+                e.stopPropagation(); e.preventDefault();
+                return;
             }
+            if (e.shiftKey && this.vfsSelAnchor) {
+                const rows = this.vfsVisibleRows();
+                const keys = rows.map(r => this.vfsRowKey(r));
+                const a = keys.indexOf(this.vfsSelAnchor), b = keys.indexOf(key);
+                if (a >= 0 && b >= 0) {
+                    this.vfsSel = new Set(keys.slice(Math.min(a, b), Math.max(a, b) + 1).filter((k): k is string => !!k));
+                    this.vfsPaintSelection();
+                    e.stopPropagation(); e.preventDefault();
+                    return;
+                }
+            }
+            this.vfsSel = new Set([key]);
+            this.vfsSelAnchor = key;
+            this.vfsPaintSelection();
+        }, true);
+
+        // Row dragging: move inside the tree, or drag out of the window to extract
+        tree.addEventListener("pointerdown", (e) => {
+            if (e.button !== 0 || this.loadedEntries.length === 0) return;
+            const t = e.target as HTMLElement;
+            if (t.closest("input")) return;
+            const row = t.closest<HTMLElement>(".tree-row.folder, .tree-item");
+            const key = row ? this.vfsRowKey(row) : null;
+            if (!key) return;
+            this.vfsDrag = { key, x: e.clientX, y: e.clientY, pointerId: e.pointerId, active: false, ghost: null, target: null };
         });
-        tree.addEventListener("dragleave", () => tree.classList.remove("vfs-drop-active"));
-        tree.addEventListener("drop", async (e) => {
+        document.addEventListener("pointermove", (e) => {
+            const d = this.vfsDrag;
+            if (!d) return;
+            if (!(e.buttons & 1)) { this.vfsEndDrag(); return; }
+            if (!d.active) {
+                if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
+                d.active = true;
+                if (!this.vfsSel.has(d.key)) { this.vfsSel = new Set([d.key]); this.vfsSelAnchor = d.key; this.vfsPaintSelection(); }
+                try { tree.setPointerCapture(d.pointerId); } catch { /* capture is best-effort */ }
+                const ghost = document.createElement("div");
+                ghost.className = "vfs-drag-ghost";
+                ghost.textContent = this.t("vfs_drag_items", [String(this.vfsSelectionItems().length)]);
+                document.body.appendChild(ghost);
+                d.ghost = ghost;
+            }
+            if (d.ghost) { d.ghost.style.left = `${e.clientX + 14}px`; d.ghost.style.top = `${e.clientY + 10}px`; }
+            if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= window.innerWidth - 1 || e.clientY >= window.innerHeight - 1) {
+                this.vfsStartDragOut();
+                return;
+            }
+            d.target = this.vfsDropTargetAt(document.elementFromPoint(e.clientX, e.clientY));
+            this.vfsHighlightTarget(d.target);
+        });
+        // Leaving the viewport with the button held hands the drag to the OS (drag-out)
+        document.documentElement.addEventListener("pointerleave", () => {
+            if (this.vfsDrag?.active) this.vfsStartDragOut();
+        });
+        document.addEventListener("pointerup", () => {
+            const d = this.vfsDrag;
+            if (!d) return;
+            const target = d.active ? d.target : null;
+            const wasActive = d.active;
+            this.vfsEndDrag();
+            if (wasActive) {
+                this.vfsSuppressClick = true;
+                setTimeout(() => { this.vfsSuppressClick = false; }, 0);
+            }
+            if (target) this.vfsMoveSelectionTo(target.folder);
+        });
+
+        // Delete = queue delete, F2 = rename, Esc = cancel a row drag
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && this.vfsDrag) { this.vfsEndDrag(); return; }
+            if (e.key !== "Delete" && e.key !== "F2") return;
+            if (!document.getElementById("list")?.classList.contains("active")) return;
+            const t = e.target as HTMLElement;
+            if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) return;
+            if (!document.getElementById("conflict-dialog")?.classList.contains("hidden")) return;
+            if (this.vfsSel.size === 0 || !this.vfsCanEdit()) return;
             e.preventDefault();
-            tree.classList.remove("vfs-drop-active");
-            if (!this.currentArchive) return;
-            const files = Array.from(e.dataTransfer?.files ?? []);
-            // Find which folder was hovered
-            const hoveredRow = (e.target as HTMLElement).closest<HTMLElement>(".tree-row.folder, .tree-item");
-            let destFolder = "";
-            if (hoveredRow) {
-                const folderPath = hoveredRow.dataset.path ?? "";
-                destFolder = folderPath ? folderPath.replace(/\\/g, "/").replace(/\/?$/, "/") : "";
-            }
-            // Build candidate list for conflict checking
-            const candidates: Array<{localPath: string; destPath: string}> = [];
-            for (const f of files) {
-                const localPath = (f as any).path as string | undefined;
-                if (!localPath) continue;
-                candidates.push({ localPath, destPath: destFolder + f.name });
-            }
-            // Resolve conflicts (shows dialog if any file already exists in the archive)
-            const resolved = await this.resolveConflicts(candidates);
-            for (const r of resolved) {
-                this.vfsPending.push({ op: "add", dest: r.destPath, local_src: r.localPath });
-            }
-            if (resolved.length > 0) this.renderVfsPending();
+            if (e.key === "Delete") this.vfsDeleteSelection();
+            else this.vfsRenameSelection();
         });
 
         // Right-click on tree items → unified context menu
@@ -1516,6 +2270,12 @@ class App {
             if (!row) return;
             e.preventDefault();
             const path = row.dataset.path ?? "";
+            const rowKey = this.vfsRowKey(row);
+            if (rowKey && !this.vfsSel.has(rowKey)) {
+                this.vfsSel = new Set([rowKey]);
+                this.vfsSelAnchor = rowKey;
+                this.vfsPaintSelection();
+            }
             // Build a synthetic entry so showContextMenu can work
             const syntheticEntry = this.loadedEntries.find(en => en.name === path) ?? {
                 name: path, source_archive: this.currentArchive, salt_used: "",
@@ -1523,21 +2283,39 @@ class App {
                 offset: 0, checksum: 0, flags: 0, key: [], iv0: 0, h_off: 0, mode: ""
             } as AggregateEntry;
             this.showContextMenu(e, syntheticEntry);
+            // Selection-aware actions (folders and multi-select)
+            const isFolder = row.classList.contains("folder");
+            const extractBtn = document.getElementById("menu-extract");
+            if (extractBtn && isFolder) extractBtn.style.display = "none";
+            const extractSel = document.getElementById("menu-extract-sel");
+            if (extractSel) {
+                extractSel.style.display = "block";
+                extractSel.onclick = () => this.vfsExtractSelection();
+            }
+            const canEdit = this.vfsCanEdit();
+            const renameBtn = document.getElementById("menu-rename");
+            const deleteBtn = document.getElementById("menu-delete");
+            if (renameBtn) {
+                renameBtn.style.display = canEdit && this.vfsSel.size === 1 ? "block" : "none";
+                renameBtn.onclick = () => this.vfsRenameSelection();
+            }
+            if (deleteBtn) {
+                deleteBtn.style.display = canEdit ? "block" : "none";
+                deleteBtn.onclick = () => this.vfsDeleteSelection();
+            }
         });
 
         // Merge archive button
         document.getElementById("btn-vfs-merge")?.addEventListener("click", async () => {
-            if (!this.currentArchive) return;
+            if (!this.vfsCanEdit()) return;
             try {
                 const { open } = await import("./platform/dialog");
-                const chosen = await open({ filters: [{ name: "Archive", extensions: ["it", "pack"] }] });
+                const chosen = await open({ filters: [{ name: this.t("dlg_filter_archive"), extensions: ["it", "pack"] }] });
                 if (!chosen) return;
                 const srcPath = typeof chosen === "string" ? chosen : (chosen as any).path ?? chosen[0];
-                this.vfsPending.push({ op: "merge", src_archive: srcPath });
-                this.renderVfsPending();
-                this.log(`[VFS] Queued merge: ${srcPath} → ${this.currentArchive}`, "info");
+                await this.vfsQueueMerge(srcPath);
             } catch (err) {
-                this.log(`[VFS] Merge error: ${err}`, "error");
+                this.log(this.t("log_vfs_merge_error", [String(err)]), "error");
             }
         });
 
@@ -1545,9 +2323,9 @@ class App {
         document.getElementById("btn-vfs-apply")?.addEventListener("click", async () => {
             if (!this.currentArchive || this.vfsPending.length === 0) return;
             const btn = document.getElementById("btn-vfs-apply")!;
-            btn.textContent = "Applying…";
+            btn.textContent = this.t("vfs_applying");
             btn.setAttribute("disabled", "true");
-            this.log(`[VFS] Applying ${this.vfsPending.length} change(s) to ${this.currentArchive}`, "info");
+            this.log(this.t("log_vfs_applying", [String(this.vfsPending.length), this.currentArchive]), "info");
             try {
                 const result = await invoke("apply_vfs_changes", {
                     archive: this.currentArchive,
@@ -1556,13 +2334,13 @@ class App {
                 }) as any;
                 this.vfsPending = [];
                 this.renderVfsPending();
-                this.log(`[VFS] Applied ${result.changes} change(s) — ${JSON.stringify(result.stats)}`, "info");
+                this.log(this.t("log_vfs_applied", [String(result.changes), JSON.stringify(result.stats)]), "info");
                 // Reload the archive listing
                 await this.listArchive(this.currentArchive);
             } catch (err) {
-                this.log(`[VFS] Apply failed: ${err}`, "error");
+                this.log(this.t("log_vfs_apply_failed", [String(err)]), "error");
             }
-            btn.textContent = "APPLY CHANGES";
+            btn.textContent = this.t("btn_vfs_apply");
             btn.removeAttribute("disabled");
         });
 
@@ -1574,7 +2352,7 @@ class App {
             // Re-render tree without pending overlays
             const items = document.querySelectorAll<HTMLElement>(".tree-item, .tree-row");
             items.forEach(i => { i.classList.remove("vfs-delete", "vfs-add", "vfs-rename"); });
-            this.log(`[VFS] Reset ${count} pending change(s)`, "info");
+            this.log(this.t("log_vfs_reset", [String(count)]), "info");
         });
 
         // Show toolbar only when an archive is loaded
@@ -1595,7 +2373,7 @@ class App {
 
     private renderVfsPending() {
         const badge = document.getElementById("vfs-pending-badge");
-        if (badge) badge.textContent = `${this.vfsPending.length} pending`;
+        if (badge) badge.textContent = this.t("vfs_pending_count", [String(this.vfsPending.length)]);
         // Persist to disk (fire-and-forget)
         this.savePendingChanges();
         // Overlay tree items with pending-change decorations
@@ -1626,115 +2404,476 @@ class App {
         }
     }
 
+    // ── VFS tree helpers (selection, drag & drop, moves) ─────────────────────────
+
+    /** Archive paths use `/`, `\` or the regional `¥`/`₩` separators; compare with `/`. */
+    private vfsNorm(p: string): string { return p.replace(/[\\¥₩]/g, "/").replace(/^\/+/, ""); }
+    private vfsKey(p: string): string { return this.vfsNorm(p).toLowerCase(); }
+    private vfsBase(p: string): string { const n = this.vfsNorm(p).replace(/\/+$/, ""); return n.slice(n.lastIndexOf("/") + 1); }
+    /** Parent folder with a trailing `/`, or "" at the root. */
+    private vfsParent(p: string): string { const n = this.vfsNorm(p).replace(/\/+$/, ""); const i = n.lastIndexOf("/"); return i < 0 ? "" : n.slice(0, i + 1); }
+
+    /** Editing needs a single .it/.pack (not a full-sequence folder view). */
+    private vfsCanEdit(): boolean {
+        const a = this.currentArchive.toLowerCase();
+        return a.endsWith(".it") || a.endsWith(".pack");
+    }
+
+    private vfsKeyOf(e: AggregateEntry): string | null {
+        return e.source_archive ? (e.salt_used === "N/A" || e.salt_used === "Search/Default" || !e.salt_used ? null : e.salt_used) : null;
+    }
+
+    private vfsRowKey(row: HTMLElement): string | null {
+        if (row.classList.contains("vfs-add-item")) return null;
+        const p = row.dataset.path;
+        if (p === undefined || p === "") return null;
+        return (row.classList.contains("folder") ? "d:" : "f:") + p;
+    }
+
+    private vfsVisibleRows(): HTMLElement[] {
+        const tree = document.getElementById("file-tree");
+        if (!tree) return [];
+        return Array.from(tree.querySelectorAll<HTMLElement>(".tree-row.folder, .tree-item"))
+            .filter(r => !r.classList.contains("vfs-add-item") && r.offsetParent !== null);
+    }
+
+    private vfsPaintSelection() {
+        const tree = document.getElementById("file-tree");
+        if (!tree) return;
+        tree.querySelectorAll<HTMLElement>(".tree-row.folder, .tree-item").forEach(r => {
+            const k = this.vfsRowKey(r);
+            r.classList.toggle("vfs-sel", !!k && this.vfsSel.has(k));
+        });
+    }
+
+    /** Selected entries, each with the path it keeps relative to its parent folder
+     *  (a selected folder brings everything under it, under the folder's own name). */
+    private vfsSelectionItems(): Array<{ entry: AggregateEntry; rel: string; folder: string | null }> {
+        const out = new Map<string, { entry: AggregateEntry; rel: string; folder: string | null }>();
+        const keys = Array.from(this.vfsSel);
+        const folders = keys.filter(k => k.startsWith("d:")).map(k => k.slice(2)).sort((a, b) => a.length - b.length);
+        for (const f of folders) {
+            const prefix = this.vfsKey(f).replace(/\/?$/, "/");
+            const name = this.vfsBase(f);
+            for (const e of this.loadedEntries) {
+                const k = this.vfsKey(e.name);
+                if (!k.startsWith(prefix) || out.has(e.name)) continue;
+                out.set(e.name, { entry: e, rel: name + "/" + this.vfsNorm(e.name).slice(prefix.length), folder: f });
+            }
+        }
+        const fileKeys = keys.filter(k => k.startsWith("f:"));
+        const byName = fileKeys.length ? new Map(this.loadedEntries.map(e => [e.name, e] as const)) : new Map<string, AggregateEntry>();
+        for (const k of fileKeys) {
+            const e = byName.get(k.slice(2));
+            if (e && !out.has(e.name)) out.set(e.name, { entry: e, rel: this.vfsBase(e.name), folder: null });
+        }
+        return Array.from(out.values());
+    }
+
+    /** Folder (with trailing `/`, "" = root) under an element of the tree, or null outside the tree. */
+    private vfsDropTargetAt(el: Element | null): { folder: string; row: HTMLElement | null } | null {
+        const tree = document.getElementById("file-tree");
+        if (!el || !tree || !tree.contains(el)) return null;
+        const row = el.closest<HTMLElement>(".tree-row.folder, .tree-item");
+        if (row && row.classList.contains("folder") && row.dataset.path) {
+            return { folder: this.vfsNorm(row.dataset.path) + "/", row };
+        }
+        if (row && row.dataset.path && !row.classList.contains("vfs-add-item")) {
+            const parentRow = row.closest(".tree-node")?.querySelector<HTMLElement>(":scope > .tree-row.folder") ?? null;
+            return { folder: this.vfsParent(row.dataset.path), row: parentRow };
+        }
+        return { folder: "", row: null };
+    }
+
+    private vfsHighlightTarget(target: { folder: string; row: HTMLElement | null } | null) {
+        const tree = document.getElementById("file-tree");
+        if (!tree) return;
+        tree.querySelectorAll(".vfs-drop-target").forEach(r => r.classList.remove("vfs-drop-target"));
+        tree.classList.toggle("vfs-drop-active", !!target);
+        if (target?.row) target.row.classList.add("vfs-drop-target");
+    }
+
+    private vfsEndDrag() {
+        const d = this.vfsDrag;
+        this.vfsDrag = null;
+        if (!d) return;
+        d.ghost?.remove();
+        try { document.getElementById("file-tree")?.releasePointerCapture(d.pointerId); } catch { /* not captured */ }
+        this.vfsHighlightTarget(null);
+    }
+
+    /** Explorer drag hover: Tauri reports physical pixels, the DOM wants CSS pixels. */
+    private vfsExternalHover(pos: { x: number; y: number } | null | undefined) {
+        const listVisible = document.getElementById("list")?.classList.contains("active");
+        if (!pos || !listVisible || !this.vfsCanEdit()) { this.vfsHighlightTarget(null); return; }
+        const dpr = window.devicePixelRatio || 1;
+        this.vfsHighlightTarget(this.vfsDropTargetAt(document.elementFromPoint(pos.x / dpr, pos.y / dpr)));
+    }
+
+    /** Explorer drop onto the tree: queue adds (and merges). Returns false when the
+     *  drop is not for the List tab tree, so the caller opens the file as before. */
+    private async vfsHandleExternalDrop(paths: string[], pos: { x: number; y: number } | undefined): Promise<boolean> {
+        this.vfsHighlightTarget(null);
+        if (!pos || !document.getElementById("list")?.classList.contains("active") || !this.vfsCanEdit()) return false;
+        const dpr = window.devicePixelRatio || 1;
+        const target = this.vfsDropTargetAt(document.elementFromPoint(pos.x / dpr, pos.y / dpr));
+        if (!target) return false;
+        const toAdd: string[] = [];
+        for (const p of paths) {
+            const lp = p.toLowerCase();
+            if (lp.endsWith(".it") || lp.endsWith(".pack")) {
+                const name = p.split(/[\\/]/).pop() || p;
+                const merge = await ask(this.t("vfs_drop_archive_prompt", [name]), {
+                    title: this.t("vfs_drop_archive_title"),
+                    okLabel: this.t("vfs_drop_merge"),
+                    cancelLabel: this.t("vfs_drop_add_file"),
+                });
+                if (merge) { await this.vfsQueueMerge(p); continue; }
+            }
+            toAdd.push(p);
+        }
+        if (toAdd.length === 0) return true;
+        let items: Array<{ local: string; rel: string; size: number; mtime: number }>;
+        try {
+            items = await invoke("vfs_stat_paths", { paths: toAdd }) as typeof items;
+        } catch (err) {
+            this.log(this.t("msg_error_fmt", [String(err)]), "error");
+            return true;
+        }
+        const cands = items.map(it => ({
+            destPath: target.folder + it.rel, srcSize: it.size, srcMtime: it.mtime, srcLabel: it.local, localPath: it.local,
+        }));
+        const resolved = await this.resolveConflicts(cands);
+        if (!resolved) { this.log(this.t("log_vfs_cancelled"), "info"); return true; }
+        const ok = await this.vfsValidatePaths(resolved.map(r => r.destPath));
+        let n = 0;
+        resolved.forEach((r, i) => {
+            if (!ok[i]) return;
+            this.vfsPending.push({ op: "add", dest: r.destPath, local_src: r.localPath, size: r.srcSize, mtime: r.srcMtime });
+            n++;
+        });
+        if (n > 0) this.renderVfsPending();
+        this.log(this.t("log_vfs_queued_add", [String(n), target.folder || "/"]), "info");
+        return true;
+    }
+
+    /** Validate destination entry paths with the core rules; logs and returns per-path ok. */
+    private async vfsValidatePaths(paths: string[]): Promise<boolean[]> {
+        if (paths.length === 0) return [];
+        try {
+            const errs = await invoke("vfs_validate_entry_paths", { paths }) as Array<string | null>;
+            return errs.map((err) => {
+                if (err) this.log(this.t("log_vfs_invalid_path", [err]), "error");
+                return !err;
+            });
+        } catch (err) {
+            this.log(this.t("msg_error_fmt", [String(err)]), "error");
+            return paths.map(() => false);
+        }
+    }
+
+    /** Queue a rename, folding it into an earlier pending rename of the same entry. */
+    private vfsPushRename(from: string, to: string) {
+        const k = this.vfsKey(from);
+        const prev = this.vfsPending.find(ch => ch.op === "rename" && this.vfsKey(ch.from) === k);
+        if (prev) prev.to = to;
+        else this.vfsPending.push({ op: "rename", from, to });
+    }
+
+    /** Move the selected rows into `folder` ("" = root, else trailing `/`). */
+    private async vfsMoveSelectionTo(folder: string) {
+        if (!this.vfsCanEdit()) return;
+        const items = this.vfsSelectionItems();
+        const fk = folder.toLowerCase();
+        for (const k of this.vfsSel) {
+            if (k.startsWith("d:") && fk.startsWith(this.vfsKey(k.slice(2)) + "/")) {
+                this.log(this.t("log_vfs_move_into_self"), "error");
+                return;
+            }
+        }
+        const archMtime = await this.vfsArchiveMtime();
+        const cands = items
+            .map(it => ({ destPath: folder + it.rel, srcSize: it.entry.original_size, srcMtime: archMtime, srcLabel: it.entry.name, from: it.entry.name }))
+            .filter(c => this.vfsKey(c.destPath) !== this.vfsKey(c.from));
+        if (cands.length === 0) return;
+        const moving = new Set(cands.map(c => this.vfsKey(c.from)));
+        const resolved = await this.resolveConflicts(cands, moving);
+        if (!resolved) { this.log(this.t("log_vfs_cancelled"), "info"); return; }
+        const ok = await this.vfsValidatePaths(resolved.map(r => r.destPath));
+        let n = 0;
+        resolved.forEach((r, i) => { if (ok[i]) { this.vfsPushRename(r.from, r.destPath); n++; } });
+        if (n > 0) this.renderVfsPending();
+        this.log(this.t("log_vfs_queued_move", [String(n), folder || "/"]), "info");
+    }
+
+    private vfsDeleteSelection() {
+        if (!this.vfsCanEdit()) return;
+        const items = this.vfsSelectionItems();
+        for (const it of items) {
+            const k = this.vfsKey(it.entry.name);
+            this.vfsPending = this.vfsPending.filter(ch => !(ch.op === "rename" && this.vfsKey(ch.from) === k));
+            if (!this.vfsPending.some(ch => ch.op === "delete" && this.vfsKey(ch.path) === k)) {
+                this.vfsPending.push({ op: "delete", path: it.entry.name });
+            }
+        }
+        if (items.length > 0) this.renderVfsPending();
+        this.log(this.t("log_vfs_queued_delete", [String(items.length)]), "info");
+    }
+
+    /** F2 / context menu rename: a file gets a new full path, a folder a new folder path. */
+    private async vfsRenameSelection() {
+        if (!this.vfsCanEdit() || this.vfsSel.size !== 1) return;
+        const key = Array.from(this.vfsSel)[0];
+        const isFolder = key.startsWith("d:");
+        const oldPath = this.vfsNorm(key.slice(2));
+        const input = prompt(this.t(isFolder ? "prompt_rename_folder" : "prompt_rename_path"), oldPath);
+        if (!input) return;
+        const newPath = this.vfsNorm(input.trim()).replace(/\/+$/, "");
+        if (!newPath || this.vfsKey(newPath) === this.vfsKey(oldPath)) return;
+        const archMtime = await this.vfsArchiveMtime();
+        let cands: Array<{ destPath: string; srcSize: number; srcMtime: number; srcLabel: string; from: string }>;
+        if (isFolder) {
+            const prefix = this.vfsKey(oldPath) + "/";
+            if ((this.vfsKey(newPath) + "/").startsWith(prefix)) { this.log(this.t("log_vfs_move_into_self"), "error"); return; }
+            cands = this.loadedEntries
+                .filter(e => this.vfsKey(e.name).startsWith(prefix))
+                .map(e => ({ destPath: newPath + "/" + this.vfsNorm(e.name).slice(prefix.length), srcSize: e.original_size, srcMtime: archMtime, srcLabel: e.name, from: e.name }));
+        } else {
+            const e = this.loadedEntries.find(en => en.name === key.slice(2));
+            if (!e) return;
+            cands = [{ destPath: newPath, srcSize: e.original_size, srcMtime: archMtime, srcLabel: e.name, from: e.name }];
+        }
+        const resolved = await this.resolveConflicts(cands, new Set(cands.map(c => this.vfsKey(c.from))));
+        if (!resolved) { this.log(this.t("log_vfs_cancelled"), "info"); return; }
+        const ok = await this.vfsValidatePaths(resolved.map(r => r.destPath));
+        let n = 0;
+        resolved.forEach((r, i) => { if (ok[i]) { this.vfsPushRename(r.from, r.destPath); n++; } });
+        if (n > 0) this.renderVfsPending();
+    }
+
+    private vfsExtractRequest(items: Array<{ entry: AggregateEntry; rel: string }>) {
+        return items.map(it => ({
+            archive: it.entry.source_archive || this.currentArchive,
+            entry: it.entry.name,
+            rel: it.rel,
+            key: this.vfsKeyOf(it.entry),
+        }));
+    }
+
+    /** "Extract selected…": write the selection (folders keep their structure) into a chosen folder. */
+    private async vfsExtractSelection() {
+        const items = this.vfsSelectionItems();
+        if (items.length === 0) return;
+        const dest = await open({ directory: true });
+        if (!dest || Array.isArray(dest)) return;
+        try {
+            const n = await invoke("vfs_extract_entries", { items: this.vfsExtractRequest(items), dest }) as number;
+            this.log(this.t("log_vfs_extracted_sel", [String(n), dest]), "success");
+        } catch (err) {
+            this.log(this.t("msg_error_fmt", [String(err)]), "error");
+        }
+    }
+
+    /** The row drag left the window: extract the selection to temp and start a native OS drag. */
+    private vfsStartDragOut() {
+        const d = this.vfsDrag;
+        if (!d?.active) return;
+        this.vfsEndDrag();
+        const items = this.vfsSelectionItems();
+        if (items.length === 0) return;
+        this.log(this.t("log_vfs_drag_out", [String(items.length)]), "info");
+        invoke("vfs_drag_out", { items: this.vfsExtractRequest(items) })
+            .catch((err: unknown) => this.log(this.t("log_vfs_drag_out_failed", [String(err)]), "error"));
+    }
+
+    /** The open archive's modified time (ms). Archive entries carry no timestamps. */
+    private async vfsArchiveMtime(path: string = this.currentArchive): Promise<number> {
+        try {
+            const st = await invoke("vfs_stat_paths", { paths: [path] }) as Array<{ mtime: number }>;
+            return st[0]?.mtime ?? 0;
+        } catch { return 0; }
+    }
+
+    /** Queue a merge of another archive, asking about each entry that already exists. */
+    private async vfsQueueMerge(srcPath: string) {
+        if (!this.vfsCanEdit()) return;
+        let res: PackListResponse;
+        try {
+            res = await invoke("list_pack_contents", { input: srcPath, key: null }) as PackListResponse;
+        } catch (err) {
+            this.log(this.t("log_vfs_merge_error", [String(err)]), "error");
+            return;
+        }
+        const srcMtime = await this.vfsArchiveMtime(srcPath);
+        const cands = res.entries.map(e => ({
+            destPath: this.vfsNorm(e.name), srcSize: e.original_size, srcMtime, srcLabel: e.name, srcName: e.name,
+        }));
+        const resolved = await this.resolveConflicts(cands);
+        if (!resolved) { this.log(this.t("log_vfs_cancelled"), "info"); return; }
+        const ok = await this.vfsValidatePaths(resolved.map(r => r.destPath));
+        const kept = new Set<string>();
+        const rename: Record<string, string> = {};
+        resolved.forEach((r, i) => {
+            if (!ok[i]) return;
+            kept.add(r.srcName);
+            if (this.vfsKey(r.destPath) !== this.vfsKey(r.srcName)) rename[this.vfsNorm(r.srcName)] = r.destPath;
+        });
+        const skip = cands.filter(c => !kept.has(c.srcName)).map(c => this.vfsNorm(c.srcName));
+        this.vfsPending.push({ op: "merge", src_archive: srcPath, skip, rename });
+        this.renderVfsPending();
+        this.log(this.t("log_vfs_queued_merge", [srcPath, this.currentArchive]), "info");
+        if (skip.length > 0 || Object.keys(rename).length > 0) {
+            this.log(this.t("log_vfs_merge_decisions", [String(skip.length), String(Object.keys(rename).length)]), "info");
+        }
+    }
+
     // ── VFS Conflict Resolution ──────────────────────────────────────────────────
 
-    /** Check candidates against the loaded archive entries and show a dialog for
-     *  each collision.  Returns only the items that should be added (with resolved
-     *  destination paths). */
-    private async resolveConflicts(
-        candidates: Array<{localPath: string; destPath: string}>
-    ): Promise<Array<{localPath: string; destPath: string}>> {
-        const result: Array<{localPath: string; destPath: string}> = [];
+    /** Entries as they will be after the pending changes (key → path/size/mtime). */
+    private vfsVirtualEntries(archMtime: number): Map<string, { path: string; size: number; mtime: number }> {
+        const m = new Map<string, { path: string; size: number; mtime: number }>();
+        for (const e of this.loadedEntries) m.set(this.vfsKey(e.name), { path: this.vfsNorm(e.name), size: e.original_size, mtime: archMtime });
+        for (const ch of this.vfsPending) {
+            if (ch.op === "delete") m.delete(this.vfsKey(ch.path));
+            else if (ch.op === "rename") {
+                const v = m.get(this.vfsKey(ch.from));
+                m.delete(this.vfsKey(ch.from));
+                m.set(this.vfsKey(ch.to), { path: this.vfsNorm(ch.to), size: v?.size ?? 0, mtime: v?.mtime ?? archMtime });
+            } else if (ch.op === "add") {
+                m.set(this.vfsKey(ch.dest), { path: this.vfsNorm(ch.dest), size: Number(ch.size ?? 0), mtime: Number(ch.mtime ?? 0) });
+            }
+        }
+        return m;
+    }
 
-        // Build lookup from currently loaded archive entries
-        const existingPaths = new Set(this.loadedEntries.map(e => e.name));
+    /** "name (1).ext" not yet taken in the destination folder. */
+    private vfsSuggestName(destPath: string, taken: (k: string) => boolean): string {
+        const folder = this.vfsParent(destPath);
+        const base = this.vfsBase(destPath);
+        const dot = base.indexOf(".", 1);
+        const stem = dot > 0 ? base.slice(0, dot) : base;
+        const ext = dot > 0 ? base.slice(dot) : "";
+        for (let i = 1; ; i++) {
+            const name = `${stem} (${i})${ext}`;
+            if (!taken(this.vfsKey(folder + name))) return name;
+        }
+    }
 
-        const conflicts: typeof candidates = [];
+    /** FileZilla-style "Target file already exists" handling. Candidates whose
+     *  destination is free pass through; for collisions the user picks overwrite /
+     *  overwrite if newer / overwrite if size differs / rename / skip, optionally for
+     *  the rest of the queue. Returns the candidates to apply (renamed ones carry the
+     *  new destPath), or null when the user cancels the whole operation.
+     *  `leaving` are entries that move away in this same operation. */
+    private async resolveConflicts<T extends { destPath: string; srcSize?: number; srcMtime?: number; srcLabel?: string }>(
+        candidates: T[], leaving: Set<string> = new Set()
+    ): Promise<T[] | null> {
+        const archMtime = await this.vfsArchiveMtime();
+        const virt = this.vfsVirtualEntries(archMtime);
+        leaving.forEach(k => virt.delete(k));
+        const batch = new Map<string, { path: string; size: number; mtime: number }>();
+        const existing = (k: string) => batch.get(k) ?? virt.get(k);
+        const taken = (k: string) => !!existing(k);
+        const total = candidates.filter(c => taken(this.vfsKey(c.destPath))).length;
+        let seen = 0;
+        let always: VfsConflictAction | null = null;
+        const result: T[] = [];
+
         for (const c of candidates) {
-            if (existingPaths.has(c.destPath)) {
-                conflicts.push(c);
-            } else {
-                result.push(c);
+            let cur: T = c;
+            for (;;) {
+                const k = this.vfsKey(cur.destPath);
+                const tgt = existing(k);
+                const claim = () => { batch.set(this.vfsKey(cur.destPath), { path: cur.destPath, size: cur.srcSize ?? 0, mtime: cur.srcMtime ?? 0 }); result.push(cur); };
+                if (!tgt) { claim(); break; }
+                if (cur === c) seen++;
+                let action: VfsConflictAction | null = always;
+                let newName: string | undefined;
+                if (!action) {
+                    const choice = await this.showConflictDialog({
+                        destPath: cur.destPath,
+                        srcLabel: cur.srcLabel ?? cur.destPath,
+                        srcSize: cur.srcSize, srcMtime: cur.srcMtime,
+                        tgtSize: tgt.size, tgtMtime: tgt.mtime,
+                        suggested: this.vfsSuggestName(cur.destPath, taken),
+                        hasMore: total - seen > 0,
+                    });
+                    if (choice.action === "cancel") return null;
+                    action = choice.action;
+                    newName = choice.newName;
+                    if (choice.applyAll) always = action;
+                }
+                if (action === "overwrite") { claim(); break; }
+                if (action === "newer") { if ((cur.srcMtime ?? 0) > tgt.mtime) claim(); break; }
+                if (action === "size") { if ((cur.srcSize ?? -1) !== tgt.size) claim(); break; }
+                if (action === "rename") {
+                    const name = (newName && newName.trim()) || this.vfsSuggestName(cur.destPath, taken);
+                    cur = { ...cur, destPath: this.vfsParent(cur.destPath) + this.vfsNorm(name) };
+                    continue; // re-check: a typed name may collide too
+                }
+                break; // skip
             }
         }
-
-        if (conflicts.length === 0) return result;
-
-        let batchAction: "overwrite" | "skip" | null = null;
-
-        for (const conflict of conflicts) {
-            if (batchAction === "overwrite") {
-                result.push(conflict);
-                continue;
-            }
-            if (batchAction === "skip") {
-                continue;
-            }
-
-            const choice = await this.showConflictDialog(conflict.destPath, conflicts.length > 1);
-
-            if (choice.applyAll) {
-                if (choice.action === "overwrite") batchAction = "overwrite";
-                else if (choice.action === "skip") batchAction = "skip";
-            }
-
-            if (choice.action === "overwrite") {
-                result.push(conflict);
-            } else if (choice.action === "rename" && choice.newName) {
-                const folder = conflict.destPath.includes("/")
-                    ? conflict.destPath.slice(0, conflict.destPath.lastIndexOf("/") + 1)
-                    : "";
-                result.push({ localPath: conflict.localPath, destPath: folder + choice.newName });
-            }
-            // action === "skip" → omit from result
-        }
-
         return result;
     }
 
-    /** Show the conflict dialog for a single file and wait for the user's choice. */
-    private showConflictDialog(
-        destPath: string,
-        hasMore: boolean
-    ): Promise<{action: "overwrite" | "skip" | "rename"; newName?: string; applyAll: boolean}> {
+    /** Show the conflict dialog for one file and wait for the user's choice. */
+    private showConflictDialog(info: {
+        destPath: string; srcLabel: string; srcSize?: number; srcMtime?: number;
+        tgtSize: number; tgtMtime: number; suggested: string; hasMore: boolean;
+    }): Promise<{ action: VfsConflictAction | "cancel"; newName?: string; applyAll: boolean }> {
         return new Promise((resolve) => {
             const ctrl = new AbortController();
             const { signal } = ctrl;
 
-            const overlay      = document.getElementById("conflict-dialog")!;
-            const filenameEl   = document.getElementById("conflict-filename")!;
-            const applyAllRow  = document.getElementById("conflict-apply-all-row") as HTMLElement;
-            const applyAllCb   = document.getElementById("conflict-apply-all") as HTMLInputElement;
-            const renameInput  = document.getElementById("conflict-rename-input") as HTMLInputElement;
-            const btnOverwrite = document.getElementById("conflict-btn-overwrite")!;
-            const btnRename    = document.getElementById("conflict-btn-rename")!;
-            const btnSkip      = document.getElementById("conflict-btn-skip")!;
+            const overlay     = document.getElementById("conflict-dialog")!;
+            const applyAllRow = document.getElementById("conflict-apply-all-row") as HTMLElement;
+            const applyAllCb  = document.getElementById("conflict-apply-all") as HTMLInputElement;
+            const renameInput = document.getElementById("conflict-rename-input") as HTMLInputElement;
+            const btnOk       = document.getElementById("conflict-btn-ok")!;
+            const btnCancel   = document.getElementById("conflict-btn-cancel")!;
+            const radios      = Array.from(overlay.querySelectorAll<HTMLInputElement>('input[name="conflict-action"]'));
 
-            // Fill in the conflicting file path and pre-populate the rename input
-            filenameEl.textContent = destPath;
-            const basename = destPath.includes("/")
-                ? destPath.slice(destPath.lastIndexOf("/") + 1)
-                : destPath;
-            renameInput.value = basename;
+            const fmtDate = (ms?: number) => ms ? new Date(ms).toLocaleString() : this.t("conflict_unknown");
+            const fmtSize = (n?: number) => n === undefined ? this.t("conflict_unknown") : `${this.formatBytes(n)} (${n.toLocaleString()})`;
+            document.getElementById("conflict-filename")!.textContent = info.destPath;
+            document.getElementById("conflict-src-name")!.textContent = info.srcLabel;
+            document.getElementById("conflict-src-info")!.textContent = `${fmtSize(info.srcSize)} · ${fmtDate(info.srcMtime)}`;
+            document.getElementById("conflict-tgt-name")!.textContent = info.destPath;
+            document.getElementById("conflict-tgt-info")!.textContent = `${fmtSize(info.tgtSize)} · ${fmtDate(info.tgtMtime)}`;
 
-            // Show "Apply to all" only when there are multiple conflicts
-            applyAllRow.classList.toggle("hidden", !hasMore);
+            renameInput.value = info.suggested;
+            // Keep the previously chosen action selected, like FileZilla
+            if (!radios.some(r => r.checked)) radios[0].checked = true;
+            const syncRename = () => {
+                renameInput.classList.toggle("conflict-dim", !radios.some(r => r.checked && r.value === "rename"));
+            };
+            syncRename();
+            applyAllRow.classList.toggle("hidden", !info.hasMore);
             applyAllCb.checked = false;
 
             overlay.classList.remove("hidden");
-            renameInput.focus();
-            renameInput.select();
+            btnOk.focus();
 
-            const finish = (action: "overwrite" | "skip" | "rename", newName?: string) => {
+            const finish = (action: VfsConflictAction | "cancel") => {
                 ctrl.abort();
                 overlay.classList.add("hidden");
-                const applyAll = action !== "rename" && applyAllCb.checked;
-                resolve({ action, newName, applyAll });
+                const newName = action === "rename" ? (renameInput.value.trim() || info.suggested) : undefined;
+                // "Always rename" auto-numbers the rest, so a typed name only applies once
+                resolve({ action, newName, applyAll: action !== "cancel" && applyAllCb.checked });
             };
+            const selected = (): VfsConflictAction => (radios.find(r => r.checked)?.value as VfsConflictAction) ?? "overwrite";
 
-            btnOverwrite.addEventListener("click", () => finish("overwrite"), { signal });
-            btnSkip.addEventListener("click",      () => finish("skip"),      { signal });
-            btnRename.addEventListener("click", () => {
-                const newName = renameInput.value.trim();
-                finish("rename", newName || basename);
+            radios.forEach(r => r.addEventListener("change", syncRename, { signal }));
+            renameInput.addEventListener("focus", () => {
+                const r = radios.find(x => x.value === "rename");
+                if (r) { r.checked = true; syncRename(); }
             }, { signal });
-            renameInput.addEventListener("keydown", (e: KeyboardEvent) => {
-                if (e.key === "Enter") {
-                    const newName = renameInput.value.trim();
-                    finish("rename", newName || basename);
-                } else if (e.key === "Escape") {
-                    finish("skip");
-                }
+            btnOk.addEventListener("click", () => finish(selected()), { signal });
+            btnCancel.addEventListener("click", () => finish("cancel"), { signal });
+            overlay.addEventListener("keydown", (e: KeyboardEvent) => {
+                if (e.key === "Enter") { e.preventDefault(); finish(selected()); }
+                else if (e.key === "Escape") { e.preventDefault(); finish("cancel"); }
             }, { signal });
         });
     }
@@ -1763,15 +2902,15 @@ class App {
             const inp = document.getElementById("jobs-input") as HTMLInputElement;
             const out = document.getElementById("jobs-output") as HTMLInputElement;
             const hints: Record<string, [string, string]> = {
-                "extract":   ["Archive (.it / .pack)", "Output folder"],
-                "pack":      ["Source folder",         "Output archive (.it)"],
-                "differ":    ["Base archive (.it)",    "Modified archive (.it)"],
-                "merge":     ["Source folder",         "Output archive (.it)"],
-                "apply-mod": [".mod file path",        "Target archive (.it)"],
+                "extract":   ["features_archive_label",  "jobs_hint_output_folder"],
+                "pack":      ["jobs_hint_source_folder", "jobs_hint_output_archive"],
+                "differ":    ["jobs_hint_base_archive",  "jobs_hint_modified_archive"],
+                "merge":     ["jobs_hint_source_folder", "jobs_hint_output_archive"],
+                "apply-mod": ["jobs_hint_mod_file",      "jobs_hint_target_archive"],
             };
-            const [h1, h2] = hints[type] ?? ["Input path", "Output path"];
-            if (inp) inp.placeholder = h1;
-            if (out) out.placeholder = h2;
+            const [h1, h2] = hints[type] ?? ["jobs_input_placeholder", "jobs_output_placeholder"];
+            if (inp) { inp.placeholder = this.t(h1); inp.dataset.i18nPlaceholder = h1; }
+            if (out) { out.placeholder = this.t(h2); out.dataset.i18nPlaceholder = h2; }
         };
         const typeSelect = document.getElementById("jobs-type-select") as HTMLSelectElement;
         typeSelect?.addEventListener("change", () => updateJobHints(typeSelect.value));
@@ -1780,8 +2919,8 @@ class App {
         document.getElementById("btn-jobs-browse-input")?.addEventListener("click", async () => {
             const { open } = await import("./platform/dialog");
             const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value;
-            const archiveFilter = { name: "Archives", extensions: ["it", "pack"] };
-            const modFilter = { name: "Mod files", extensions: ["mod"] };
+            const archiveFilter = { name: this.t("dlg_filter_archives"), extensions: ["it", "pack"] };
+            const modFilter = { name: this.t("dlg_filter_mod_files"), extensions: ["mod"] };
             let selected: string | string[] | null = null;
             if (type === "extract" || type === "differ") {
                 selected = await open({ filters: [archiveFilter] });
@@ -1800,9 +2939,9 @@ class App {
             const type = (document.getElementById("jobs-type-select") as HTMLSelectElement).value;
             let path: string | null = null;
             if (type === "pack" || type === "merge") {
-                path = await save({ filters: [{ name: "Archives", extensions: ["it"] }] });
+                path = await save({ filters: [{ name: this.t("dlg_filter_archives"), extensions: ["it"] }] });
             } else if (type === "differ") {
-                path = await save({ filters: [{ name: "Patch", extensions: ["patch"] }] });
+                path = await save({ filters: [{ name: this.t("dlg_filter_patch"), extensions: ["patch"] }] });
             } else {
                 const sel = await open({ directory: true });
                 path = (sel && !Array.isArray(sel)) ? sel as string : null;
@@ -1819,7 +2958,7 @@ class App {
 
         if (!input || !output) return;
 
-        this.log(`[Jobs] Added ${type} job: ${input} → ${output}`, "info");
+        this.log(this.t("log_jobs_added", [this.t(`job_type_${type.replace("-","_")}`), input, output]), "info");
         const job: JobEntry = {
             id: Date.now() + Math.random(),
             type,
@@ -1876,7 +3015,7 @@ class App {
     private async runJob(job: JobEntry) {
         if (job.status === "running") return;
         job.status = "running";
-        this.updateJobUI(job, "running", 0, "Starting…");
+        this.updateJobUI(job, "running", 0, this.t("patcher_starting"));
 
         const row = document.getElementById(`job-${job.id}`)!;
         row.className = "job-row running";
@@ -1922,14 +3061,14 @@ class App {
 
             unlisten();
             job.status = "done";
-            this.updateJobUI(job, "done", 100, "Completed");
+            this.updateJobUI(job, "done", 100, this.t("jobs_completed"));
             row.className = "job-row done";
-            this.log(`[Jobs] ${job.type} completed: ${job.input}`, "info");
+            this.log(this.t("log_jobs_completed", [this.t(`job_type_${job.type.replace("-","_")}`), job.input]), "info");
         } catch (e: any) {
             job.status = "error";
-            this.updateJobUI(job, "error", 0, `Error: ${e}`);
+            this.updateJobUI(job, "error", 0, this.t("msg_error_fmt", [String(e)]));
             row.className = "job-row error";
-            this.log(`[Jobs] ${job.type} failed: ${e}`, "error");
+            this.log(this.t("log_jobs_failed", [this.t(`job_type_${job.type.replace("-","_")}`), String(e)]), "error");
         }
     }
 
@@ -1937,7 +3076,7 @@ class App {
         const statusEl = document.getElementById(`job-status-${job.id}`);
         const progEl = document.getElementById(`job-prog-${job.id}`);
         const logEl = document.getElementById(`job-log-${job.id}`);
-        if (statusEl) statusEl.textContent = status;
+        if (statusEl) statusEl.textContent = this.t(`status_${status}`);
         if (progEl) {
             progEl.style.width = `${pct}%`;
             progEl.className = `job-progress-fill ${status === "done" ? "done" : status === "error" ? "error" : ""}`;
@@ -1949,7 +3088,7 @@ class App {
         if (this.jobsRunning) return;
         this.jobsRunning = true;
         const pending = this.jobs.filter(j => j.status === "pending");
-        this.log(`[Jobs] Running all: ${pending.length} pending job(s)`, "info");
+        this.log(this.t("log_jobs_run_all", [String(pending.length)]), "info");
         const LIMIT = 4;
         let running = 0, idx = 0;
         await new Promise<void>(resolve => {
@@ -1988,7 +3127,7 @@ class App {
     private setupFeaturesEditor() {
         document.getElementById("btn-features-browse")?.addEventListener("click", async () => {
             const { open } = await import("./platform/dialog");
-            const file = await open({ filters: [{ name: "Archives", extensions: ["it", "pack"] }] });
+            const file = await open({ filters: [{ name: this.t("dlg_filter_archives"), extensions: ["it", "pack"] }] });
             if (file && !Array.isArray(file)) {
                 (document.getElementById("features-archive") as HTMLInputElement).value = file as string;
             }
@@ -2006,24 +3145,25 @@ class App {
         const archive = (document.getElementById("features-archive") as HTMLInputElement).value.trim();
         const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
         const key = keyEl || null;
-        if (!archive) { this.setFeaturesStatus("Please select an archive", "error"); return; }
+        if (!archive) { this.setFeaturesStatus(this.t("features_select_archive"), "error"); return; }
 
-        this.setFeaturesStatus("Loading…", "busy");
+        this.setFeaturesStatus(this.t("preview_loading"), "busy");
         const btn = document.getElementById("btn-features-load") as HTMLButtonElement;
         btn.disabled = true;
 
-        this.log(`[Features] Loading features from: ${archive}`, "info");
+        this.log(this.t("log_features_loading", [archive]), "info");
         try {
             const data = await invoke("get_features_from_archive", { archive, key }) as any;
             this.featuresData = data;
             this.featuresModified = false;
             this.renderFeatures();
-            this.setFeaturesStatus(`Loaded ${data.features.length} features, ${data.servers.length} servers`, "ok");
-            this.log(`[Features] Loaded ${data.features.length} features, ${data.servers.length} servers`, "info");
+            const loadedMsg = this.t("features_loaded", [String(data.features.length), String(data.servers.length)]);
+            this.setFeaturesStatus(loadedMsg, "ok");
+            this.log(`${this.t("log_tag_features")} ${loadedMsg}`, "info");
             document.getElementById("btn-features-save")?.classList.remove("hidden");
         } catch (e: any) {
-            this.setFeaturesStatus(`Load failed: ${e}`, "error");
-            this.log(`[Features] Load failed: ${e}`, "error");
+            this.setFeaturesStatus(this.t("features_load_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_features")} ${this.t("features_load_failed", [String(e)])}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2038,8 +3178,8 @@ class App {
         const keyEl = (document.getElementById("features-key") as HTMLInputElement).value.trim();
         const key = keyEl || null;
 
-        this.log(`[Features] Saving features to: ${archive}`, "info");
-        this.setFeaturesStatus("Saving…", "busy");
+        this.log(this.t("log_features_saving", [archive]), "info");
+        this.setFeaturesStatus(this.t("features_saving"), "busy");
         const btn = document.getElementById("btn-features-save") as HTMLButtonElement;
         btn.disabled = true;
 
@@ -2050,11 +3190,12 @@ class App {
                 featuresJson: JSON.stringify(this.featuresData),
             }) as any;
             this.featuresModified = false;
-            this.setFeaturesStatus(`Saved — ${result.features} features, ${result.bytes} bytes`, "ok");
-            this.log(`[Features] Saved — ${result.features} features, ${result.bytes} bytes`, "info");
+            const savedMsg = this.t("features_saved", [String(result.features), String(result.bytes)]);
+            this.setFeaturesStatus(savedMsg, "ok");
+            this.log(`${this.t("log_tag_features")} ${savedMsg}`, "info");
         } catch (e: any) {
-            this.setFeaturesStatus(`Save failed: ${e}`, "error");
-            this.log(`[Features] Save failed: ${e}`, "error");
+            this.setFeaturesStatus(this.t("features_save_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_features")} ${this.t("features_save_failed", [String(e)])}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2071,7 +3212,7 @@ class App {
         for (const s of this.featuresData.servers) {
             const row = document.createElement("div");
             row.className = "features-server-row";
-            row.innerHTML = `<span>ID ${s.server_id}</span><b>${s.name}</b><span>${s.region}</span><span>ch ${s.channel}</span>`;
+            row.innerHTML = `<span>ID ${s.server_id}</span><b>${s.name}</b><span>${s.region}</span><span>${this.t("features_channel_short", [String(s.channel)])}</span>`;
             serversList.appendChild(row);
         }
 
@@ -2097,13 +3238,20 @@ class App {
             hashSpan.textContent = f.hash_hex;
             row.appendChild(hashSpan);
 
+            // Readable name from the embedded feature-name list, when the hash is known.
+            const nameSpan = document.createElement("span");
+            nameSpan.className = "feature-name";
+            nameSpan.textContent = f.name ?? "";
+            if (f.name) nameSpan.title = f.name;
+            row.appendChild(nameSpan);
+
             const condsDiv = document.createElement("div");
             condsDiv.className = "feature-conds";
 
             if (f.conditions.length === 0) {
                 const empty = document.createElement("span");
                 empty.style.cssText = "opacity:.3;font-size:11px;";
-                empty.textContent = "(no conditions)";
+                empty.textContent = this.t("features_no_conditions");
                 condsDiv.appendChild(empty);
             } else {
                 for (let ci = 0; ci < f.conditions.length; ci++) {
@@ -2112,7 +3260,7 @@ class App {
                     const tag = document.createElement("span");
                     tag.className = "feature-cond-tag";
                     tag.textContent = cond;
-                    tag.title = `Click to toggle condition at index ${ci}`;
+                    tag.title = this.t("features_toggle_cond", [String(ci)]);
                     tag.dataset.featureIdx = String(fi);
                     tag.dataset.condIdx = String(ci);
                     tag.addEventListener("click", () => this.toggleFeatureCondition(fi, ci, tag));
@@ -2154,6 +3302,7 @@ class App {
         }
         const filtered = this.featuresData.features.filter((f: any) =>
             f.hash_hex.includes(query) ||
+            (f.name ?? "").toLowerCase().includes(query) ||
             f.conditions.some((c: string) => c.toLowerCase().includes(query))
         );
         this.renderFeatureRows(filtered);
@@ -2171,8 +3320,32 @@ class App {
 
     // ── Launcher tab ────────────────────────────────────────────────────────────
 
-    private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string } | null = null;
+    private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string; tpa?: boolean; [k: string]: any } | null = null;
+    /** Pending MFA challenge from an email/password login (submit the code with launcher_login_otp). */
+    private pendingMfaKey: string | null = null;
+    /** Legacy localStorage key of the full session (secrets): only read once to migrate
+     *  it into the profile store, then removed. The session now lives in memory. */
     private readonly LAUNCHER_SESSION_KEY = "nexon_session";
+
+    /** Keep a session the backend refreshed in place (401 → autologin), if it returned one.
+     *  A refresh also renews the NxLSession: store it on the active profile with its new expiry. */
+    private keepRefreshedSession(session: any): void {
+        if (!session || !this.launcherSession) return;
+        const expiresIn = session.refreshed_expires_in;
+        if (expiresIn) {
+            // Persist once; don't send the marker back on later calls.
+            delete session.refreshed_expires_in;
+            if (this.activeProfileId && session.session_token) {
+                invoke("launcher_update_profile_session", {
+                    id: this.activeProfileId,
+                    sessionToken: session.session_token,
+                    expiresIn,
+                }).catch(() => {});
+                this.noteProfileExpiry(this.activeProfileId, expiresIn);
+            }
+        }
+        this.launcherSession = session;
+    }
     private launcherProfiles: any[] = [];
     private activeProfileId: string | null = null;
     private activeProfileLoginIp: string = "";
@@ -2180,31 +3353,24 @@ class App {
     private activeProfileIsOfficial: boolean = true;
     private profileEditorMode: "new" | "edit" | null = null;
     private workerBars: Map<number, HTMLElement> = new Map();
-    private kananMods: Array<{ name: string; enabled: boolean }> = [];
 
     private setupLauncher() {
-        // Restore session from localStorage (fallback when no profiles)
-        const saved = localStorage.getItem(this.LAUNCHER_SESSION_KEY);
-        if (saved) {
-            try {
-                this.launcherSession = JSON.parse(saved);
-                this.updateLauncherUI(true);
-                this.fetchLauncherVersion();
-            } catch { localStorage.removeItem(this.LAUNCHER_SESSION_KEY); }
-        }
-
-        // Load profiles from backend
-        this.loadProfiles();
+        // Move a session older versions kept in localStorage into the profile store,
+        // then load profiles from the backend.
+        this.migrateLegacySession().finally(() => this.loadProfiles());
 
         // Login / logout / launch
         document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
         document.getElementById("btn-launcher-logout")?.addEventListener("click", () => this.launcherDoLogout());
         document.getElementById("btn-launcher-launch")?.addEventListener("click", () => this.launcherDoLaunch());
         document.getElementById("btn-launcher-import-session")?.addEventListener("click", () => this.launcherImportSession());
+        document.getElementById("btn-launcher-import-browser")?.addEventListener("click", () => this.launcherImportBrowser());
+        document.getElementById("btn-launcher-import-kanan")?.addEventListener("click", () => this.launcherImportKanan());
+        document.getElementById("btn-launcher-installs")?.addEventListener("click", () => this.checkAllInstalls("launcher-installs-panel"));
 
         document.getElementById("btn-launcher-check-update")?.addEventListener("click", async () => {
             const statusEl = document.getElementById("launcher-update-status")!;
-            statusEl.textContent = "Checking...";
+            statusEl.textContent = this.t("patcher_checking");
             statusEl.className = "launcher-update-status";
             statusEl.classList.remove("hidden");
             try {
@@ -2217,27 +3383,27 @@ class App {
                 };
                 if (info.cached_version) {
                     if (info.update_available === true) {
-                        statusEl.textContent = `Version ${info.cached_version}R — Update available!`;
+                        statusEl.textContent = this.t("launcher_ver_update_available", [String(info.cached_version)]);
                         statusEl.className = "launcher-update-status error";
-                        this.log(`[Launcher] Version check: ${info.cached_version}R — update available`, "warn");
+                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_update", [String(info.cached_version)])}`, "warn");
                     } else if (info.update_available === false) {
-                        statusEl.textContent = `Version ${info.cached_version}R — Up to date`;
+                        statusEl.textContent = this.t("launcher_ver_up_to_date", [String(info.cached_version)]);
                         statusEl.className = "launcher-update-status up-to-date";
-                        this.log(`[Launcher] Version check: ${info.cached_version}R — up to date`, "info");
+                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_uptodate", [String(info.cached_version)])}`, "info");
                     } else {
-                        statusEl.textContent = `Version ${info.cached_version}R (cached)`;
+                        statusEl.textContent = this.t("launcher_ver_cached", [String(info.cached_version)]);
                         statusEl.className = "launcher-update-status up-to-date";
-                        this.log(`[Launcher] Version check: ${info.cached_version}R (cached, no local comparison)`, "info");
+                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_cached", [String(info.cached_version)])}`, "info");
                     }
                 } else {
-                    statusEl.textContent = "Version info not found — open Nexon Launcher once to cache it";
+                    statusEl.textContent = this.t("launcher_ver_not_found");
                     statusEl.className = "launcher-update-status error";
-                    this.log("[Launcher] Version check: no cached version found", "warn");
+                    this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_none")}`, "warn");
                 }
             } catch (e) {
-                statusEl.textContent = "Check failed: " + e;
+                statusEl.textContent = this.t("patcher_check_failed", [String(e)]);
                 statusEl.className = "launcher-update-status error";
-                this.log(`[Launcher] Version check failed: ${e}`, "error");
+                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_failed", [String(e)])}`, "error");
             }
         });
 
@@ -2293,30 +3459,38 @@ class App {
                 (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = dir as string;
             }
         });
+    }
 
-        // Kanan mods
-        const kananPathEl = document.getElementById("kanan-cfg-path") as HTMLInputElement;
-        if (this.config.kanan_cfg_path) {
-            kananPathEl.value = this.config.kanan_cfg_path;
-            this.loadKananMods(this.config.kanan_cfg_path);
+    /** One-time migration: a full session in localStorage (older versions) is used for
+     *  this run, saved to the selected profile (if that has none stored), and removed
+     *  from localStorage once a profile holds it. */
+    private async migrateLegacySession(): Promise<void> {
+        let saved: string | null = null;
+        try { saved = localStorage.getItem(this.LAUNCHER_SESSION_KEY); } catch { return; }
+        if (!saved) return;
+        const drop = () => { try { localStorage.removeItem(this.LAUNCHER_SESSION_KEY); } catch {} };
+        let session: any;
+        try { session = JSON.parse(saved); } catch { drop(); return; }
+        if (!session?.session_token) { drop(); return; }
+        if (!this.launcherSession) {
+            this.launcherSession = session;
+            this.updateLauncherUI(true);
+            this.fetchLauncherVersion();
         }
-
-        document.getElementById("btn-kanan-browse")?.addEventListener("click", async () => {
-            const { open } = await import("./platform/dialog");
-            const file = await open({
-                filters: [{ name: "Loader Config", extensions: ["cfg"] }],
-                title: "Select Kanan Loader.cfg"
-            });
-            if (file && !Array.isArray(file)) {
-                const p = file as string;
-                kananPathEl.value = p;
-                this.config.kanan_cfg_path = p;
-                await invoke("set_config", { config: this.config });
-                await this.loadKananMods(p);
+        try {
+            const result = await invoke("launcher_list_profiles") as { profiles: any[], active_id: string } | any[];
+            const profiles: any[] = Array.isArray(result) ? result : (result.profiles || []);
+            const activeId = (Array.isArray(result) ? "" : result.active_id) || profiles[0]?.id || "";
+            const profile = profiles.find(p => p.id === activeId);
+            if (!profile) return; // no profile yet: migrate on a later start
+            // A profile that already stores a session keeps it (it may be newer).
+            if (!profile.has_session) {
+                await invoke("launcher_save_profile_session", { id: profile.id, session, expiresIn: 0 });
             }
-        });
-
-        document.getElementById("btn-kanan-save")?.addEventListener("click", () => this.saveKananMods());
+            drop();
+        } catch (e) {
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_save_to_profile_failed", [String(e)])}`, "warn");
+        }
     }
 
     private async loadProfiles() {
@@ -2341,7 +3515,9 @@ class App {
 
             if (active) {
                 this.applyProfileToUI(active);
-                if (active.auto_login && active.session_valid) {
+                if (await this.handleExpiredAutologin(active)) {
+                    // expired: re-login prompt shown instead of a doomed autologin
+                } else if (active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
                 }
             } else {
@@ -2366,20 +3542,89 @@ class App {
             if (!sel) continue;
             sel.innerHTML = "";
             if (this.launcherProfiles.length === 0) {
-                sel.innerHTML = "<option value=''>— No profiles saved —</option>";
+                const none = document.createElement("option");
+                none.value = "";
+                none.dataset.i18n = "launcher_no_profiles";
+                none.textContent = this.t("launcher_no_profiles");
+                sel.appendChild(none);
                 continue;
             }
             for (const p of this.launcherProfiles) {
                 const opt = document.createElement("option");
                 opt.value = p.id;
-                const sessionBadge = p.session_valid ? " ✓" : p.has_session ? " ⚠" : "";
-                const typeBadge = p.profile_type && p.profile_type !== "nexon" ? ` [${p.profile_type}]` : "";
-                const emailPart = p.email ? ` (${p.email})` : "";
-                opt.textContent = `${p.name}${emailPart}${typeBadge}${sessionBadge}`;
+                opt.textContent = this.profileOptionLabel(p);
                 if (p.id === this.activeProfileId) opt.selected = true;
                 sel.appendChild(opt);
             }
         }
+        this.startProfileExpiryTimer();
+    }
+
+    /** Profile list entry: name, email, type, session badge and session time left. */
+    private profileOptionLabel(p: any): string {
+        const expired = this.profileSessionExpired(p);
+        const sessionBadge = p.session_valid && !expired ? " ✓" : p.has_session ? " ⚠" : "";
+        const typeBadge = p.profile_type && p.profile_type !== "nexon" ? ` [${p.profile_type}]` : "";
+        const emailPart = p.email ? ` (${p.email})` : "";
+        const left = p.has_session ? this.formatExpiry(p.session_expires_at) : "";
+        return `${p.name}${emailPart}${typeBadge}${sessionBadge}${left ? ` · ${left}` : ""}`;
+    }
+
+    /** Session time left until `expiresAt` (unix seconds): "29d 4h", "2h 15m", "45m",
+     *  "Expired" (localized); "" when unknown. Same rules as profile::format_expiry. */
+    private formatExpiry(expiresAt: number | undefined): string {
+        if (!expiresAt) return "";
+        const left = Math.floor(expiresAt - Date.now() / 1000);
+        if (left <= 0) return this.t("launcher_expiry_expired");
+        const d = Math.floor(left / 86400), h = Math.floor((left % 86400) / 3600), m = Math.floor((left % 3600) / 60);
+        if (d > 0) return this.t("launcher_expiry_dh", [String(d), String(h)]);
+        if (h > 0) return this.t("launcher_expiry_hm", [String(h), String(m)]);
+        if (m > 0) return this.t("launcher_expiry_m", [String(m)]);
+        return this.t("launcher_expiry_lt1m");
+    }
+
+    /** True when the profile's stored session is past its recorded expiry (unknown = no). */
+    private profileSessionExpired(p: any): boolean {
+        return !!p?.has_session && !!p.session_expires_at && p.session_expires_at <= Date.now() / 1000;
+    }
+
+    private profileExpiryTimer: number | null = null;
+
+    /** Refresh the profile list's countdowns every 60 s (labels only; the selection stays). */
+    private startProfileExpiryTimer() {
+        if (this.profileExpiryTimer !== null) return;
+        this.profileExpiryTimer = window.setInterval(() => {
+            for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
+                const sel = document.getElementById(selId) as HTMLSelectElement | null;
+                if (!sel) continue;
+                for (const opt of Array.from(sel.options)) {
+                    const p = this.launcherProfiles.find(x => x.id === opt.value);
+                    if (p) opt.textContent = this.profileOptionLabel(p);
+                }
+            }
+        }, 60_000);
+    }
+
+    /** Record a new session expiry for a profile locally (the backend persisted it). */
+    private noteProfileExpiry(id: string | null, expiresIn: number) {
+        const p = id ? this.launcherProfiles.find(x => x.id === id) : null;
+        if (!p || !(expiresIn > 0)) return;
+        p.session_expires_at = Math.floor(Date.now() / 1000) + expiresIn;
+        p.has_session = true;
+        p.session_valid = true;
+        for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
+            const opt = Array.from((document.getElementById(selId) as HTMLSelectElement | null)?.options ?? []).find(o => o.value === p.id);
+            if (opt) opt.textContent = this.profileOptionLabel(p);
+        }
+    }
+
+    /** Auto-login is on but the stored session already expired: skip the doomed
+     *  network round trip and go straight to the re-login prompt. */
+    private async handleExpiredAutologin(p: any): Promise<boolean> {
+        if (!p?.auto_login || !this.profileSessionExpired(p) || p.is_official === false) return false;
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [p.name])}`, "warn");
+        await this.promptRelogin();
+        return true;
     }
 
     private applyProfileToUI(profile: any) {
@@ -2409,10 +3654,10 @@ class App {
         const badge = document.getElementById("launcher-profile-badge");
         if (badge) {
             if (isCustom) {
-                badge.textContent = `Custom server: ${profile.login_ip}:${profile.login_port || 11000} — ${profile.client_dir || "no game dir"}`;
+                badge.textContent = this.t("launcher_badge_custom", [`${profile.login_ip}:${profile.login_port || 11000}`, profile.client_dir || this.t("launcher_no_game_dir")]);
             } else {
                 const dir = profile.client_dir ? ` — ${profile.client_dir}` : "";
-                badge.textContent = `Official Nexon NA${dir}`;
+                badge.textContent = this.t("launcher_badge_official") + dir;
             }
         }
     }
@@ -2423,23 +3668,25 @@ class App {
         if (!profile) return;
         this.applyProfileToUI(profile);
         try { await invoke("launcher_set_active_profile", { id }); } catch {}
+        if (await this.handleExpiredAutologin(profile)) return;
         if (profile.auto_login && profile.session_valid) {
             await this.autologinProfile(id);
         }
     }
 
     private async autologinProfile(profileId: string) {
-        this.log(`[Launcher] Auto-login attempt for profile: ${profileId}`, "info");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autologin_attempt", [profileId])}`, "info");
         try {
             const data = await invoke("launcher_load_profile", { id: profileId }) as any;
             const token = data.session_token_for_autologin;
-            if (!token) { this.log("[Launcher] Auto-login: no saved session token", "warn"); return; }
-            this.setLauncherStatus("Auto-logging in…", "busy");
-            const result = await invoke("launcher_autologin", { sessionToken: token }) as any;
+            if (!token) { this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autologin_no_token")}`, "warn"); return; }
+            this.setLauncherStatus(this.t("launcher_autologging"), "busy");
+            const result = await invoke("launcher_autologin", { sessionToken: token, profileId }) as any;
+            if (!result.session) throw new Error(this.t("launcher_err_session_refresh"));
             this.launcherSession = result.session;
             this.updateLauncherUI(true);
-            this.setLauncherStatus("Auto-logged in", "ok");
-            this.log("[Launcher] Auto-login successful", "info");
+            this.setLauncherStatus(this.t("launcher_autologged"), "ok");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autologin_ok")}`, "info");
             this.fetchLauncherVersion();
             // Update session expiry in profile
             await invoke("launcher_update_profile_session", {
@@ -2447,9 +3694,10 @@ class App {
                 sessionToken: result.session.session_token,
                 expiresIn: result.expiresIn || 86400,
             }).catch(() => {});
+            this.noteProfileExpiry(profileId, result.expiresIn || 86400);
         } catch (e: any) {
-            this.setLauncherStatus(`Auto-login failed: ${e}`, "error");
-            this.log(`[Launcher] Auto-login failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("launcher_autologin_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_autologin_failed", [String(e)])}`, "error");
         }
     }
 
@@ -2506,7 +3754,7 @@ class App {
         const chatIp = useCustom ? (document.getElementById("launcher-profile-chat-ip") as HTMLInputElement)?.value.trim() || null : null;
         const chatPort = useCustom ? (parseInt((document.getElementById("launcher-profile-chat-port") as HTMLInputElement)?.value) || null) : null;
 
-        if (!name) { this.setLauncherStatus("Profile name is required", "error"); return; }
+        if (!name) { this.setLauncherStatus(this.t("launcher_profile_name_required"), "error"); return; }
 
         const id = this.profileEditorMode === "edit" ? this.activeProfileId : null;
 
@@ -2521,11 +3769,11 @@ class App {
             (document.getElementById("launcher-client-dir") as HTMLInputElement).value = clientDir;
             await this.loadProfiles();
             this.closeProfileEditor();
-            this.setLauncherStatus(`Profile "${name}" saved`, "ok");
-            this.log(`[Launcher] Profile "${name}" saved`, "info");
+            this.setLauncherStatus(this.t("launcher_profile_saved", [name]), "ok");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_profile_saved", [name])}`, "info");
         } catch (e: any) {
-            this.setLauncherStatus(`Save failed: ${e}`, "error");
-            this.log(`[Launcher] Profile save failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("features_save_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_profile_save_failed", [String(e)])}`, "error");
         }
     }
 
@@ -2533,8 +3781,8 @@ class App {
         const statusEl = document.getElementById("profile-detect-status");
         const areaEl = document.getElementById("detected-profiles-area");
         const listEl = document.getElementById("detected-profiles-list");
-        if (statusEl) statusEl.textContent = "Scanning…";
-        this.log("[Launcher] Scanning for installed launchers...", "info");
+        if (statusEl) statusEl.textContent = this.t("launcher_scanning");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_scanning")}`, "info");
         try {
             const detected = await invoke("detect_launcher_profiles") as Array<{
                 source: string; name: string; client_dir: string;
@@ -2543,20 +3791,20 @@ class App {
                 is_official: boolean;
             }>;
             if (!detected || detected.length === 0) {
-                if (statusEl) statusEl.textContent = "No launchers detected";
+                if (statusEl) statusEl.textContent = this.t("launcher_none_detected");
                 if (areaEl) areaEl.style.display = "none";
-                this.log("[Launcher] No launchers detected", "warn");
+                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_none_detected")}`, "warn");
                 return;
             }
-            if (statusEl) statusEl.textContent = `Found ${detected.length} launcher(s)`;
-            this.log(`[Launcher] Detected ${detected.length} launcher(s): ${detected.map(d => d.name).join(", ")}`, "info");
+            if (statusEl) statusEl.textContent = this.t("launcher_found_n", [String(detected.length)]);
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_detected", [String(detected.length), detected.map(d => d.name).join(", ")])}`, "info");
             if (areaEl) areaEl.style.display = "block";
             if (listEl) {
                 listEl.innerHTML = "";
                 for (const d of detected) {
                     const row = document.createElement("div");
                     row.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border-glass)";
-                    const badge = d.is_official ? "OFFICIAL" : d.source.toUpperCase();
+                    const badge = d.is_official ? this.t("launcher_badge_official_short") : d.source.toUpperCase();
                     const info = d.is_official
                         ? `${d.name}${d.client_dir ? " — " + d.client_dir : ""}`
                         : `${d.name}${d.login_ip ? " — " + d.login_ip + ":" + d.login_port : ""}`;
@@ -2566,7 +3814,7 @@ class App {
                     row.innerHTML = `
                         <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:var(--accent-cyan);color:#000">${badge}</span>
                         <span style="flex:1;font-size:12px">${info}</span>
-                        <button class="tab-btn" style="font-size:11px;padding:2px 8px" ${alreadyImported ? "disabled" : ""}>${alreadyImported ? "Imported ✓" : "Import"}</button>
+                        <button class="tab-btn" style="font-size:11px;padding:2px 8px" ${alreadyImported ? "disabled" : ""}>${alreadyImported ? this.t("launcher_imported_check") : this.t("launcher_import")}</button>
                     `;
                     const importBtn = row.querySelector("button")!;
                     const detected_copy = d;
@@ -2586,20 +3834,20 @@ class App {
                                 isOfficial: detected_copy.is_official,
                             });
                             await this.loadProfiles();
-                            importBtn.textContent = "Imported!";
+                            importBtn.textContent = this.t("launcher_imported");
                             importBtn.disabled = true;
-                            this.log(`[Launcher] Imported profile: ${detected_copy.name}`, "info");
+                            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_imported", [detected_copy.name])}`, "info");
                         } catch (e: any) {
-                            importBtn.textContent = "Error";
-                            this.log(`[Launcher] Profile import failed: ${e}`, "error");
+                            importBtn.textContent = this.t("status_error");
+                            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_import_failed", [String(e)])}`, "error");
                         }
                     });
                     listEl.appendChild(row);
                 }
             }
         } catch (e: any) {
-            if (statusEl) statusEl.textContent = `Detection failed: ${e}`;
-            this.log(`[Launcher] Profile detection failed: ${e}`, "error");
+            if (statusEl) statusEl.textContent = this.t("launcher_detect_failed", [String(e)]);
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_detect_failed", [String(e)])}`, "error");
         }
     }
 
@@ -2607,17 +3855,17 @@ class App {
         if (!this.activeProfileId) return;
         const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
         if (!profile) return;
-        if (!confirm(`Delete profile "${profile.name}"?`)) return;
+        if (!confirm(this.t("confirm_delete_profile", [profile.name]))) return;
         const profileName = profile.name;
         try {
             await invoke("launcher_delete_profile", { id: this.activeProfileId });
             this.activeProfileId = null;
             await this.loadProfiles();
-            this.setLauncherStatus("Profile deleted", "idle");
-            this.log(`[Launcher] Deleted profile: ${profileName}`, "info");
+            this.setLauncherStatus(this.t("launcher_profile_deleted"), "idle");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_profile_deleted", [profileName])}`, "info");
         } catch (e: any) {
-            this.setLauncherStatus(`Delete failed: ${e}`, "error");
-            this.log(`[Launcher] Profile delete failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("launcher_delete_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_profile_delete_failed", [String(e)])}`, "error");
         }
     }
 
@@ -2641,11 +3889,11 @@ class App {
                     });
                 }
                 await this.loadProfiles();
-                this.setLauncherStatus("Saved to profile", "ok");
-                this.log("[Launcher] Saved current session to active profile", "info");
+                this.setLauncherStatus(this.t("launcher_saved_to_profile"), "ok");
+                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_saved_session")}`, "info");
             } catch (e: any) {
-                this.setLauncherStatus(`Save failed: ${e}`, "error");
-                this.log(`[Launcher] Save to profile failed: ${e}`, "error");
+                this.setLauncherStatus(this.t("features_save_failed", [String(e)]), "error");
+                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_save_to_profile_failed", [String(e)])}`, "error");
             }
         } else {
             // No active profile — open editor to create one
@@ -2659,33 +3907,56 @@ class App {
         const rememberEl = document.getElementById("launcher-remember") as HTMLInputElement;
         const email = emailEl.value.trim();
         const password = pwEl.value;
-        if (!email || !password) { this.setLauncherStatus("Email and password required", "error"); return; }
+        if (!email || !password) { this.setLauncherStatus(this.t("launcher_email_pw_required"), "error"); return; }
 
         const btn = document.getElementById("btn-launcher-login") as HTMLButtonElement;
         btn.disabled = true;
-        this.setLauncherStatus("Logging in...", "busy");
+        this.setLauncherStatus(this.t("launcher_logging_in"), "busy");
 
         try {
             let result: any;
             if ((this.config as any).launcher_legacy_auth) {
-                if (!email || !password) { this.setLauncherStatus("Email and password required for direct legacy auth", "error"); btn.disabled = false; return; }
+                // Email/password. 206 → emailed/authenticator code via launcher_login_otp.
                 const vcodeEl = document.getElementById("launcher-verification") as HTMLInputElement;
-                const verificationCode = vcodeEl ? vcodeEl.value.trim() : "";
-                const vcodeOpt = verificationCode.length > 0 ? verificationCode : null;
-                result = await invoke("launcher_login", { username: email, password, remember: rememberEl.checked, verificationCode: vcodeOpt }) as any;
+                const code = vcodeEl ? vcodeEl.value.trim() : "";
+                if (this.pendingMfaKey && code) {
+                    result = await invoke("launcher_login_otp", {
+                        mfaKey: this.pendingMfaKey, otp: code, profileId: this.activeProfileId || null, email,
+                    }) as any;
+                    this.pendingMfaKey = null;
+                    if (vcodeEl) vcodeEl.value = "";
+                } else {
+                    if (!email || !password) { this.setLauncherStatus(this.t("launcher_email_pw_required"), "error"); btn.disabled = false; return; }
+                    result = await invoke("launcher_login", {
+                        username: email, password, remember: rememberEl.checked, profileId: this.activeProfileId || null,
+                    }) as any;
+                }
+                if (result.mfa_required) {
+                    this.pendingMfaKey = result.mfa_key;
+                    const group = document.getElementById("launcher-verification-group");
+                    if (group) group.style.display = "block";
+                    vcodeEl?.focus();
+                    this.setLauncherStatus(this.t("launcher_enter_mfa_code", [String(result.mfa_type || "email")]), "busy");
+                    this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_mfa_requested")}`, "info");
+                    return;
+                }
+                if (result.captcha_required) {
+                    this.setLauncherStatus(this.t("launcher_captcha_required"), "error");
+                    this.log(`[Launcher] ${result.message}`, "warn");
+                    return;
+                }
             } else {
-                this.setLauncherStatus("Please log in through the popup window...", "busy");
-                const sessionJson = await invoke("nexon_login_webview") as any;
-                result = { session: sessionJson, expiresIn: 86400 };
+                // Browser / SSO login: NxLSession or TpaSession → exchange.
+                this.setLauncherStatus(this.t("launcher_login_popup"), "busy");
+                result = await invoke("nexon_login_webview", { profileId: this.activeProfileId || null }) as any;
             }
             this.launcherSession = result.session;
             if (rememberEl.checked) {
-                localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
-                // Save session to active profile
+                // Save session to active profile (the backend store; never localStorage)
                 if (this.activeProfileId && result.session.session_token) {
-                    await invoke("launcher_update_profile_session", {
+                    await invoke("launcher_save_profile_session", {
                         id: this.activeProfileId,
-                        sessionToken: result.session.session_token,
+                        session: result.session,
                         expiresIn: result.expiresIn || 86400,
                     }).catch(() => {});
                     await this.loadProfiles();
@@ -2693,12 +3964,12 @@ class App {
             }
             pwEl.value = "";
             this.updateLauncherUI(true);
-            this.setLauncherStatus("Logged in", "ok");
-            this.log(`[Launcher] Logged in as ${email}`, "info");
+            this.setLauncherStatus(this.t("launcher_status_ok"), "ok");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_logged_in_as", [email])}`, "info");
             this.fetchLauncherVersion();
         } catch (e: any) {
-            this.setLauncherStatus(`Login failed: ${e}`, "error");
-            this.log(`[Launcher] Login failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("launcher_login_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_login_failed", [String(e)])}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2706,10 +3977,10 @@ class App {
 
     private launcherDoLogout() {
         this.launcherSession = null;
-        localStorage.removeItem(this.LAUNCHER_SESSION_KEY);
+        try { localStorage.removeItem(this.LAUNCHER_SESSION_KEY); } catch {}
         this.updateLauncherUI(false);
-        this.setLauncherStatus("Not logged in", "idle");
-        this.log("[Launcher] Logged out", "info");
+        this.setLauncherStatus(this.t("launcher_status_idle"), "idle");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_logged_out")}`, "info");
         (document.getElementById("launcher-version-value") as HTMLElement).textContent = "—";
         (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = "—";
     }
@@ -2717,43 +3988,147 @@ class App {
     private async launcherImportSession() {
         const btn = document.getElementById("btn-launcher-import-session") as HTMLButtonElement;
         if (btn) btn.disabled = true;
-        this.setLauncherStatus("Importing session from Nexon Launcher...", "busy");
+        this.setLauncherStatus(this.t("launcher_importing_session"), "busy");
         try {
-            const result = await invoke("launcher_import_session") as { session: any };
-            this.launcherSession = result.session;
-            localStorage.setItem(this.LAUNCHER_SESSION_KEY, JSON.stringify(this.launcherSession));
-            this.updateLauncherUI(true);
-            this.setLauncherStatus("Session imported from Nexon Launcher", "ok");
-            this.log("[Launcher] Session imported from Nexon Launcher", "info");
+            const result = await invoke("launcher_import_session", { profileId: this.activeProfileId || null }) as { session: any };
+            await this.adoptImportedSession(result.session);
+            this.setLauncherStatus(this.t("launcher_session_imported"), "ok");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_session_imported")}`, "info");
             this.fetchLauncherVersion();
         } catch (e) {
-            this.setLauncherStatus(`Import failed: ${e}`, "error");
-            this.log(`[Launcher] Session import failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("launcher_import_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_import_failed", [String(e)])}`, "error");
         } finally {
             if (btn) btn.disabled = false;
+        }
+    }
+
+    /** Use an imported session: keep it, and save it into the selected profile. */
+    private async adoptImportedSession(session: any) {
+        this.launcherSession = session;
+        if (this.activeProfileId && session?.session_token) {
+            await invoke("launcher_save_profile_session", { id: this.activeProfileId, session, expiresIn: 86400 })
+                .catch((e) => this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_save_to_profile_failed", [String(e)])}`, "warn"));
+            await this.loadProfiles();
+        }
+        this.updateLauncherUI(true);
+    }
+
+    /** Import saved accounts from Kanan's profiles.dat (asks for the Kanan master password). */
+    private async launcherImportKanan() {
+        const { importFromKanan } = await import("./kananImport");
+        try {
+            await importFromKanan({
+                t: (k, a) => this.t(k, a ?? []),
+                log: (m, l) => this.log(m, l),
+                reloadProfiles: () => this.loadProfiles(),
+            });
+        } catch (e) {
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_kanan_import_failed", [String(e)])}`, "error");
+        }
+    }
+
+    /** Import a session from the user's installed browsers (Firefox, Chrome, Edge, Brave). */
+    private async launcherImportBrowser() {
+        const btn = document.getElementById("btn-launcher-import-browser") as HTMLButtonElement | null;
+        if (btn) btn.disabled = true;
+        this.setLauncherStatus(this.t("launcher_importing_browser"), "busy");
+        try {
+            const r = await invoke("launcher_import_browser", { profileId: this.activeProfileId || null }) as {
+                session?: any; browser?: string; v20_found: boolean; notes: string[];
+            };
+            if (r.session) {
+                await this.adoptImportedSession(r.session);
+                const msg = this.t("launcher_browser_imported", [r.browser || "?"]);
+                this.setLauncherStatus(msg, "ok");
+                this.log(`${this.t("log_tag_launcher")} ${msg}`, "info");
+                this.fetchLauncherVersion();
+            } else {
+                const msg = r.v20_found ? this.t("launcher_browser_v20") : this.t("launcher_browser_none");
+                this.setLauncherStatus(msg, "error");
+                this.log(`${this.t("log_tag_launcher")} ${msg}`, "warn");
+            }
+        } catch (e) {
+            this.setLauncherStatus(this.t("launcher_import_failed", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_import_failed", [String(e)])}`, "error");
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    /** Backend marker on errors meaning the Nexon session expired and could not be refreshed. */
+    private static readonly RELOGIN_MARKER = "[RELOGIN]";
+
+    /** True when an error from launch/patch/update-check means "log in again": the backend's
+     *  marker, or an explicit HTTP 401. */
+    private isReloginError(e: unknown): boolean {
+        const s = String(e ?? "");
+        if (s.includes(App.RELOGIN_MARKER)) return true;
+        return /\b(?:HTTP|status(?: code)?)\s*:?\s*401\b|\(401\)|\b401 Unauthorized\b/i.test(s);
+    }
+
+    /** A command error carrying a session the backend refreshed before failing
+     *  (`{ message, session }`): keep that session and return the message. */
+    private errWithSession(e: any): any {
+        if (e && typeof e === "object" && typeof e.message === "string" && e.session) {
+            this.keepRefreshedSession(e.session);
+            return e.message;
+        }
+        return e;
+    }
+
+    /** Error text without the backend's re-login marker. */
+    private cleanErr(e: unknown): string {
+        return String(e ?? "").split(App.RELOGIN_MARKER).join("").trim();
+    }
+
+    /** The session could not be refreshed: offer to log in again. */
+    private async promptRelogin() {
+        this.setLauncherStatus(this.t("launcher_session_expired"), "error");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_session_expired")}`, "warn");
+        const again = await ask(this.t("launcher_relogin_prompt"), { title: this.t("launcher_relogin_title"), kind: "warning" });
+        // Keep the session unless the user chose to log in again.
+        if (!again) return;
+        this.launcherDoLogout();
+        document.querySelector('.nav-item[data-tab="launcher"]')?.dispatchEvent(new Event('click'));
+        if ((this.config as any).launcher_legacy_auth) {
+            (document.getElementById("launcher-password") as HTMLInputElement | null)?.focus();
+            this.setLauncherStatus(this.t("launcher_relogin_enter_pw"), "idle");
+        } else {
+            await this.launcherDoLogin();
         }
     }
 
     private async launcherDoLaunch() {
         const isCustomServer = !this.activeProfileIsOfficial;
         if (!isCustomServer && !this.launcherSession) {
-            this.setLauncherStatus("Please log in first (or import a custom server profile)", "error");
+            this.setLauncherStatus(this.t("launcher_login_first"), "error");
             return;
         }
+        if (!isCustomServer) {
+            const active = this.launcherProfiles.find(p => p.id === this.activeProfileId);
+            if (this.profileSessionExpired(active)) {
+                // The stored session is past its expiry: a launch could only fail with 401.
+                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [active.name])}`, "warn");
+                await this.promptRelogin();
+                return;
+            }
+        }
         const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
-        if (!clientDir) { this.setLauncherStatus("Mabinogi folder is required", "error"); return; }
+        if (!clientDir) { this.setLauncherStatus(this.t("launcher_folder_required"), "error"); return; }
 
         const btn = document.getElementById("btn-launcher-launch") as HTMLButtonElement;
         btn.disabled = true;
-        this.setLauncherStatus("Launching…", "busy");
+        this.setLauncherStatus(this.t("launcher_launching"), "busy");
 
-        const preLaunchCmd = (document.getElementById("pre-launch-cmd") as HTMLTextAreaElement)?.value?.trim() || "";
-        const postLaunchCmd = (document.getElementById("post-launch-cmd") as HTMLTextAreaElement)?.value?.trim() || "";
+        await this.loadSharedConfig();
+        const preLaunchCmd = this.sharedConfig.hooks.before_launch?.trim() || "";
+        const postLaunchCmd = this.sharedConfig.hooks.after_launch?.trim() || "";
         const launchCmdOverride = (document.getElementById("launch-cmd-override") as HTMLTextAreaElement)?.value?.trim() || "";
         const useNexonLauncher = (document.getElementById("launch-use-nexon-launcher") as HTMLInputElement)?.checked ?? false;
 
-        this.log(`[Launcher] Launching Mabinogi from: ${clientDir}${isCustomServer ? ` (custom server: ${this.activeProfileLoginIp})` : ""}`, "info");
-        if (preLaunchCmd) this.log(`[Launcher] Pre-launch: ${preLaunchCmd}`, "info");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_launching_from", [clientDir])}${isCustomServer ? " " + this.t("log_launcher_custom_server_suffix", [this.activeProfileLoginIp]) : ""}`, "info");
+        if (preLaunchCmd) this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_pre_launch", [preLaunchCmd])}`, "info");
 
         try {
             const r = await invoke("launcher_launch", {
@@ -2766,21 +4141,43 @@ class App {
                 postLaunchCmd: postLaunchCmd || null,
                 launchCmdOverride: launchCmdOverride || null,
                 useNexonLauncher,
+                profileId: this.activeProfileId || null,
+                profileName: this.activeProfileName() || null,
             }) as any;
+            if (r.relogin_required) {
+                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [String(r.error ?? "")])}`, "warn");
+                btn.disabled = false;
+                await this.promptRelogin();
+                return;
+            }
+            if (r.session) {
+                // The launch may have refreshed an expired AToken (401 → autologin) — keep it
+                // (and persist the renewed NxLSession expiry on the active profile).
+                if (r.sessionExpiresIn && !r.session.refreshed_expires_in) r.session.refreshed_expires_in = r.sessionExpiresIn;
+                this.keepRefreshedSession(r.session);
+            }
             const result = document.getElementById("launcher-launch-result")!;
-            result.textContent = `Launched ${r.executable} (${r.argumentCount} args)${r.patchAvailable ? " — update available" : ""}`;
+            result.textContent = this.t("launcher_launched_exe", [String(r.executable), String(r.argumentCount)]) + (r.patchAvailable ? " — " + this.t("launcher_update_available_suffix") : "");
             result.className = "launcher-launch-result success";
             result.classList.remove("hidden");
-            this.setLauncherStatus("Mabinogi launched!", "ok");
-            this.log(`[Launcher] Mabinogi launched: ${r.executable} (${r.argumentCount} args)`, "info");
-            if (postLaunchCmd) this.log(`[Launcher] Post-launch: ${postLaunchCmd}`, "info");
+            this.setLauncherStatus(this.t("launcher_launched"), "ok");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_launched", [String(r.executable), String(r.argumentCount)])}`, "info");
+            if (postLaunchCmd) this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_post_launch", [postLaunchCmd])}`, "info");
         } catch (e: any) {
+            e = this.errWithSession(e);
+            // Any failed token refresh means the stored session is dead: offer a fresh login.
+            if (this.isReloginError(e)) {
+                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [this.cleanErr(e)])}`, "warn");
+                btn.disabled = false;
+                await this.promptRelogin();
+                return;
+            }
             const result = document.getElementById("launcher-launch-result")!;
-            result.textContent = `Launch failed: ${e}`;
+            result.textContent = this.t("launcher_launch_failed", [String(e)]);
             result.className = "launcher-launch-result error";
             result.classList.remove("hidden");
-            this.setLauncherStatus(`Launch error: ${e}`, "error");
-            this.log(`[Launcher] Launch failed: ${e}`, "error");
+            this.setLauncherStatus(this.t("launcher_launch_error", [String(e)]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [String(e)])}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -2792,28 +4189,32 @@ class App {
         // Version check: CDN first, fall back to local patchdata
         let verStr = "—";
         try {
-            const ver = await invoke("launcher_get_version", { session: this.launcherSession }) as number;
+            const res = await invoke("launcher_get_version", { session: this.launcherSession }) as { version: number; session?: any };
+            this.keepRefreshedSession(res.session);
+            const ver = res.version;
             verStr = ver > 0 ? String(ver) : "—";
         } catch {
             try {
                 const gp = (this.config as any)?.patcher_game_path;
                 if (gp) {
-                    const pv = await invoke("check_patch_version", { gamePath: gp }) as any;
+                    const pv = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
+                    this.keepRefreshedSession(pv.session);
                     const ver = (pv.remote_version ?? pv.local_version) as number | null;
                     if (ver && ver > 0) verStr = String(ver);
                 }
             } catch {}
         }
         (document.getElementById("launcher-version-value") as HTMLElement).textContent = verStr;
-        this.log(`[Launcher] Game version: ${verStr}`, "info");
+        this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_version_label")} ${verStr}`, "info");
 
         // Maintenance check is independent of version check
         try {
             const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
-            (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maint ? "Yes" : "No";
-            this.log(`[Launcher] Maintenance: ${maint}`, "info");
+            const maintText = maint ? this.t("label_yes") : this.t("label_no");
+            (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maintText;
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_maintenance_label")} ${maintText}`, "info");
         } catch (e) {
-            this.log(`[Launcher] Maintenance check failed (non-critical): ${e}`, "warn");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_maint_failed", [String(e)])}`, "warn");
         }
     }
 
@@ -2835,8 +4236,8 @@ class App {
         const dot = document.getElementById("launcher-status-dot");
         if (dot) dot.style.background = loggedIn ? "var(--green, #4ade80)" : "var(--yellow, #facc15)";
         const statusText = document.getElementById("launcher-status-text");
-        if (statusText && !loggedIn) statusText.textContent = "Not logged in";
-        if (statusText && loggedIn) statusText.textContent = "Logged in";
+        if (statusText && !loggedIn) statusText.textContent = this.t("launcher_status_idle");
+        if (statusText && loggedIn) statusText.textContent = this.t("launcher_status_ok");
     }
 
     private setLauncherStatus(msg: string, type: "ok" | "error" | "busy" | "idle") {
@@ -2846,78 +4247,6 @@ class App {
         if (dot) {
             const colours: Record<string, string> = { ok: "#4ade80", error: "#f87171", busy: "#facc15", idle: "#6b7280" };
             dot.style.background = colours[type] ?? colours.idle;
-        }
-    }
-
-    private async loadKananMods(path: string) {
-        const listEl = document.getElementById("kanan-mods-list")!;
-        const saveBtn = document.getElementById("btn-kanan-save")!;
-        const statusEl = document.getElementById("kanan-status")!;
-        if (!listEl) return;
-
-        try {
-            this.kananMods = await invoke("read_kanan_cfg", { path }) as Array<{ name: string; enabled: boolean }>;
-            listEl.innerHTML = "";
-            if (this.kananMods.length === 0) {
-                listEl.innerHTML = "<div style='opacity:.6;font-size:12px;padding:6px 0;'>No mods found in Loader.cfg</div>";
-                saveBtn?.classList.add("hidden");
-                return;
-            }
-            for (let i = 0; i < this.kananMods.length; i++) {
-                const mod = this.kananMods[i];
-                const row = document.createElement("div");
-                row.className = "sys-stat";
-                row.style.cssText = "padding:4px 0;min-height:unset;";
-                const lbl = document.createElement("span");
-                lbl.style.cssText = "flex:1;font-size:12px;";
-                lbl.textContent = mod.name;
-                const sw = document.createElement("label");
-                sw.className = "switch";
-                const cb = document.createElement("input");
-                cb.type = "checkbox";
-                cb.checked = mod.enabled;
-                cb.dataset.kananIdx = String(i);
-                cb.addEventListener("change", (e) => {
-                    const idx = parseInt((e.target as HTMLInputElement).dataset.kananIdx ?? "0");
-                    this.kananMods[idx].enabled = (e.target as HTMLInputElement).checked;
-                });
-                const slider = document.createElement("span");
-                slider.className = "slider";
-                sw.appendChild(cb);
-                sw.appendChild(slider);
-                row.appendChild(lbl);
-                row.appendChild(sw);
-                listEl.appendChild(row);
-            }
-            saveBtn?.classList.remove("hidden");
-            statusEl?.classList.add("hidden");
-        } catch (e: any) {
-            listEl.innerHTML = `<div style='color:var(--accent-warn,#f90);font-size:12px;padding:6px 0;'>Failed to read: ${e}</div>`;
-            saveBtn?.classList.add("hidden");
-        }
-    }
-
-    private async saveKananMods() {
-        const path = this.config.kanan_cfg_path;
-        if (!path) return;
-        const statusEl = document.getElementById("kanan-status")!;
-        this.log(`[Kanan] Saving mods to: ${path}`, "info");
-        try {
-            await invoke("write_kanan_cfg", { path, mods: this.kananMods });
-            if (statusEl) {
-                statusEl.textContent = "Saved!";
-                statusEl.style.color = "var(--green, #4ade80)";
-                statusEl.classList.remove("hidden");
-                setTimeout(() => statusEl.classList.add("hidden"), 2000);
-            }
-            this.log(`[Kanan] Saved ${this.kananMods.length} mod(s)`, "info");
-        } catch (e: any) {
-            if (statusEl) {
-                statusEl.textContent = `Save failed: ${e}`;
-                statusEl.style.color = "var(--accent-warn,#f90)";
-                statusEl.classList.remove("hidden");
-            }
-            this.log(`[Kanan] Save failed: ${e}`, "error");
         }
     }
 
@@ -3008,8 +4337,17 @@ class App {
         const viewport = document.getElementById("three-viewport");
         if (!handle || !viewport) return;
 
-        const saved = localStorage.getItem("preview-3d-height");
-        if (saved) { viewport.style.height = `${saved}px`; viewport.style.minHeight = `${saved}px`; }
+        // The viewport flexes to the available height (min 240px, see styles.css). A
+        // dragged height becomes its preferred size but may still shrink to fit.
+        const MIN_H = 240;
+        const setPreferred = (h: number) => { viewport.style.flex = `0 1 ${Math.max(MIN_H, h)}px`; };
+        let saved: string | null = null;
+        try { saved = localStorage.getItem("preview-3d-height"); } catch { /* storage unavailable */ }
+        if (saved && !isNaN(parseInt(saved, 10))) setPreferred(parseInt(saved, 10));
+        // Keep the renderer in step with layout changes (window resize, flex changes).
+        if (typeof ResizeObserver !== "undefined") {
+            new ResizeObserver(() => (window as any).__threeResizeFn?.()).observe(viewport);
+        }
 
         let dragging = false;
         let startY = 0;
@@ -3026,9 +4364,7 @@ class App {
         document.addEventListener("mousemove", (e) => {
             if (!dragging) return;
             const delta = (e as MouseEvent).clientY - startY;
-            const newH = Math.max(150, startH + delta);
-            viewport.style.height = `${newH}px`;
-            viewport.style.minHeight = `${newH}px`;
+            setPreferred(startH + delta);
             // Notify three.js of resize if renderer is registered
             (window as any).__threeResizeFn?.();
         });
@@ -3037,7 +4373,7 @@ class App {
             dragging = false;
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
-            localStorage.setItem("preview-3d-height", String(Math.round(viewport.getBoundingClientRect().height)));
+            try { localStorage.setItem("preview-3d-height", String(Math.round(viewport.getBoundingClientRect().height))); } catch { /* storage unavailable */ }
         });
     }
 
@@ -3047,7 +4383,7 @@ class App {
             const isFullSeq = (document.getElementById("extract-full-sequence") as HTMLInputElement).checked;
             const path = isFullSeq
                 ? await open({ directory: true })
-                : await open({ filters: [{ name: "Mabinogi Archive", extensions: ["it", "pack"] }] });
+                : await open({ filters: [{ name: this.t("dlg_filter_mabi_archive"), extensions: ["it", "pack"] }] });
             if (path && !Array.isArray(path)) {
                 (document.getElementById("extract-input") as HTMLInputElement).value = path;
                 this.handlePathAutoFill("extract-input", path);
@@ -3065,14 +4401,14 @@ class App {
             }
         });
         document.getElementById("btn-browse-pack-out")?.addEventListener("click", async () => {
-            const path = await save({ filters: [{ name: "Mabinogi Archive", extensions: ["it"] }] });
+            const path = await save({ filters: [{ name: this.t("dlg_filter_mabi_archive"), extensions: ["it"] }] });
             if (path) (document.getElementById("pack-output") as HTMLInputElement).value = path;
         });
         document.getElementById("btn-browse-list")?.addEventListener("click", async () => {
             const isFullSeq = (document.getElementById("list-full-sequence") as HTMLInputElement).checked;
             const path = isFullSeq
                 ? await open({ directory: true })
-                : await open({ filters: [{ name: "Mabinogi Archive", extensions: ["it", "pack"] }] });
+                : await open({ filters: [{ name: this.t("dlg_filter_mabi_archive"), extensions: ["it", "pack"] }] });
             if (path && !Array.isArray(path)) {
                 (document.getElementById("list-input") as HTMLInputElement).value = path;
                 this.runList();
@@ -3090,7 +4426,7 @@ class App {
             if (path && !Array.isArray(path)) (document.getElementById("differ-new") as HTMLInputElement).value = path;
         });
         document.getElementById("btn-browse-differ-out")?.addEventListener("click", async () => {
-            const path = await save({ filters: [{ name: "Mabinogi Archive", extensions: ["it"] }] });
+            const path = await save({ filters: [{ name: this.t("dlg_filter_mabi_archive"), extensions: ["it"] }] });
             if (path) (document.getElementById("differ-output") as HTMLInputElement).value = path;
         });
 
@@ -3208,8 +4544,8 @@ class App {
                     pmg: this.config.associate_pmg,
                     xmlcompiled: this.config.associate_xmlcompiled
                 });
-                this.log("Registry associations updated.", "success");
-            } catch (e) { this.log(`Registry error: ${e}`, "error"); }
+                this.log(this.t("log_registry_updated"), "success");
+            } catch (e) { this.log(this.t("log_registry_error", [String(e)]), "error"); }
         });
 
         document.getElementById("btn_wipe")?.addEventListener("click", () => this.wipeHistory());
@@ -3232,13 +4568,64 @@ class App {
         if (parallelEl) parallelEl.checked = this.config.parallel_ops ?? true;
         parallelEl?.addEventListener("change", () => { this.config.parallel_ops = parallelEl.checked; this.saveConfig(); });
 
+        const trayEl = document.getElementById("settings-minimize-to-tray") as HTMLInputElement | null;
+        if (trayEl) trayEl.checked = this.config.minimize_to_tray ?? false;
+        trayEl?.addEventListener("change", () => { this.config.minimize_to_tray = trayEl.checked; this.saveConfig(); });
+
+        // Start with Windows: a quoted HKCU Run entry with --minimized (starts in the tray).
+        const autoStartEl = document.getElementById("settings-start-with-windows") as HTMLInputElement | null;
+        if (!navigator.userAgent.includes("Windows")) {
+            document.getElementById("settings-start-with-windows-row")?.remove();
+        } else if (autoStartEl) {
+            invoke("get_start_with_windows").then(v => { autoStartEl.checked = !!v; }).catch(() => {});
+            autoStartEl.addEventListener("change", async () => {
+                try {
+                    await invoke("set_start_with_windows", { enabled: autoStartEl.checked });
+                } catch (e) {
+                    autoStartEl.checked = !autoStartEl.checked;
+                    this.log(this.t("log_start_with_windows_failed", [String(e)]), "error");
+                }
+            });
+        }
+
+        // In-app REST API (same server as `mabi-patcher serve`, loopback only).
+        const apiChk = document.getElementById("settings-api-enabled") as HTMLInputElement | null;
+        const apiPortEl = document.getElementById("settings-api-port") as HTMLInputElement | null;
+        if (apiChk) apiChk.checked = this.config.api_enabled ?? false;
+        if (apiPortEl) apiPortEl.value = String(this.config.api_port ?? 7331);
+        const applyApi = async () => {
+            const port = Math.min(65535, Math.max(1, parseInt(apiPortEl?.value ?? "7331", 10) || 7331));
+            if (apiPortEl) apiPortEl.value = String(port);
+            this.config.api_enabled = apiChk?.checked ?? false;
+            this.config.api_port = port;
+            this.saveConfig();
+            try {
+                if (this.config.api_enabled) {
+                    const bound = await invoke<number>("api_start", { port });
+                    this.log(this.t("log_api_started", [String(bound)]));
+                } else {
+                    await invoke("api_stop");
+                    this.log(this.t("log_api_stopped"));
+                }
+            } catch (err) {
+                this.log(this.t("log_api_start_failed", [String(err)]), "error");
+                if (apiChk) apiChk.checked = false;
+                this.config.api_enabled = false;
+                this.saveConfig();
+            }
+            await this.refreshApiBadge();
+        };
+        apiChk?.addEventListener("change", applyApi);
+        apiPortEl?.addEventListener("change", () => { if (apiChk?.checked) applyApi(); else { this.config.api_port = parseInt(apiPortEl.value, 10) || 7331; this.saveConfig(); } });
+        this.refreshApiBadge();
+
         document.getElementById("settings-portable-mode")?.addEventListener("change", async (e) => {
             const enable = (e.target as HTMLInputElement).checked;
             try {
                 await invoke("set_portable_mode", { enable });
                 await refreshConfigPath();
             } catch (err) {
-                alert("Failed to switch config location: " + err);
+                alert(this.t("msg_portable_switch_failed", [String(err)]));
                 await refreshPortableToggle(); // revert toggle
             }
         });
@@ -3341,7 +4728,7 @@ class App {
 
     private async runExtract() {
         if (this._taskStartTime !== null) {
-            await message(this.t("msg_task_running"), { title: "Task In Progress", kind: "warning" });
+            await message(this.t("msg_task_running"), { title: this.t("dlg_task_in_progress"), kind: "warning" });
             return;
         }
         const input = (document.getElementById("extract-input") as HTMLInputElement).value;
@@ -3351,7 +4738,7 @@ class App {
         const filters = filterStr.split(',').map(f => f.trim()).filter(f => f.length > 0);
 
         if (!input || !output) {
-            await message("Please select both an Input Archive and an Output Directory.", { title: "Missing Required Fields", kind: "error" });
+            await message(this.t("msg_extract_missing_fields"), { title: this.t("dlg_missing_fields"), kind: "error" });
             return;
         }
         this._taskStartTime = Date.now();
@@ -3363,13 +4750,13 @@ class App {
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
-            this.log(`Error: ${e}`, "error");
+            this.log(this.t("msg_error_fmt", [String(e)]), "error");
         }
     }
 
     private async runPack() {
         if (this._taskStartTime !== null) {
-            await message(this.t("msg_task_running"), { title: "Task In Progress", kind: "warning" });
+            await message(this.t("msg_task_running"), { title: this.t("dlg_task_in_progress"), kind: "warning" });
             return;
         }
         const input = (document.getElementById("pack-input") as HTMLInputElement).value;
@@ -3380,7 +4767,7 @@ class App {
         const ivVal = parseInt((document.getElementById("pack-iv") as HTMLInputElement).value) || 0;
 
         if (!input || !output || !key) {
-            await message("Please select a Source Folder, Output Archive path, and an Encryption Salt.", { title: "Missing Required Fields", kind: "error" });
+            await message(this.t("msg_pack_missing_fields"), { title: this.t("dlg_missing_fields"), kind: "error" });
             return;
         }
 
@@ -3412,7 +4799,7 @@ class App {
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
-            this.log(`Error: ${e}`, "error");
+            this.log(this.t("msg_error_fmt", [String(e)]), "error");
         }
     }
 
@@ -3450,7 +4837,7 @@ class App {
 
         const isFullSeq = forceFullSeq || (document.getElementById("list-full-sequence") as HTMLInputElement).checked;
 
-        this.updateProgress(0, "Loading...", true);
+        this.updateProgress(0, this.t("preview_loading"), true);
         let res: PackListResponse;
         try {
             if (isFullSeq) {
@@ -3458,7 +4845,7 @@ class App {
                 const isFile = input.toLowerCase().endsWith(".it") || input.toLowerCase().endsWith(".pack");
                 const lastIdx = Math.max(input.lastIndexOf("/"), input.lastIndexOf("\\"));
                 const dir = isFile ? (lastIdx !== -1 ? input.substring(0, lastIdx) : ".") : input;
-                this.log(`Loading full sequence from: ${dir}...`);
+                this.log(this.t("log_loading_sequence", [dir]));
                 this._taskStartTime = Date.now();
                 res = await invoke("list_sequence_contents", { folder: dir, key: null }) as PackListResponse;
                 this.loadedEntries = res.entries;
@@ -3478,7 +4865,7 @@ class App {
                 const saved = await invoke("load_pending_changes", { archive: this.currentArchive }) as Array<{op: string; [k: string]: string}>;
                 this.vfsPending = saved;
                 if (saved.length > 0) {
-                    this.log(`[VFS] Restored ${saved.length} deferred pending change(s).`, "info");
+                    this.log(this.t("log_vfs_restored", [String(saved.length)]), "info");
                 }
             } catch (_e) {
                 this.vfsPending = [];
@@ -3502,7 +4889,7 @@ class App {
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
-            this.log(`Error: ${e}`, "error");
+            this.log(this.t("msg_error_fmt", [String(e)]), "error");
         }
     }
     private async runDiffer() {
@@ -3512,14 +4899,14 @@ class App {
         const key = (document.getElementById("differ-key") as HTMLInputElement).value;
 
         if (!base || !modified || !output || !key) {
-            await message("Please select Original, Modified, and Output paths, and an Encryption Salt.", { title: "Missing Required Fields", kind: "error" });
+            await message(this.t("msg_differ_missing_fields"), { title: this.t("dlg_missing_fields"), kind: "error" });
             return;
         }
 
         try {
             await invoke("create_patch", { base, modified, output, key });
             this.log(this.t("diff_success", [output]), "success");
-        } catch (e) { this.log(`Error: ${e}`, "error"); }
+        } catch (e) { this.log(this.t("msg_error_fmt", [String(e)]), "error"); }
     }
 
     private renderTree(filter: string = "") {
@@ -3646,6 +5033,7 @@ class App {
             const frow = document.createElement("div");
             frow.className = "tree-item";
             frow.innerHTML = `<input type="checkbox" class="tree-cb" data-path="${f.name}"> <span>${f.name}</span>`;
+            frow.dataset.path = f.name;
             frow.onclick = () => this.selectFile(f, frow);
             frow.oncontextmenu = (ev) => {
                 ev.preventDefault();
@@ -3665,6 +5053,7 @@ class App {
             this.selectFile(allMatchRows[0].entry, allMatchRows[0].row);
             allMatchRows[0].row.scrollIntoView({ block: "nearest" });
         }
+        this.vfsPaintSelection();
     }
 
     private showContextMenu(ev: MouseEvent, entry: AggregateEntry) {
@@ -3683,6 +5072,10 @@ class App {
         const renameDiv     = document.getElementById("menu-divider-rename")!;
         const convXmlBtn    = document.getElementById("menu-conv-xml")!;
         const convObjBtn    = document.getElementById("menu-conv-obj")!;
+        // Folder/multi-select actions are enabled by the tree's own contextmenu handler
+        const extractSelBtn = document.getElementById("menu-extract-sel");
+        if (extractSelBtn) extractSelBtn.style.display = "none";
+        extractBtn.style.display = "block";
 
         const closeMenu = () => {
             menu.style.display = "none";
@@ -3706,18 +5099,18 @@ class App {
                         dest: dest,
                         key: skey
                     });
-                    this.log(`Extracted: ${dest}`, "success");
-                } catch(e) { this.log(`Error: ${e}`, "error"); }
+                    this.log(this.t("extract_success", [dest]), "success");
+                } catch(e) { this.log(this.t("msg_error_fmt", [String(e)]), "error"); }
             }
         };
 
         copyNameBtn.onclick = () => {
             navigator.clipboard.writeText(entry.name);
-            this.log("Name copied to clipboard.");
+            this.log(this.t("log_name_copied"));
         };
         copyKeyBtn.onclick = () => {
             navigator.clipboard.writeText(entry.salt_used);
-            this.log("Salt copied to clipboard.");
+            this.log(this.t("log_salt_copied"));
         };
 
         // Rename / Delete — only when archive is loaded in edit mode
@@ -3727,7 +5120,7 @@ class App {
         deleteBtn.style.display  = canEdit ? "block" : "none";
 
         renameBtn.onclick = () => {
-            const newName = prompt("New path (relative to archive root):", entry.name);
+            const newName = prompt(this.t("prompt_rename_path"), entry.name);
             if (!newName || newName === entry.name) return;
             this.vfsPending.push({ op: "rename", from: entry.name, to: newName });
             this.renderVfsPending();
@@ -3754,9 +5147,9 @@ class App {
                 const out = await save({ defaultPath: entry.name.replace(/\.dds$/i, ".png") });
                 if (out) {
                     await invoke("run_convert", { input: entry.source_archive, output: out, key: entry.salt_used, wrapData: false });
-                    this.log(`Converted to PNG: ${out}`, "success");
+                    this.log(this.t("log_converted_png", [out]), "success");
                 }
-            } catch(e) { this.log(`Failed: ${e}`, "error"); }
+            } catch(e) { this.log(this.t("patcher_failed", [String(e)]), "error"); }
         };
 
         convDdsBtn.onclick = async () => {
@@ -3764,9 +5157,9 @@ class App {
                 const out = await save({ defaultPath: entry.name.replace(/\.png$/i, ".dds") });
                 if (out) {
                     await invoke("run_convert", { input: entry.source_archive, output: out, key: entry.salt_used, wrapData: false });
-                    this.log(`Converted to DDS: ${out}`, "success");
+                    this.log(this.t("log_converted_dds", [out]), "success");
                 }
-            } catch(e) { this.log(`Failed: ${e}`, "error"); }
+            } catch(e) { this.log(this.t("patcher_failed", [String(e)]), "error"); }
         };
 
         convXmlBtn.onclick = async () => {
@@ -3781,9 +5174,9 @@ class App {
                 const out = await save({ defaultPath: baseName });
                 if (out) {
                     await writeTextFile(out, xml);
-                    this.log(`Decompiled to XML: ${out}`, "success");
+                    this.log(this.t("log_decompiled_xml", [out]), "success");
                 }
-            } catch(e) { this.log(`Decompile failed: ${e}`, "error"); }
+            } catch(e) { this.log(this.t("log_decompile_failed", [String(e)]), "error"); }
         };
 
         convObjBtn.onclick = async () => {
@@ -3797,9 +5190,9 @@ class App {
                 const out = await save({ defaultPath: baseName });
                 if (out) {
                     await writeTextFile(out, obj);
-                    this.log(`Exported OBJ: ${out}`, "success");
+                    this.log(this.t("log_exported_obj", [out]), "success");
                 }
-            } catch(e) { this.log(`OBJ export failed: ${e}`, "error"); }
+            } catch(e) { this.log(this.t("log_obj_export_failed", [String(e)]), "error"); }
         };
     }
 
@@ -3880,8 +5273,8 @@ class App {
 
     private mmlPlayerHtml(): string {
         return `<div id="mml-player" style="flex-shrink:0;padding:5px 8px;border-top:1px solid var(--border,#333);display:flex;gap:8px;align-items:center">
-            <button id="mml-play-btn" style="padding:3px 13px;background:var(--accent-cyan,#4dd9e4);color:#000;border:none;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600">&#9654; Play</button>
-            <button id="mml-stop-btn" style="padding:3px 13px;background:var(--bg2,#1e2028);color:var(--text,#ccc);border:1px solid var(--border,#333);border-radius:3px;cursor:pointer;font-size:12px" disabled>&#9632; Stop</button>
+            <button id="mml-play-btn" style="padding:3px 13px;background:var(--accent-cyan,#4dd9e4);color:#000;border:none;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600">&#9654; ${this.t("mml_play")}</button>
+            <button id="mml-stop-btn" style="padding:3px 13px;background:var(--bg2,#1e2028);color:var(--text,#ccc);border:1px solid var(--border,#333);border-radius:3px;cursor:pointer;font-size:12px" disabled>&#9632; ${this.t("patcher_stop")}</button>
             <span id="mml-status" style="font-size:11px;color:var(--text-muted,#888)"></span>
         </div>`;
     }
@@ -3900,7 +5293,7 @@ class App {
             }
             playBtn.disabled = false;
             stopBtn.disabled = true;
-            if (statusEl) statusEl.textContent = "Stopped";
+            if (statusEl) statusEl.textContent = this.t("mml_stopped");
         };
 
         stopBtn.onclick = doStop;
@@ -3910,13 +5303,13 @@ class App {
             this._mmlStopFlag = false;
             playBtn.disabled = true;
             stopBtn.disabled = false;
-            if (statusEl) statusEl.textContent = "Playing…";
+            if (statusEl) statusEl.textContent = this.t("mml_playing");
 
             // Use only the first channel (before the first comma)
             const channel = mml.split(",")[0].replace(/\s+/g, "").toUpperCase();
             const events = this.parseMmlChannel(channel);
             if (events.length === 0) {
-                if (statusEl) statusEl.textContent = "No notes found";
+                if (statusEl) statusEl.textContent = this.t("mml_no_notes");
                 playBtn.disabled = false;
                 stopBtn.disabled = true;
                 return;
@@ -3948,7 +5341,7 @@ class App {
 
             const totalMs = (t - ctx.currentTime) * 1000 + 150;
             setTimeout(() => {
-                if (!this._mmlStopFlag && statusEl) statusEl.textContent = "Done";
+                if (!this._mmlStopFlag && statusEl) statusEl.textContent = this.t("status_done");
                 if (!this._mmlStopFlag) {
                     playBtn.disabled = false;
                     stopBtn.disabled = true;
@@ -4036,7 +5429,190 @@ class App {
         return prev;
     }
 
-    private async applyPreviewToPanel(prev: PreviewData): Promise<void> {
+    private async entryBytes(e: AggregateEntry): Promise<Uint8Array> {
+        const clean = (k: string) => (k === "N/A" || k === "Search/Default" || k === "UNENCRYPTED") ? null : k;
+        const buf = await invoke<ArrayBuffer>("get_entry_bytes", {
+            archivePath: e.source_archive,
+            entryName: e.name,
+            key: clean(e.salt_used),
+            entriesKey: clean(e.entries_salt_used),
+            iv0: e.iv0,
+            hOff: e.h_off,
+            mode: e.mode,
+        });
+        return new Uint8Array(buf);
+    }
+
+    /** Full bytes of the file a preview was built from: an archive entry or a loose file. */
+    private async sourceBytes(src: PreviewSource): Promise<Uint8Array> {
+        if (src.entry) return this.entryBytes(src.entry);
+        if (src.loosePath) return new Uint8Array(await invoke<ArrayBuffer>("read_loose_bytes", { path: src.loosePath }));
+        throw new Error("nothing selected");
+    }
+
+    /** Finds `<name>.dds` in the loaded archives, or near the opened loose model. */
+    private async textureBytes(name: string, src: PreviewSource): Promise<Uint8Array | null> {
+        const want = `${name.toLowerCase()}.dds`;
+        if (src.entry) {
+            const index = this.textureIndexFor();
+            const hits = index.get(want);
+            if (!hits?.length) return null;
+            // Same archive as the model first, otherwise the newest copy (archives load oldest first).
+            const hit = hits.find(e => e.source_archive === src.entry!.source_archive) ?? hits[hits.length - 1];
+            return this.entryBytes(hit);
+        }
+        if (src.loosePath) {
+            const path = await invoke<string | null>("find_loose_texture", { modelPath: src.loosePath, texture: name });
+            return path ? new Uint8Array(await invoke<ArrayBuffer>("read_loose_bytes", { path })) : null;
+        }
+        return null;
+    }
+
+    /** Lower-case `.dds` file name → entries, rebuilt when the loaded entry list changes. */
+    private textureIndexFor(): Map<string, AggregateEntry[]> {
+        if (this.textureIndex && this.textureIndexSource === this.loadedEntries) return this.textureIndex;
+        const index = new Map<string, AggregateEntry[]>();
+        for (const e of this.loadedEntries) {
+            const base = e.name.toLowerCase().split(/[\\/¥₩]/).pop() || "";
+            if (!base.endsWith(".dds")) continue;
+            const list = index.get(base);
+            if (list) list.push(e); else index.set(base, [e]);
+        }
+        this.textureIndex = index;
+        this.textureIndexSource = this.loadedEntries;
+        return index;
+    }
+
+    /** Mounts the ported website viewer for pmg/gm/eff; false (after logging) when it can't. */
+    private async mount3d(gen: number, kind: "pmg" | "gm" | "eff", prev: PreviewData, src: PreviewSource): Promise<boolean> {
+        if (!isTauri()) return false; // the WebUI has no raw-bytes endpoint; use the Rust-parsed preview
+        const cont = document.getElementById("three-viewport")!;
+        const infoEl = document.getElementById("pmg-info")!;
+        try {
+            const [bytes, panel, { parseCssColor }] = await Promise.all([
+                this.sourceBytes(src),
+                import("./preview3d/panel"),
+                import("./pmgLoader"),
+            ]);
+            if (gen !== this.previewGen) return false;
+            // The preview tab must be visible before the viewer measures its container.
+            document.getElementById("preview-3d")!.classList.add("active");
+            infoEl.style.color = "";
+            const css = getComputedStyle(document.documentElement);
+            const hex = (v: string, d: number) => parseCssColor(css.getPropertyValue(v).trim()) ?? d;
+            let mounted: Mounted3d;
+            const tr = (key: string, args: string[] = []) => this.t(key, args);
+            if (kind === "pmg") {
+                mounted = panel.mountPmg({
+                    container: cont,
+                    t: tr,
+                    overlay: document.getElementById("preview-3d")!,
+                    name: prev.name.split(/[\\/]/).pop() || prev.name,
+                    bytes,
+                    accent: hex("--accent-cyan", 0x00d2ff),
+                    background: hex("--bg-surface", 0x0d0d1a),
+                    textureBytes: n => this.textureBytes(n, src),
+                    textureScope: src.entry?.source_archive ?? src.loosePath ?? "",
+                    assets: src.entry ? this.assetHost() : undefined,
+                    entry: src.entry,
+                    save: (name, data) => this.save3dExport(name, data),
+                    status: t => { if (gen === this.previewGen) infoEl.textContent = t; },
+                });
+            } else if (kind === "gm") {
+                mounted = panel.mountGm({ container: cont, bytes, t: tr });
+            } else {
+                const xml = bytes[0] === 0xff && bytes[1] === 0xfe
+                    ? new TextDecoder("utf-16le").decode(bytes.subarray(2))
+                    : new TextDecoder("utf-8").decode(bytes);
+                mounted = panel.mountEffect({ container: cont, xml, t: tr });
+            }
+            if (gen !== this.previewGen) { mounted.dispose(); return false; }
+            this.viewer3d = mounted;
+            (window as any).__threeResizeFn = () => this.viewer3d?.resize();
+            if (kind !== "pmg") infoEl.textContent = mounted.summary;
+            this.log(`[3D] ${prev.name}  ·  ${mounted.summary}`);
+            return true;
+        } catch (err) {
+            if (gen === this.previewGen) document.getElementById("preview-3d")!.classList.remove("active");
+            this.log(`[3D] ${prev.name}: ${err}`, "warn");
+            return false;
+        }
+    }
+
+    /** Archive access for the item lookup and region previews (preview3d/worldData). */
+    private assetHost(): AssetHost {
+        return {
+            entries: () => this.loadedEntries,
+            bytes: e => this.entryBytes(e as AggregateEntry),
+            openEntry: e => { void this.previewAssetEntry(e as AggregateEntry); },
+            textureBytes: (name, near) => this.textureBytes(name, near ? { entry: near as AggregateEntry } : {}),
+            log: (msg, level) => this.log(msg, level),
+            language: () => this.config.locale || "en",
+        };
+    }
+
+    /** Previews an entry opened from the item search or a region view. */
+    private async previewAssetEntry(e: AggregateEntry): Promise<void> {
+        this.selectedEntry = e;
+        const req = ++this.selectGen;
+        try {
+            const prev = await this.fetchPreview(e);
+            if (req !== this.selectGen) return;
+            await this.applyPreviewToPanel(prev, { entry: e });
+        } catch (err) {
+            if (req === this.selectGen) this.log(this.t("preview_error", [String(err)]), "error");
+        }
+    }
+
+    /** Map / world view for a .rgn or .area archive entry; false when it can't be shown. */
+    private async mountRegionPreview(gen: number, prev: PreviewData, src: PreviewSource): Promise<boolean> {
+        if (!isTauri() || !src.entry) return false;
+        const cont = document.getElementById("three-viewport")!;
+        const infoEl = document.getElementById("pmg-info")!;
+        const overlay = document.getElementById("preview-3d")!;
+        try {
+            const [{ mountRegion }, { parseCssColor }] = await Promise.all([import("./preview3d/worldPanel"), import("./pmgLoader")]);
+            if (gen !== this.previewGen) return false;
+            overlay.classList.add("active");
+            infoEl.style.color = "";
+            const css = getComputedStyle(document.documentElement);
+            const hex = (v: string, d: number) => parseCssColor(css.getPropertyValue(v).trim()) ?? d;
+            const mounted = await mountRegion({
+                container: cont,
+                overlay,
+                t: (key, args = []) => this.t(key, args),
+                assets: this.assetHost(),
+                entry: src.entry,
+                accent: hex("--accent-cyan", 0x00d2ff),
+                background: hex("--bg-surface", 0x0d0d1a),
+                status: text => { if (gen === this.previewGen) infoEl.textContent = text; },
+                current: () => gen === this.previewGen,
+            });
+            if (!mounted) return false;
+            if (gen !== this.previewGen) { mounted.dispose(); return false; }
+            this.viewer3d = mounted;
+            (window as any).__threeResizeFn = () => this.viewer3d?.resize();
+            this.log(`[Map] ${prev.name}  ·  ${mounted.summary}`);
+            return true;
+        } catch (err) {
+            if (gen === this.previewGen) overlay.classList.remove("active");
+            this.log(`[Map] ${prev.name}: ${err}`, "warn");
+            return false;
+        }
+    }
+
+    private async save3dExport(defaultName: string, data: Uint8Array | string): Promise<void> {
+        try {
+            const out = await save({ defaultPath: defaultName });
+            if (!out) return;
+            if (typeof data === "string") await writeTextFile(out, data); else await writeFile(out, data);
+            this.log(`[3D] ${this.t("log_3d_exported", [out])}`, "success");
+        } catch (e) {
+            this.log(`[3D] ${this.t("log_3d_export_failed", [String(e)])}`, "error");
+        }
+    }
+
+    private async applyPreviewToPanel(prev: PreviewData, src: PreviewSource = {}): Promise<void> {
         const visual = document.getElementById("preview-visual")!;
         const hex = document.getElementById("preview-hex")!;
         const details = document.getElementById("preview-details")!;
@@ -4044,6 +5620,8 @@ class App {
         const threed = document.getElementById("preview-3d")!;
 
         if (this.pmgViewer) { this.pmgViewer.dispose(); this.pmgViewer = undefined; (window as any).__threeResizeFn = undefined; }
+        if (this.viewer3d) { this.viewer3d.dispose(); this.viewer3d = undefined; (window as any).__threeResizeFn = undefined; }
+        const gen = ++this.previewGen;
         this._mmlStopFlag = true;
         if (this._mmlAudioCtx) { this._mmlAudioCtx.close().catch(() => {}); this._mmlAudioCtx = null; }
         [visual, hex, details, audio, threed].forEach(el => el.classList.remove("active"));
@@ -4052,7 +5630,7 @@ class App {
         const ext = prev.name.toLowerCase().split('.').pop() || "";
 
         if (prev.file_type === "error") {
-            visual.textContent = prev.content_text || "Image decode failed.";
+            visual.textContent = prev.content_text || this.t("preview_image_decode_failed");
             visual.className = "preview-tab-content active";
         } else if (prev.file_type === "image" && prev.content_image) {
             visual.innerHTML = `<img src="data:image/png;base64,${prev.content_image}" style="width:100%; height:100%; object-fit:contain; display:block;" />`;
@@ -4079,12 +5657,32 @@ class App {
                 this._audioBlobUrl = URL.createObjectURL(blob);
                 audioElem.src = this._audioBlobUrl;
                 fnameEl.textContent = prev.truncated
-                    ? `${prev.name}  [first 8 MB of ${(prev.full_preview_size / 1048576).toFixed(1)} MB]`
+                    ? `${prev.name}  [${this.t("preview_audio_truncated", [(prev.full_preview_size / 1048576).toFixed(1)])}]`
                     : prev.name;
                 if (msgEl) msgEl.textContent = "";
                 if (this.config.audio_autoplay) audioElem.play().catch(() => {});
             }
+        } else if (ext === "pmg" && await this.mount3d(gen, "pmg", prev, src)) {
+            threed.classList.add("active");
+            activeContainer = "preview-3d";
+            visual.textContent = this.t("preview_no_visual");
+            visual.className = "preview-tab-content";
+        } else if (gen !== this.previewGen) {
+            return;
+        } else if ((ext === "gm" || ext === "eff") && await this.mount3d(gen, ext, prev, src)) {
+            threed.classList.add("active");
+            activeContainer = "preview-3d";
+            if (ext === "gm") {
+                visual.textContent = this.t("preview_no_visual");
+                visual.className = "preview-tab-content";
+            } else {
+                visual.className = "preview-tab-content xml-view";
+                visual.innerHTML = this.xmlHighlight(prev.content_text || "");
+            }
+        } else if (gen !== this.previewGen) {
+            return;
         } else if (ext === "pmg") {
+            // Website-style parse failed; fall back to the Rust-parsed single mesh.
             threed.classList.add("active");
             activeContainer = "preview-3d";
             const cont = document.getElementById("three-viewport")!;
@@ -4094,15 +5692,22 @@ class App {
             (window as any).__threeResizeFn = () => this.pmgViewer?.resize();
             if (prev.pmg_geometry) {
                 const g = prev.pmg_geometry;
-                this.log(`[PMG] ${g.mesh_name || prev.name}  ·  ${g.vertex_count} verts  ${g.face_count} faces`);
+                this.log(`[PMG] ${g.mesh_name || prev.name}  ·  ${this.t("preview_pmg_counts", [String(g.vertex_count), String(g.face_count)])}`);
                 infoEl.textContent = "";
             } else {
-                this.log(`[PMG] ${prev.name}  ·  no geometry (empty placeholder)`);
-                infoEl.textContent = "No geometry (empty placeholder)";
+                this.log(`[PMG] ${prev.name}  ·  ${this.t("preview_pmg_no_geometry")}`);
+                infoEl.textContent = this.t("preview_pmg_no_geometry");
                 infoEl.style.color = "var(--text-muted)";
             }
             visual.textContent = this.t("preview_no_visual");
             visual.className = "preview-tab-content";
+        } else if ((ext === "rgn" || ext === "area") && await this.mountRegionPreview(gen, prev, src)) {
+            threed.classList.add("active");
+            activeContainer = "preview-3d";
+            visual.textContent = this.t("preview_no_visual");
+            visual.className = "preview-tab-content";
+        } else if (gen !== this.previewGen) {
+            return;
         } else if (prev.file_type === "rgn" || ext === "rgn") {
             // .rgn terrain heightmap canvas renderer
             visual.className = "preview-tab-content active";
@@ -4141,8 +5746,9 @@ class App {
                 }
                 ctx.putImageData(img, 0, 0);
 
-                this.log(`[RGN] ${prev.name}  ·  v${version}  ·  region ${region_id}  ·  ${area_count} areas  ·  ${width}×${height} px`);
-                rgnInfo.textContent = `v${version}  ·  region ${region_id}  ·  ${area_count} area${area_count !== 1 ? "s" : ""}  ·  ${width}×${height} px (displayed ${dw}×${dh})`;
+                const rgnSummary = this.t("preview_rgn_summary", [String(version), String(region_id), String(area_count), `${width}×${height}`]);
+                this.log(`[RGN] ${prev.name}  ·  ${rgnSummary}`);
+                rgnInfo.textContent = `${rgnSummary} ${this.t("preview_rgn_displayed", [`${dw}×${dh}`])}`;
             } else {
                 // Parse failed or file is too small – show a placeholder
                 rgnCanvas.width  = 256;
@@ -4153,9 +5759,9 @@ class App {
                 ctx.fillStyle = "#555";
                 ctx.font = "13px monospace";
                 ctx.textAlign = "center";
-                ctx.fillText(prev.content_text || "RGN parse failed", 128, 128);
-                rgnInfo.textContent = prev.content_text || "Could not parse .rgn – see Hex View";
-                this.log(`[RGN] ${prev.name}: ${prev.content_text || "parse failed"}`, "warn");
+                ctx.fillText(prev.content_text || this.t("preview_rgn_parse_failed"), 128, 128);
+                rgnInfo.textContent = prev.content_text || this.t("preview_rgn_parse_failed_hint");
+                this.log(`[RGN] ${prev.name}: ${prev.content_text || this.t("preview_rgn_parse_failed")}`, "warn");
             }
         } else if (ext === "ttf" || ext === "otf" || ext === "woff" || ext === "woff2") {
             const fontFamily = `PreviewFont_${Date.now()}`;
@@ -4169,7 +5775,7 @@ class App {
                 visual.innerHTML = `<div style="padding:16px;overflow:auto;height:100%;box-sizing:border-box">
                     <div style="font-size:11px;opacity:0.5;margin-bottom:12px;font-family:monospace">${prev.name} &mdash; ${(prev.size/1024).toFixed(1)} KB</div>
                     <div style="font-size:30px;line-height:1.4;font-family:'${fontFamily}',sans-serif;white-space:pre-wrap;margin-bottom:20px">${sample.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/\n/g,"<br>")}</div>
-                    <div style="margin-top:8px">${[8,12,16,20,24,32,48].map(sz => `<div style="margin-bottom:6px;font-size:${sz}px;font-family:'${fontFamily}',sans-serif">${sz}px &mdash; The quick brown fox jumps over the lazy dog 0123456789</div>`).join("")}</div>
+                    <div style="margin-top:8px">${[8,12,16,20,24,32,48].map(sz => `<div style="margin-bottom:6px;font-size:${sz}px;font-family:'${fontFamily}',sans-serif">${sz}px &mdash; ${sample.split("\n")[0].replace(/&/g,"&amp;").replace(/</g,"&lt;")} 0123456789</div>`).join("")}</div>
                 </div>`;
             } catch (_) {
                 visual.textContent = this.t("preview_no_visual");
@@ -4193,8 +5799,8 @@ class App {
                 ctx.fillStyle = "#555";
                 ctx.font = "13px monospace";
                 ctx.textAlign = "center";
-                ctx.fillText("Empty .area file", 256, 256);
-                areaInfo.textContent = "0 bytes";
+                ctx.fillText(this.t("preview_area_empty"), 256, 256);
+                areaInfo.textContent = this.t("unit_bytes", ["0"]);
             } else {
                 type AreaProp = { id: number; x: number; y: number; z: number };
                 type AreaResult = { props: AreaProp[]; format: string };
@@ -4235,23 +5841,23 @@ class App {
                     ctx.fillText(`Z ${minZ.toFixed(0)}`, 2, 12);
                     ctx.textAlign = "right";
                     ctx.fillText(`${maxZ.toFixed(0)}`, 510, 12);
-                    areaInfo.textContent = `${props.length.toLocaleString()} props  ·  X ${minX.toFixed(0)}–${maxX.toFixed(0)}  Z ${minZ.toFixed(0)}–${maxZ.toFixed(0)}  ·  format: ${areaResult.format}`;
+                    areaInfo.textContent = `${this.t("preview_area_props", [props.length.toLocaleString()])}  ·  X ${minX.toFixed(0)}–${maxX.toFixed(0)}  Z ${minZ.toFixed(0)}–${maxZ.toFixed(0)}  ·  ${this.t("preview_area_format", [areaResult.format])}`;
                     if (prev.truncated) {
-                        areaInfo.textContent += `  ·  (first ${(prev.raw_bytes.length/1024).toFixed(0)} KB of ${(prev.full_preview_size/1024).toFixed(0)} KB)`;
+                        areaInfo.textContent += `  ·  (${this.t("preview_first_kb_of", [(prev.raw_bytes.length/1024).toFixed(0), (prev.full_preview_size/1024).toFixed(0)])})`;
                     }
                 } else {
                     // Fallback: unknown format — show message + hex dump of first 32 bytes
                     ctx.fillStyle = "#4a5568";
                     ctx.font = "14px monospace";
                     ctx.textAlign = "center";
-                    ctx.fillText("Unknown .area format", 256, 230);
+                    ctx.fillText(this.t("preview_area_unknown"), 256, 230);
                     const hexPeek = Array.from(prev.raw_bytes.slice(0, 32))
                         .map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
                     ctx.fillStyle = "#718096";
                     ctx.font = "10px monospace";
                     const words = hexPeek.match(/.{1,24}/g) || [];
                     words.forEach((w, i) => ctx.fillText(w, 256, 258 + i * 14));
-                    areaInfo.textContent = `${prev.raw_bytes.length.toLocaleString()} bytes  ·  no props parsed`;
+                    areaInfo.textContent = `${this.t("unit_bytes", [prev.raw_bytes.length.toLocaleString()])}  ·  ${this.t("preview_area_no_props")}`;
                 }
             }
         } else if (prev.file_type === "set") {
@@ -4270,27 +5876,27 @@ class App {
                 } else {
                     headerHtml = `
                         <p style="margin:0 0 10px;color:var(--accent-cyan,#00d4ff);font-weight:600">
-                            Animation: ${h.frame_count} frames, ${h.bone_count} bones, ${h.duration_ms}&thinsp;ms duration
+                            ${this.t("preview_set_summary", [String(h.frame_count), String(h.bone_count), String(h.duration_ms)])}
                         </p>
                         <table class="details-table" style="margin-bottom:18px"><tbody>
-                            <tr><th>Magic</th><td class="mono">${h.magic}</td></tr>
-                            <tr><th>Version</th><td>${h.version}</td></tr>
-                            <tr><th>Bone count</th><td>${h.bone_count}</td></tr>
-                            <tr><th>Frame count</th><td>${h.frame_count}</td></tr>
-                            <tr><th>Duration</th><td>${h.duration_ms} ms</td></tr>
+                            <tr><th>${this.t("preview_set_magic")}</th><td class="mono">${h.magic}</td></tr>
+                            <tr><th>${this.t("preview_set_version")}</th><td>${h.version}</td></tr>
+                            <tr><th>${this.t("preview_set_bone_count")}</th><td>${h.bone_count}</td></tr>
+                            <tr><th>${this.t("preview_set_frame_count")}</th><td>${h.frame_count}</td></tr>
+                            <tr><th>${this.t("preview_set_duration")}</th><td>${h.duration_ms} ms</td></tr>
                         </tbody></table>`;
                 }
             } catch (_) {
-                headerHtml = `<p style="color:var(--text-muted,#718096);margin:0 0 12px">Unknown .set format</p>`;
+                headerHtml = `<p style="color:var(--text-muted,#718096);margin:0 0 12px">${this.t("preview_set_unknown")}</p>`;
             }
             if (headerHtml) {
                 // Binary .set: show header table + hex dump of first 128 bytes
                 const hexBytes = prev.raw_bytes.slice(0, 128);
                 const hexStr = hexBytes.map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
                 visual.innerHTML = `<div style="padding:16px;font-family:monospace;overflow:auto;height:100%;box-sizing:border-box">
-                    <div style="font-size:11px;opacity:0.5;margin-bottom:14px">${prev.name} &mdash; ${prev.full_preview_size.toLocaleString()} bytes</div>
+                    <div style="font-size:11px;opacity:0.5;margin-bottom:14px">${prev.name} &mdash; ${this.t("unit_bytes", [prev.full_preview_size.toLocaleString()])}</div>
                     ${headerHtml}
-                    <div style="font-size:10px;opacity:0.5;margin-bottom:6px">First ${Math.min(128, prev.raw_bytes.length)} bytes (hex):</div>
+                    <div style="font-size:10px;opacity:0.5;margin-bottom:6px">${this.t("preview_first_bytes_hex", [String(Math.min(128, prev.raw_bytes.length))])}</div>
                     <pre style="white-space:pre-wrap;font-size:11px;line-height:1.7;word-break:break-all;opacity:0.75;margin:0">${hexStr}</pre>
                 </div>`;
             }
@@ -4313,8 +5919,8 @@ class App {
                 actx.fillStyle = "#4a5568";
                 actx.font = "13px monospace";
                 actx.textAlign = "center";
-                actx.fillText("Empty .anievent file", 256, 45);
-                aniInfo.textContent = "0 bytes";
+                actx.fillText(this.t("preview_anievent_empty"), 256, 45);
+                aniInfo.textContent = this.t("unit_bytes", ["0"]);
             } else {
                 type AniEvt = { frame: number; event_type: string; anim_name: string; params: string };
                 type AnieventResult = { set_name: string; animation_count: number; event_count: number; events: AniEvt[] };
@@ -4376,24 +5982,23 @@ class App {
                     aniLegend.innerHTML = seenTypes.map(t =>
                         `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:10px">` +
                         `<span style="display:inline-block;width:10px;height:3px;background:${getAniColor(t)};border-radius:1px"></span>${t}</span>`
-                    ).join("") + `&nbsp;&middot;&nbsp;<span style="opacity:0.45;font-size:10px">0=Sound 1=FX 2=Hit 3=Spawn (guessed)</span>`;
+                    ).join("") + `&nbsp;&middot;&nbsp;<span style="opacity:0.45;font-size:10px">${this.t("preview_anievent_legend")}</span>`;
 
                     // Info line
                     const truncNote = prev.truncated
-                        ? `  ·  first ${Math.round(prev.raw_bytes.length / 1024)} KB of ${Math.round(prev.full_preview_size / 1024)} KB`
+                        ? `  ·  ${this.t("preview_first_kb_of", [String(Math.round(prev.raw_bytes.length / 1024)), String(Math.round(prev.full_preview_size / 1024))])}`
                         : "";
-                    aniInfo.textContent = (aniResult.set_name ? `set: "${aniResult.set_name}"  ·  ` : "") +
-                        `${aniResult.animation_count} anim${aniResult.animation_count !== 1 ? "s" : ""}  ·  ` +
-                        `${aniResult.events.length} events  ·  frames 0–${maxFrame}${truncNote}`;
+                    aniInfo.textContent = (aniResult.set_name ? `${this.t("preview_anievent_set", [aniResult.set_name])}  ·  ` : "") +
+                        this.t("preview_anievent_summary", [String(aniResult.animation_count), String(aniResult.events.length), String(maxFrame)]) + truncNote;
 
                     // Table
                     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
                     aniTable.innerHTML = `<table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:11px">
                         <thead><tr style="background:var(--bg-panel,#1e293b)">
-                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Frame</th>
-                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Type</th>
-                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Animation</th>
-                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">Params</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">${this.t("preview_col_frame")}</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">${this.t("preview_col_type")}</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">${this.t("preview_col_animation")}</th>
+                            <th style="text-align:left;padding:3px 8px;color:var(--text-muted,#888);font-weight:normal;border-bottom:1px solid var(--border,#334155)">${this.t("preview_col_params")}</th>
                         </tr></thead>
                         <tbody>${evts.slice(0, 500).map(e =>
                             `<tr><td style="padding:2px 8px;color:var(--text,#e2e8f0)">${e.frame}</td>` +
@@ -4402,20 +6007,20 @@ class App {
                             `<td style="padding:2px 8px;color:var(--text-muted,#888)">${esc(e.params)}</td></tr>`
                         ).join("")}</tbody>
                     </table>${evts.length > 500
-                        ? `<div style="padding:6px 8px;font-size:11px;color:var(--text-muted,#888);font-family:monospace">… ${evts.length - 500} more rows</div>`
+                        ? `<div style="padding:6px 8px;font-size:11px;color:var(--text-muted,#888);font-family:monospace">… ${this.t("preview_more_rows", [String(evts.length - 500)])}</div>`
                         : ""}`;
                 } else {
                     // Fallback: show message on canvas
                     actx.fillStyle = "#4a5568";
                     actx.font = "13px monospace";
                     actx.textAlign = "center";
-                    actx.fillText("Could not parse .anievent", 256, 36);
+                    actx.fillText(this.t("preview_anievent_parse_failed"), 256, 36);
                     const hexPeek = Array.from(prev.raw_bytes.slice(0, 48))
                         .map((b: number) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
                     actx.fillStyle = "#64748b";
                     actx.font = "9px monospace";
                     (hexPeek.match(/.{1,24}/g) ?? []).forEach((w, i) => actx.fillText(w, 256, 52 + i * 12));
-                    aniInfo.textContent = `${prev.raw_bytes.length.toLocaleString()} bytes  ·  no events parsed`;
+                    aniInfo.textContent = `${this.t("unit_bytes", [prev.raw_bytes.length.toLocaleString()])}  ·  ${this.t("preview_anievent_no_events")}`;
                 }
             }
         } else if (prev.file_type === "mml") {
@@ -4429,6 +6034,12 @@ class App {
             if (isXml) {
                 visual.className = "preview-tab-content active xml-view";
                 visual.innerHTML = this.xmlHighlight(prev.content_text);
+                if (src.entry && isTauri() && /(^|[\\/])itemdb[^\\/]*\.xml$/i.test(prev.name)) {
+                    // Item search over the open itemdb, opening an item's models.
+                    import("./preview3d/itemPanel").then(({ attachItemPanel }) => {
+                        if (gen === this.previewGen) attachItemPanel({ parent: visual, host: this.assetHost(), t: (k, a = []) => this.t(k, a), near: src.entry, floating: false });
+                    });
+                }
             } else {
                 visual.className = "preview-tab-content active";
                 visual.textContent = prev.content_text;
@@ -4448,7 +6059,9 @@ class App {
         const hexDump = prev.raw_bytes.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
         if (prev.truncated) {
             const kb = Math.round(prev.full_preview_size / 1024);
-            hex.textContent = `[ First ${prev.raw_bytes.length} bytes of ${prev.full_preview_size.toLocaleString()} bytes (${kb} KB) ]\n\n${hexDump}`;
+            hex.textContent = `[ ${this.t("preview_hex_truncated", [String(prev.raw_bytes.length), prev.full_preview_size.toLocaleString(), String(kb)])} ]\n\n${hexDump}`;
+        } else if (prev.full_preview_size === 0 && prev.size === 0) {
+            hex.textContent = `[ ${this.t("preview_empty_file")} ]`;
         } else {
             hex.textContent = hexDump;
         }
@@ -4463,8 +6076,8 @@ class App {
                     <tr><th>${this.t("preview_source")}:</th><td>${prev.source}</td></tr>
                     <tr><th>${this.t("preview_salt")}:</th><td class="mono">${prev.salt}</td></tr>
                     ${entriesSaltRow}
-                    <tr><th>${this.t("preview_extracted")}:</th><td>${prev.size.toLocaleString()} bytes</td></tr>
-                    <tr><th>${this.t("preview_compressed")}:</th><td>${prev.raw_size.toLocaleString()} bytes</td></tr>
+                    <tr><th>${this.t("preview_extracted")}:</th><td>${this.t("unit_bytes", [prev.size.toLocaleString()])}</td></tr>
+                    <tr><th>${this.t("preview_compressed")}:</th><td>${this.t("unit_bytes", [prev.raw_size.toLocaleString()])}</td></tr>
                     <tr><th>${this.t("preview_offset")}:</th><td class="mono">0x${prev.offset.toString(16).toUpperCase()}</td></tr>
                     <tr><th>${this.t("preview_checksum")}:</th><td class="mono">0x${prev.checksum.toString(16).toUpperCase()}</td></tr>
                     <tr><th>${this.t("preview_flags")}:</th><td class="mono">0x${prev.flags.toString(16).toUpperCase()}</td></tr>
@@ -4475,17 +6088,20 @@ class App {
         this.selectedEntry = e;
         document.querySelectorAll(".tree-item").forEach(i => (i as HTMLElement).style.background = "transparent");
         div.style.background = "color-mix(in srgb, var(--accent-cyan) 20%, transparent)";
-        this.log(`Selected: ${e.name}`);
+        this.log(this.t("log_selected", [e.name]));
 
         const visual = document.getElementById("preview-visual")!;
         visual.textContent = this.t("preview_loading");
         visual.className = "preview-tab-content active";
 
+        const req = ++this.selectGen;
         try {
             const prev = await this.fetchPreview(e);
-            await this.applyPreviewToPanel(prev);
+            if (req !== this.selectGen) return; // a newer selection owns the panel
+            await this.applyPreviewToPanel(prev, { entry: e });
         } catch (err) {
-            this.log(`Preview error: ${err}`, "error");
+            if (req !== this.selectGen) return;
+            this.log(this.t("preview_error", [String(err)]), "error");
             visual.className = "preview-tab-content active";
             visual.textContent = String(err);
         }
@@ -4503,20 +6119,23 @@ class App {
         visual.textContent = this.t("preview_loading");
         visual.className = "preview-tab-content active";
 
+        const req = ++this.selectGen;
         try {
             const prev = await invoke("preview_loose_file", { path }) as PreviewData;
-            await this.applyPreviewToPanel(prev);
-            this.log(`Opened loose file: ${prev.name} (${prev.size.toLocaleString()} bytes)`);
+            if (req !== this.selectGen) return;
+            await this.applyPreviewToPanel(prev, { loosePath: path });
+            this.log(this.t("log_opened_loose", [prev.name, this.t("unit_bytes", [prev.size.toLocaleString()])]));
         } catch (err) {
-            visual.textContent = `Preview error: ${err}`;
+            if (req !== this.selectGen) return;
+            visual.textContent = this.t("preview_error", [String(err)]);
             visual.className = "preview-tab-content active";
-            this.log(`Loose file preview error: ${err}`, "error");
+            this.log(this.t("log_loose_preview_error", [String(err)]), "error");
         }
     }
 
     private async extractSelected() {
         if (!this.selectedEntry) {
-            await message("Please select a file from the list first.", { title: "No Selection", kind: "error" });
+            await message(this.t("msg_select_file_first"), { title: this.t("dlg_no_selection"), kind: "error" });
             return;
         }
         const fileName = this.selectedEntry.name.split(/[\\/¥₩]/).pop() || "extracted_file";
@@ -4530,8 +6149,8 @@ class App {
                     dest: dest, 
                     key: skey 
                 });
-                this.log(`Extracted: ${dest}`, "success");
-            } catch(e) { this.log(`Error: ${e}`, "error"); }
+                this.log(this.t("extract_success", [dest]), "success");
+            } catch(e) { this.log(this.t("msg_error_fmt", [String(e)]), "error"); }
         }
     }
 
@@ -4560,13 +6179,13 @@ class App {
         } catch (e) {
             this._taskStartTime = null;
             this.updateProgress(0, "");
-            this.log(`Error: ${e}`, "error");
+            this.log(this.t("msg_error_fmt", [String(e)]), "error");
         }
     }
 
     private async convertTo(ext: string) {
         if (this._taskStartTime !== null) {
-            await message(this.t("msg_task_running"), { title: "Task In Progress", kind: "warning" });
+            await message(this.t("msg_task_running"), { title: this.t("dlg_task_in_progress"), kind: "warning" });
             return;
         }
         if (!this.currentArchive) return;
@@ -4587,8 +6206,8 @@ class App {
                     wrapData = await ask(this.t("dataWrapPrompt"), { title: this.t("dataWrapTitle"), kind: 'warning' });
                 }
                 await invoke("run_convert", { input: this.currentArchive, output: out, key: salt, wrapData });
-                this.log(`Converted to ${ext.toUpperCase()}: ${out}`, "success");
-            } catch (e) { this.log(`Error: ${e}`, "error"); }
+                this.log(this.t("log_converted_to", [ext.toUpperCase(), out]), "success");
+            } catch (e) { this.log(this.t("msg_error_fmt", [String(e)]), "error"); }
             finally { this._taskStartTime = null; }
         }
     }
@@ -4604,7 +6223,7 @@ class App {
             return;
         }
         if (base === "help") {
-            this.log("Commands: clear, help, logs, salts, status, version, extract <path> <out>, pack <path> <out> <key>");
+            this.log(this.t("term_help"));
             return;
         }
         if (base === "logs") {
@@ -4618,7 +6237,7 @@ class App {
             const suggested = ["@6QeTuOaDgJlZcBm#9", "})wWb4?-sVGHNoPKpc"];
             const userHistory = (this.config.salt_history || []).map(s => s.trim());
             const all = [...new Set([...suggested, ...userHistory, ...this.engineSalts])].filter(s => s.length > 0);
-            this.log(`${all.length} salts loaded:\n${all.join('\n')}`);
+            this.log(`${this.t("term_salts_loaded", [String(all.length)])}\n${all.join('\n')}`);
             return;
         }
         if (base === "version") {
@@ -4641,9 +6260,9 @@ class App {
         const show = (anchor: HTMLElement) => {
             // Resolve locale key: if value starts with "tooltip_", look it up
             let text = anchor.dataset.tooltip || '';
-            if (text.startsWith('tooltip_') || text.startsWith('tab_') || text.startsWith('label_')) {
-                text = this.t(text) || text;
-            }
+            // Any value that is a locale key resolves to its translation; raw text passes through.
+            const translated = this.t(text);
+            if (translated && translated !== text) text = translated;
             if (!text) return;
             tip.textContent = text;
             tip.style.opacity = '1';
@@ -4683,7 +6302,7 @@ class App {
         const dashBar = document.getElementById("dash-pipe-extract") as HTMLElement | null;
         const dashLabel = document.getElementById("dash-pipe-label");
         if (dashBar) dashBar.style.width = indeterminate ? "100%" : `${percent}%`;
-        if (dashLabel) dashLabel.textContent = msg || (percent === 0 ? "Idle" : "");
+        if (dashLabel) dashLabel.textContent = msg || (percent === 0 ? this.t("dash_pipe_idle") : "");
 
         const bar = document.getElementById("progress-bar");
         if (bar) {
@@ -4776,7 +6395,7 @@ class App {
                 const rate = p.current / elapsed;
                 const remaining = p.total - p.current;
                 const etaMs = rate > 0 ? remaining / rate : 0;
-                if (etaMs > 500) parts.push(`ETA: ${this.formatDuration(etaMs)}`);
+                if (etaMs > 500) parts.push(this.t("progress_eta", [this.formatDuration(etaMs)]));
             }
 
             this.updateProgress(percent, parts.join(" — "));
@@ -4794,10 +6413,13 @@ class App {
             this.handleAutoInput(path, fullSeq);
         });
 
-        listen("tauri://drag-drop", (event) => {
+        listen("tauri://drag-drop", async (event) => {
             const p = event.payload as any;
+            // Dropped onto the List tab tree of an open archive: add/merge into it
+            if (p.paths && p.paths.length > 0 && await this.vfsHandleExternalDrop(p.paths, p.position)) return;
             if (p.paths && p.paths.length > 0) {
                 const path = p.paths[0];
+                this.log(`[DROP] ${path}`);
                 const lp = path.toLowerCase();
                 if (lp.endsWith(".it") || lp.endsWith(".pack")) {
                     // Archive drag: always open list tab and load — don't check startup_auto_switch

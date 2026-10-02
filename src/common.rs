@@ -5,7 +5,7 @@ use anyhow::Error;
 use byte_slice_cast::AsSliceOf;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Cursor, Read, Seek, SeekFrom, ErrorKind as IoErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::{debug, trace};
 
@@ -274,9 +274,114 @@ pub fn read_meta<RUND: Read + Seek>(fname: &str, skey: &str, rd: &mut RUND, h_of
 
 
 pub fn write_file_to_disk(root_dir: &str, rel_path: &str, content: &[u8]) -> Result<(), Error> {
-    let full_path = Path::new(root_dir).join(rel_path.replace(['/', '\\'], &std::path::MAIN_SEPARATOR.to_string()));
+    let full_path = safe_join(Path::new(root_dir), rel_path)?;
     if let Some(parent) = full_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&full_path, content).map_err(Error::new)
+}
+
+/// Split an archive-relative path into its components. Accepts `/`, `\` and the
+/// regional `¥` / `₩` separators (how `\` renders in Japanese / Korean code
+/// pages); drops empty and `.` components.
+fn rel_components(rel: &str) -> impl Iterator<Item = &str> {
+    rel.split(['/', '\\', '¥', '₩']).filter(|c| !c.is_empty() && *c != ".")
+}
+
+/// Join an untrusted relative path (archive entry name, manifest path, mod or VFS
+/// path) onto `root`, refusing anything that could land outside it: absolute
+/// paths, drive/UNC prefixes (`C:`, `\\server`), `..` components and `:` in any
+/// component (drive letters / NTFS alternate streams).
+pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, Error> {
+    if rel.starts_with(['/', '\\']) {
+        return Err(Error::msg(format!("unsafe path (absolute): {}", rel)));
+    }
+    let mut out = root.to_path_buf();
+    let mut any = false;
+    for comp in rel_components(rel) {
+        if comp == ".." {
+            return Err(Error::msg(format!("unsafe path (contains '..'): {}", rel)));
+        }
+        if comp.contains(':') || comp.contains('\0') {
+            return Err(Error::msg(format!("unsafe path (drive prefix or invalid character): {}", rel)));
+        }
+        out.push(comp);
+        any = true;
+    }
+    if !any {
+        return Err(Error::msg(format!("unsafe path (empty): {:?}", rel)));
+    }
+    Ok(out)
+}
+
+/// Longest entry path the game client handles (Windows MAX_PATH). Longer names
+/// pack fine but crash or are skipped by the client at load time.
+pub const MAX_ENTRY_PATH_LEN: usize = 260;
+
+/// Check an archive entry path before it is packed, applied from a mod or
+/// written by a VFS edit: must be a safe relative path (see `safe_join`), at most
+/// `MAX_ENTRY_PATH_LEN` characters, and free of characters Windows rejects in
+/// file names (`<>:"|?*` and control characters).
+pub fn validate_entry_path(rel: &str) -> Result<(), Error> {
+    let len = rel.chars().count();
+    if len > MAX_ENTRY_PATH_LEN {
+        return Err(Error::msg(format!(
+            "entry path is {} characters, over the game's {}-character limit: {}",
+            len, MAX_ENTRY_PATH_LEN, rel
+        )));
+    }
+    if let Some(c) = rel.chars().find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control()) {
+        return Err(Error::msg(format!(
+            "entry path contains a character invalid on Windows ({:?}): {}",
+            c, rel.escape_debug()
+        )));
+    }
+    safe_join(Path::new(""), rel).map(|_| ())
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn safe_join_accepts_relative_paths() {
+        let root = Path::new("out");
+        assert_eq!(safe_join(root, "data/xml/a.xml").unwrap(), root.join("data").join("xml").join("a.xml"));
+        assert_eq!(safe_join(root, "data\\xml\\a.xml").unwrap(), root.join("data").join("xml").join("a.xml"));
+        assert_eq!(safe_join(root, "data¥a.txt").unwrap(), root.join("data").join("a.txt"));
+        assert_eq!(safe_join(root, "data₩a.txt").unwrap(), root.join("data").join("a.txt"));
+        assert_eq!(safe_join(root, "./data//a..b.txt").unwrap(), root.join("data").join("a..b.txt"));
+    }
+
+    #[test]
+    fn safe_join_rejects_escapes() {
+        let root = Path::new("out");
+        for bad in ["../evil.txt", "data/../../evil", "data\\..\\..\\evil", "..¥evil", "..₩evil", "data₩..₩..₩evil", "/etc/passwd",
+                    "\\Windows\\x.dll", "\\\\server\\share\\x", "C:\\Windows\\x.dll", "C:x.dll",
+                    "data/file.txt:stream", "", "./", "a\0b"] {
+            assert!(safe_join(root, bad).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn write_file_to_disk_refuses_traversal() {
+        let dir = std::env::temp_dir().join(format!("mabi_safejoin_{}", std::process::id()));
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(write_file_to_disk(root.to_str().unwrap(), "../escaped.txt", b"x").is_err());
+        assert!(!dir.join("escaped.txt").exists());
+        write_file_to_disk(root.to_str().unwrap(), "data\\ok.txt", b"ok").unwrap();
+        assert_eq!(std::fs::read(root.join("data").join("ok.txt")).unwrap(), b"ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_entry_path_limits() {
+        assert!(validate_entry_path("data\\xml\\features.xml.compiled").is_ok());
+        assert!(validate_entry_path(&format!("data\\{}", "a".repeat(MAX_ENTRY_PATH_LEN))).is_err());
+        assert!(validate_entry_path(&"a".repeat(MAX_ENTRY_PATH_LEN)).is_ok());
+        for bad in ["data\\a<b.txt", "data\\a>b", "a:b", "a\"b", "a|b", "a?b", "a*b", "a\tb", "a\u{1}b", "..\\x"] {
+            assert!(validate_entry_path(bad).is_err(), "accepted {:?}", bad);
+        }
+    }
 }

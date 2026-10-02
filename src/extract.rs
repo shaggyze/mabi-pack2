@@ -21,6 +21,13 @@ pub fn extract_single_file_to_memory(
     iv0: u32,
     mode: encryption::Snow2Mode,
 ) -> Result<Vec<u8>, Error> {
+    // Empty entries hold no bytes. Writers still give them an offset, and for an
+    // empty entry at the end of the archive that offset can point past the end of
+    // the file (the data section is not padded out), so don't bounds-check them.
+    if ent.raw_size == 0 {
+        return Ok(Vec::new());
+    }
+
     let target_seek_pos_absolute = content_data_start_offset + (ent.offset as u64 * 1024);
     let end_pos = target_seek_pos_absolute + ent.raw_size as u64;
 
@@ -302,4 +309,47 @@ pub fn run_extract_with_key_search(
     }
 
     Err(Error::msg(format!("Exhausted all key combinations for '{}'. No working set of parameters found.", fname_str)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mmap_of(bytes: &[u8]) -> (std::path::PathBuf, Mmap) {
+        let path = std::env::temp_dir().join(format!(
+            "mabi_extract_test_{}_{}.bin",
+            std::process::id(),
+            bytes.len()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let file = StdFile::open(&path).unwrap();
+        let mmap = unsafe { Mmap::map(&file).unwrap() };
+        (path, mmap)
+    }
+
+    fn entry(name: &str, offset: u32, raw_size: u32) -> FileEntry {
+        FileEntry { name: name.into(), checksum: 0, flags: 0, offset, original_size: raw_size, raw_size, key: [0u8; 16] }
+    }
+
+    #[test]
+    fn empty_entry_past_end_of_archive_reads_as_empty() {
+        // 2 KB "archive": content starts at 1024 and one 4-byte file sits at offset 0.
+        let mut data = vec![0u8; 2048];
+        data[1024..1028].copy_from_slice(b"abcd");
+        let (path, mmap) = mmap_of(&data);
+        // An empty .ani whose offset points one block past the end of the file,
+        // as some archives write for empty entries at the tail.
+        let empty = entry("data\\gfx\\char\\item\\anim\\item_appear.ani", 2, 0);
+        let got = extract_single_file_to_memory(&mmap, 1024, &empty, 0, encryption::Snow2Mode::Sub).unwrap();
+        assert!(got.is_empty());
+        // A normal entry still reads its bytes.
+        let full = entry("a.txt", 0, 4);
+        let got = extract_single_file_to_memory(&mmap, 1024, &full, 0, encryption::Snow2Mode::Sub).unwrap();
+        assert_eq!(got, b"abcd");
+        // A non-empty entry that really runs past the end is still an error.
+        let bad = entry("b.txt", 1, 4096);
+        assert!(extract_single_file_to_memory(&mmap, 1024, &bad, 0, encryption::Snow2Mode::Sub).is_err());
+        drop(mmap);
+        let _ = std::fs::remove_file(path);
+    }
 }

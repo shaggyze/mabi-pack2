@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Enabled with: git config core.hooksPath .githooks   (build.bat does this)
+exec "$(git rev-parse --show-toplevel)/scripts/precommit-check.sh"

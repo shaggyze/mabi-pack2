@@ -31,16 +31,6 @@ action       = "replace"
 enable  = []
 disable = []
 
-# Import named entries from uotiaralist.ini
-[from_ini]
-path    = "uotiaralist.ini"
-entries = [
-  "Autoproduction Uncaps",
-  "Dungeon Fog Removal 1",
-  "Dungeon Fog Removal 2",
-  "Clock-Weather Minimize",
-]
-
 # API settings — set public = true to expose via REST API at /api/v1/mods
 [api]
 public       = false

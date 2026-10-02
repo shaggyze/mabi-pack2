@@ -23,10 +23,11 @@ fn get_rel_path(root_dir: &str, full_path: &str) -> Result<String, Error> {
 }
 
 fn need_compress(fname: &str, extra_ext_list: &[&str]) -> bool {
+    let fname = fname.to_lowercase();
     [".txt", ".xml", ".dds", ".pmg", ".set", ".raw"]
         .iter()
         .chain(extra_ext_list.iter())
-        .any(|ext| fname.ends_with(ext))
+        .any(|ext| fname.ends_with(&ext.to_lowercase()))
 }
 
 fn pack_file(
@@ -170,6 +171,12 @@ pub fn run_pack(
         disk_names.into_iter().map(|n| (n.clone(), n)).collect()
     };
 
+    // Reject names the game client can't load (too long / invalid on Windows)
+    // before anything is written, so a bad file can't produce a crashing archive.
+    for (_, archive_name) in &file_names {
+        common::validate_entry_path(archive_name).context("cannot pack this file")?;
+    }
+
     let entries_size = file_names
         .iter()
         .map(|(_, archive)| archive.chars().count() * 2 + 40)
@@ -248,4 +255,34 @@ pub fn run_pack(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn need_compress_is_case_insensitive() {
+        assert!(need_compress("data\\a.XML", &[]));
+        assert!(need_compress("data\\a.Txt", &[]));
+        assert!(need_compress("data\\a.INI", &[".ini"]));
+        assert!(need_compress("data\\a.ini", &[".INI"]));
+        assert!(!need_compress("data\\a.ogg", &[".ini"]));
+    }
+
+    #[test]
+    fn run_pack_rejects_invalid_entry_names() {
+        let dir = std::env::temp_dir().join(format!("mabi_pack_badname_{}", std::process::id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // '|' is a legal file name character on Linux but not on Windows / in the game.
+        let bad = if cfg!(windows) { src.join("a".repeat(200)).join("b".repeat(80)) } else { src.join("bad|name.txt") };
+        if let Some(p) = bad.parent() { let _ = std::fs::create_dir_all(p); }
+        if std::fs::write(&bad, b"x").is_ok() {
+            let out = dir.join("out.it");
+            let e = run_pack(src.to_str().unwrap(), out.to_str().unwrap(), "salt", vec![], false, 0, None, None).unwrap_err();
+            assert!(format!("{:#}", e).contains("entry path"), "{:#}", e);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,23 +1,23 @@
 pub mod api;
 pub mod area;
 pub mod common;
-#[cfg(target_os = "windows")]
 pub mod launcher;
 pub mod common_ext;
 pub mod encryption;
 pub mod extract;
+pub mod itemdb;
 pub mod list;
+pub mod mcp;
 pub mod mod_file;
 pub mod pack;
 pub mod pack_v1;
 pub mod patch;
 pub mod pmg;
+pub mod region_map;
 pub mod rgn;
 
 pub const SALTS_URL: &str = "https://shaggyze.website/files/salts.txt";
 
-use std::fs::File as StdFile;
-use std::io::{BufReader as StdBufReader, BufRead};
 use std::path::Path;
 
 /// Hardcoded known salts. Most common at the top for performance.
@@ -59,62 +59,67 @@ use std::sync::Mutex;
 
 static CACHED_SALTS: Lazy<Mutex<Option<Vec<String>>>> = Lazy::new(|| Mutex::new(None));
 
+/// How long the first `load_salts` call waits for the remote salt list. A slower
+/// response is still merged into the cache when it arrives.
+const REMOTE_SALTS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Append the salts listed in `text` (one per line, `#` comments) that are new.
+fn merge_salt_lines(text: &str, salts: &mut Vec<String>) {
+    for line in text.lines() {
+        let s = line.trim();
+        if !s.is_empty() && !s.starts_with('#') && !salts.iter().any(|x| x == s) {
+            salts.push(s.to_string());
+        }
+    }
+}
+
+fn fetch_remote_salts() -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REMOTE_SALTS_WAIT)
+        .build()
+        .ok()?;
+    let response = client.get(SALTS_URL).send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.text().ok()
+}
+
+/// Built-in salts, then `salts.txt` in the working directory, then the remote
+/// list. The first call builds the full list synchronously (waiting at most
+/// `REMOTE_SALTS_WAIT` for the network); later calls return the cached list.
 pub fn load_salts() -> Vec<String> {
     let mut cache = CACHED_SALTS.lock().unwrap();
-    if cache.is_none() {
-        // Initialize with hardcoded salts immediately and store in cache
-        let initial: Vec<String> = HARDCODED_SALTS.iter().map(|s| s.to_string()).collect();
-        *cache = Some(initial.clone());
-        drop(cache);
-
-        // Start background fetch to augment with local file + remote salts
-        std::thread::spawn(|| {
-            let mut salts: Vec<String> = HARDCODED_SALTS.iter().map(|s| s.to_string()).collect();
-            let local_path = Path::new("salts.txt");
-
-            if local_path.exists() {
-                if let Ok(file) = StdFile::open(local_path) {
-                    let reader = StdBufReader::new(file);
-                    for line in reader.lines() {
-                        if let Ok(salt) = line {
-                            let s = salt.trim().to_string();
-                            if !s.is_empty() && !s.starts_with('#') && !salts.contains(&s) {
-                                salts.push(s);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build();
-
-            if let Ok(c) = client {
-                if let Ok(response) = c.get(SALTS_URL).send() {
-                    if response.status().is_success() {
-                        if let Ok(text) = response.text() {
-                            for line in text.lines() {
-                                let s = line.trim().to_string();
-                                if !s.is_empty() && !s.starts_with('#') && !salts.contains(&s) {
-                                    salts.push(s);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut cache = CACHED_SALTS.lock().unwrap();
-            *cache = Some(salts);
-        });
-
-        return initial;
-    }
     if let Some(ref s) = *cache {
         return s.clone();
     }
-    HARDCODED_SALTS.iter().map(|s| s.to_string()).collect()
+
+    let mut salts: Vec<String> = HARDCODED_SALTS.iter().map(|s| s.to_string()).collect();
+    if let Ok(text) = std::fs::read_to_string(Path::new("salts.txt")) {
+        merge_salt_lines(&text, &mut salts);
+    }
+
+    // The fetch runs on its own thread (a blocking reqwest client must not run
+    // inside an async runtime) and is waited for with a bound.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(fetch_remote_salts()); });
+    match rx.recv_timeout(REMOTE_SALTS_WAIT) {
+        Ok(Some(text)) => merge_salt_lines(&text, &mut salts),
+        Ok(None) => {}
+        Err(_) => {
+            // Too slow: merge it into the cache whenever it arrives.
+            std::thread::spawn(move || {
+                if let Ok(Some(text)) = rx.recv() {
+                    if let Some(cached) = CACHED_SALTS.lock().unwrap().as_mut() {
+                        merge_salt_lines(&text, cached);
+                    }
+                }
+            });
+        }
+    }
+
+    *cache = Some(salts.clone());
+    salts
 }
 
 #[cfg(test)]
@@ -124,6 +129,23 @@ mod tests {
     use std::io::{Cursor, Read};
     use byteorder::{LittleEndian, ReadBytesExt};
     use std::fs::File;
+
+    #[test]
+    fn merge_salt_lines_skips_comments_and_duplicates() {
+        let mut salts = vec!["a".to_string()];
+        merge_salt_lines("# comment\n a \nb\n\nb\nc", &mut salts);
+        assert_eq!(salts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn first_load_salts_includes_salts_txt() {
+        let local = std::fs::read_to_string("salts.txt").unwrap_or_default();
+        let salts = load_salts();
+        assert!(salts.len() >= HARDCODED_SALTS.len());
+        for line in local.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            assert!(salts.iter().any(|s| s == line), "salts.txt entry {:?} missing", line);
+        }
+    }
 
     #[test]
     fn test_snow2_roundtrip() {

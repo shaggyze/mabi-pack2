@@ -1,0 +1,23 @@
+[package]
+name = "nxl3p-shim"
+version = "1.0.0"
+edition = "2021"
+description = "Stand-in for nexon_x64.dll: hands the passport ticket to Mabinogi's nexon_api_x64.dll"
+license = "MIT"
+publish = false
+
+# Built by mabi-pack2-core's build.rs and embedded into mabi-patcher.exe.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+winapi = { version = "0.3.9", features = ["synchapi", "handleapi", "winnt", "minwindef", "winbase", "fileapi", "memoryapi", "processenv"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

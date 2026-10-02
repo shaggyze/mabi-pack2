@@ -13,22 +13,35 @@
 ///   POST /api/v1/fs/check-data-folder
 ///   GET  /api/v1/mods
 ///   GET  /api/v1/mod-template
-///   GET  /api/v1/uotiara/mods
-///   POST /api/v1/uotiara/build
 ///   GET  /api/v1/mabi-version
 ///   POST /api/v1/extract/stream  (SSE progress stream)
-///   POST /api/v1/launcher/login              (Windows only)
-///   POST /api/v1/launcher/autologin           (Windows only)
-///   POST /api/v1/launcher/passport            (Windows only)
-///   POST /api/v1/launcher/maintenance         (Windows only)
-///   POST /api/v1/launcher/version             (Windows only)
-///   GET  /api/v1/launcher/profiles            (Windows only)
-///   POST /api/v1/launcher/profile/save        (Windows only)
-///   POST /api/v1/launcher/profile/delete      (Windows only)
-///   POST /api/v1/launcher/profile/activate    (Windows only)
-///   POST /api/v1/launcher/profile/load        (Windows only)
-///   POST /api/v1/launcher/profile/session     (Windows only)
-///   POST /api/v1/launcher/launch              (Windows only)
+///   POST /api/v1/launcher/login               { email, password }  → session | mfa_required | captcha_required
+///   POST /api/v1/launcher/login/otp           { mfa_key, otp }
+///   POST /api/v1/launcher/login/tpa           { tpa_session }      (browser/SSO cookie exchange)
+///   POST /api/v1/launcher/autologin           { session_token }
+///   POST /api/v1/launcher/session/check       { session }          (refreshes on 401)
+///   POST /api/v1/launcher/passport            { session }
+///   POST /api/v1/launcher/maintenance         { session }
+///   POST /api/v1/launcher/version             { session }
+///   POST /api/v1/launcher/update/check        { game_path, session? }
+///   POST /api/v1/launcher/update              { game_path, mode: update|verify|force_all, max_workers?, ignore? }
+///   GET  /api/v1/launcher/update/status
+///   POST /api/v1/launcher/update/cancel
+///   POST /api/v1/launcher/update/pause
+///   POST /api/v1/launcher/update/resume
+///   POST /api/v1/launcher/update/scan         { game_path, mode?, ignore?, only?, session? }
+///   POST /api/v1/launcher/folders/check       { folders[] | all_folders, session? }
+///   GET  /api/v1/launcher/config              (shared hooks + ignore list)
+///   POST /api/v1/launcher/config              { ignore?, hooks? }
+///   POST /api/v1/launcher/import/cookies      { profile? }  (Firefox/Chrome/Edge/Brave)
+///   GET  /api/v1/launcher/news                (?product_id=)
+///   GET  /api/v1/launcher/profiles
+///   POST /api/v1/launcher/profile/save
+///   POST /api/v1/launcher/profile/delete
+///   POST /api/v1/launcher/profile/activate
+///   POST /api/v1/launcher/profile/load
+///   POST /api/v1/launcher/profile/session
+///   POST /api/v1/launcher/launch              { session, client_exe | client_dir }  (Windows/Wine)
 ///   POST /api/v1/mod/vfs/apply
 ///   POST /api/v1/mod/pending/save
 ///   GET  /api/v1/mod/pending
@@ -40,7 +53,8 @@
 ///   POST /api/v1/convert       (DDS<->PNG etc, matches the `convert` CLI subcommand)
 ///   POST /api/v1/pmg/export    (PMG -> OBJ, matches the pmg_export CLI tool)
 ///
-/// Auth: loopback (127.0.0.1) binds are always open. Binding to any other
+/// Auth: loopback (127.0.0.1) binds need no token but only accept a loopback
+/// Host/Origin on the bound port (DNS-rebinding guard). Binding to any other
 /// host (e.g. "0.0.0.0" for Docker/LAN) requires `MABI_API_TOKEN` to be set;
 /// requests must then send `Authorization: Bearer <token>`. See `run_server`.
 use anyhow::Result;
@@ -56,7 +70,7 @@ fn cors_headers() -> Vec<Header> {
     vec![
         Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
         Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap(),
-        Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap(),
+        Header::from_bytes("Access-Control-Allow-Headers", "Content-Type, Authorization").unwrap(),
         Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap(),
     ]
 }
@@ -88,12 +102,12 @@ fn parse_json_body(req: &mut Request) -> Result<Value, Response<std::io::Cursor<
 
 // ---- handlers ---------------------------------------------------------------
 
-fn handle_status() -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_status(port: u16) -> Response<std::io::Cursor<Vec<u8>>> {
     ok(json!({
         "app":     "mabi-patcher",
         "version": env!("CARGO_PKG_VERSION"),
         "api":     "v1",
-        "port":    DEFAULT_PORT,
+        "port":    port,
     }))
 }
 
@@ -322,7 +336,7 @@ fn apply_mod_to_archive(
         let rel = entry.archive_path.replace('\\', std::path::MAIN_SEPARATOR_STR);
         // Strip a leading "data\" prefix that the extractor may add
         let rel = rel.trim_start_matches("data/").trim_start_matches("data\\").to_string();
-        let dest = tmp_dir.join(&rel);
+        let dest = crate::common::safe_join(&tmp_dir, &rel)?;
 
         match entry.action {
             FileAction::Delete => {
@@ -444,11 +458,32 @@ fn apply_mod_to_archive(
     Ok(stats)
 }
 
-fn handle_list_mods() -> Response<std::io::Cursor<Vec<u8>>> {
-    let dir = std::env::current_exe()
+/// The local mods folder: `mods/` next to the exe, else `mods/` in the cwd.
+fn mods_dir() -> std::path::PathBuf {
+    std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("mods")))
-        .unwrap_or_else(|| std::path::Path::new("mods").to_path_buf());
+        .unwrap_or_else(|| std::path::Path::new("mods").to_path_buf())
+}
+
+/// Resolve a mod-file request path (a name relative to `mods_dir`, or a full
+/// path) and refuse anything that doesn't resolve to a file inside `mods_dir`.
+fn resolve_mod_file(mods: &std::path::Path, path: &str) -> Result<std::path::PathBuf, String> {
+    let candidate = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        crate::common::safe_join(mods, path).map_err(|e| e.to_string())?
+    };
+    let root = mods.canonicalize().map_err(|e| format!("mods folder {}: {}", mods.display(), e))?;
+    let full = candidate.canonicalize().map_err(|e| format!("{}: {}", path, e))?;
+    if !full.starts_with(&root) || !full.is_file() {
+        return Err(format!("'{}' is not a file in the mods folder", path));
+    }
+    Ok(full)
+}
+
+fn handle_list_mods() -> Response<std::io::Cursor<Vec<u8>>> {
+    let dir = mods_dir();
 
     let results = crate::mod_file::scan_mods(&dir);
     let mods: Vec<Value> = results.iter().map(|(path, pkg)| {
@@ -476,269 +511,25 @@ fn handle_mod_template() -> Response<std::io::Cursor<Vec<u8>>> {
     ok(json!({ "template": crate::mod_file::template() }))
 }
 
-// ---- uotiara helpers (NSI-based) --------------------------------------------
-
-/// Extract the first double-quoted string from an NSIS line.
-fn nsi_quoted(line: &str) -> Option<String> {
-    let start = line.find('"')?;
-    let rest = &line[start+1..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-/// Parse `Section "Name" MOD###` → (name, id).  Returns None for unnamed sections.
-fn parse_nsi_section(line: &str) -> Option<(String, u32)> {
-    let name = nsi_quoted(line)?;
-    let after_quote = &line[line.rfind('"')? + 1..].trim();
-    let id_str = after_quote.strip_prefix("MOD")?;
-    let id: u32 = id_str.trim().parse().ok()?;
-    Some((name, id))
-}
-
-/// Parse uotiara.nsi and return every data mod (installs to `$INSTDIR\data\`).
-///
-/// Each entry: `{ id, name, group, files: [{src, dest}] }` where
-///   - `src`  = relative to nsi directory (e.g. `Tiara's Moonshine Mod/data/db/foo.xml`)
-///   - `dest` = relative to game `data/`   (e.g. `db/foo.xml`)
-pub fn parse_uotiara_nsi(nsi_path: &str) -> anyhow::Result<Vec<Value>> {
-    let text = std::fs::read_to_string(nsi_path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", nsi_path, e))?;
-
-    let mut result: Vec<Value> = Vec::new();
-    let mut group_stack: Vec<String> = Vec::new();
-
-    let mut in_section = false;
-    let mut cur_name = String::new();
-    let mut cur_id: u32 = 0;
-    let mut cur_set_out = String::new();   // full NSIS SetOutPath value
-    let mut cur_files: Vec<Value> = Vec::new();
-
-    for raw in text.lines() {
-        let t = raw.trim();
-        if t.starts_with(';') { continue; }   // NSIS comment
-
-        // Track SectionGroup nesting for group metadata
-        if t.starts_with("SectionGroup") && !t.contains("SectionGroupEnd") {
-            if let Some(name) = nsi_quoted(t) {
-                group_stack.push(name);
-            }
-            continue;
-        }
-        if t == "SectionGroupEnd" {
-            group_stack.pop();
-            continue;
-        }
-
-        // Section header: must have MOD### constant
-        if t.starts_with("Section ")
-            && !t.starts_with("SectionGroup")
-            && !t.starts_with("SectionEnd")
-            && !t.starts_with("SectionIn")
-        {
-            if let Some((name, id)) = parse_nsi_section(t) {
-                in_section = true;
-                cur_name = name;
-                cur_id = id;
-                cur_set_out.clear();
-                cur_files.clear();
-            }
-            continue;
-        }
-
-        if t == "SectionEnd" {
-            if in_section && !cur_files.is_empty() {
-                result.push(json!({
-                    "id":    cur_id,
-                    "name":  cur_name,
-                    "group": group_stack.join("/"),
-                    "files": cur_files,
-                }));
-            }
-            in_section = false;
-            cur_files.clear();
-            cur_set_out.clear();
-            continue;
-        }
-
-        if !in_section { continue; }
-
-        // SetOutPath — update current destination prefix
-        if t.starts_with("SetOutPath ") {
-            if let Some(path) = nsi_quoted(t) {
-                cur_set_out = path;
-            }
-            continue;
-        }
-
-        // Delete — installer-time delete inside data\ (e.g. MOD89 "Dark Knight Sound")
-        if t.starts_with("Delete ") {
-            if let Some(target) = nsi_quoted(t) {
-                let is_data = target == "$INSTDIR\\data"
-                    || target.starts_with("$INSTDIR\\data\\");
-                if is_data {
-                    let dest_rel = target
-                        .trim_start_matches("$INSTDIR\\data\\")
-                        .trim_start_matches("$INSTDIR\\data")
-                        .replace('\\', "/");
-                    if !dest_rel.is_empty() {
-                        cur_files.push(json!({ "action": "delete", "dest": dest_rel }));
-                    }
-                }
-            }
-            continue;
-        }
-
-        // File — only collect if destination is under $INSTDIR\data\
-        if t.starts_with("File ") {
-            let is_data = cur_set_out == "$INSTDIR\\data"
-                || cur_set_out.starts_with("$INSTDIR\\data\\");
-            if !is_data { continue; }
-            if let Some(src) = nsi_quoted(t) {
-                // Strip ${srcdir}\ prefix; normalise to forward slashes
-                let src_rel = src
-                    .trim_start_matches("${srcdir}\\")
-                    .replace('\\', "/");
-                let filename = src_rel.split('/').last().unwrap_or("").to_string();
-
-                let dest_base = cur_set_out
-                    .trim_start_matches("$INSTDIR\\data\\")
-                    .trim_start_matches("$INSTDIR\\data")
-                    .replace('\\', "/");
-                let dest_rel = if dest_base.is_empty() {
-                    filename
-                } else {
-                    format!("{}/{}", dest_base, filename)
-                };
-
-                cur_files.push(json!({ "action": "replace", "src": src_rel, "dest": dest_rel }));
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-fn default_nsi_path() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("uotiara.nsi")))
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "uotiara.nsi".to_string())
-}
-
-fn handle_uotiara_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    let url = req.url().to_string();
-    let nsi_path = url.split('?').nth(1)
-        .and_then(|qs| qs.split('&').find(|p| p.starts_with("nsi=")))
-        .map(|p| p[4..].to_string())
-        .map(|s| percent_decode(&s))
-        .unwrap_or_else(default_nsi_path);
-
-    match parse_uotiara_nsi(&nsi_path) {
-        Ok(mods) => ok(json!({ "nsi": nsi_path, "count": mods.len(), "mods": mods })),
-        Err(e)   => err(&e.to_string(), 500),
-    }
-}
-
-fn handle_uotiara_build(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-
-    let nsi_path = match body["nsi"].as_str() {
-        Some(s) => s.to_string(),
-        None => return err("'nsi' (path to uotiara.nsi) is required", 400),
-    };
-    let output = match body["output"].as_str() {
-        Some(s) => s.to_string(),
-        None => return err("'output' (destination .it path) is required", 400),
-    };
-    let key = body["key"].as_str().map(String::from);
-    let selected: std::collections::HashSet<u64> = body["selected"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
-        .unwrap_or_default();
-
-    if selected.is_empty() {
-        return err("'selected' must be a non-empty array of mod IDs", 400);
-    }
-
-    let all_mods = match parse_uotiara_nsi(&nsi_path) {
-        Ok(m) => m,
-        Err(e) => return err(&e.to_string(), 500),
-    };
-
-    // Base directory is the folder containing the NSI file
-    let nsi_dir = std::path::Path::new(&nsi_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .to_path_buf();
-
-    // Stage files into tmp_dir/data/<dest_rel> so the pack preserves data\ prefix
-    let tmp_dir = std::env::temp_dir()
-        .join(format!("mabi_uotiara_{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
-        return err(&format!("cannot create temp dir: {}", e), 500);
-    }
-
-    let mut copied = 0usize;
-    for m in &all_mods {
-        let id = m["id"].as_u64().unwrap_or(0);
-        if !selected.contains(&id) { continue; }
-        if let Some(files) = m["files"].as_array() {
-            for f in files {
-                let src_rel  = match f["src"].as_str()  { Some(s) => s, None => continue };
-                let dest_rel = match f["dest"].as_str() { Some(s) => s, None => continue };
-
-                let src_path  = nsi_dir.join(src_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-                let dest_path = tmp_dir.join("data").join(dest_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-                if let Some(parent) = dest_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::copy(&src_path, &dest_path) {
-                    Ok(_) => copied += 1,
-                    Err(e) => eprintln!("warning: skip {:?}: {}", src_path, e),
-                }
-            }
-        }
-    }
-
-    if copied == 0 {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return err("no files copied — verify nsi path and that mod source files exist", 400);
-    }
-
-    let tmp_str = tmp_dir.to_string_lossy().to_string();
-    let key_str = key.as_deref().unwrap_or("})wWb4?-sVGHNoPKpc");
-    let result = crate::pack::run_pack(&tmp_str, &output, key_str, vec![], false, 0, None, None);
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-
-    match result {
-        Ok(_) => ok(json!({
-            "nsi":          nsi_path,
-            "output":       output,
-            "selected":     selected.len(),
-            "files_copied": copied,
-        })),
-        Err(e) => err(&format!("pack failed: {}", e), 500),
-    }
-}
-
+/// Decode `%XX` escapes in a query-string value. Decodes to
+/// bytes first so multi-byte UTF-8 sequences (`%C3%A9`) come out intact.
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i+1..i+3]).unwrap_or(""), 16) {
-                out.push(b as char);
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
@@ -749,84 +540,315 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
     }).collect()
 }
 
-// ---- launcher handlers (Windows only) ---------------------------------------
+// ---- launcher handlers ------------------------------------------------------
+// Launcher routes: login, profiles, patching and launch over loopback HTTP.
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_login(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let username = match body["username"].as_str() { Some(s) => s, None => return err("'username' is required", 400) };
-    let password = match body["password"].as_str() { Some(s) => s, None => return err("'password' is required", 400) };
-    let remember = body["remember"].as_bool().unwrap_or(false);
+type Resp = Response<std::io::Cursor<Vec<u8>>>;
 
-    match crate::launcher::auth::login(username, password, remember) {
-        Ok(result) => ok(json!({
-            "session": result.session,
-            "expiresIn": result.session_expires_in,
-        })),
-        Err(e) => err(&e.to_string(), 500),
+/// Map launcher errors to responses; MFA/CAPTCHA are reported as data, not failures.
+fn auth_err(e: anyhow::Error) -> Resp {
+    use crate::launcher::auth::AuthError;
+    match e.downcast_ref::<AuthError>() {
+        Some(AuthError::MfaRequired { mfa_key, mfa_type }) => {
+            ok(json!({ "mfa_required": true, "mfa_key": mfa_key, "mfa_type": mfa_type }))
+        }
+        Some(AuthError::CaptchaRequired(code)) => {
+            ok(json!({ "captcha_required": true, "code": code, "message": e.to_string() }))
+        }
+        Some(AuthError::SessionExpired(_)) => err(&e.to_string(), 401),
+        Some(AuthError::NotPlayable(_)) => err(&e.to_string(), 503),
+        Some(AuthError::DeviceTrustRequired) => err(&e.to_string(), 403),
+        _ => err(&e.to_string(), 500),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_autologin(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn login_ok(result: crate::launcher::auth::LoginResult) -> Resp {
+    ok(json!({ "session": result.session, "expiresIn": result.session_expires_in }))
+}
+
+fn device_id_from(body: &Value) -> String {
+    body["device_id"].as_str().map(String::from)
+        .unwrap_or_else(|| crate::launcher::auth::device_id(body["profile"].as_str().unwrap_or("")))
+}
+
+fn handle_launcher_login(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let email = match body["email"].as_str().or(body["username"].as_str()) { Some(s) => s, None => return err("'email' is required", 400) };
+    let password = match body["password"].as_str() { Some(s) => s, None => return err("'password' is required", 400) };
+    match crate::launcher::auth::login(email, password, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_login_otp(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let key = match body["mfa_key"].as_str() { Some(s) => s, None => return err("'mfa_key' is required", 400) };
+    let otp = match body["otp"].as_str() { Some(s) => s, None => return err("'otp' is required", 400) };
+    match crate::launcher::auth::login_otp(key, otp, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_login_tpa(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let tpa = match body["tpa_session"].as_str() { Some(s) => s, None => return err("'tpa_session' is required", 400) };
+    match crate::launcher::auth::exchange_tpa(tpa, &device_id_from(&body)) {
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
+    }
+}
+
+fn handle_launcher_autologin(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let session_token = match body["session_token"].as_str() { Some(s) => s, None => return err("'session_token' is required", 400) };
-
     match crate::launcher::auth::autologin(session_token) {
-        Ok(result) => ok(json!({
-            "session": result.session,
-            "expiresIn": result.session_expires_in,
-        })),
-        Err(e) => err(&e.to_string(), 500),
+        Ok(r) => login_ok(r),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn parse_session(body: &Value) -> Result<crate::launcher::auth::NexonSession, Response<std::io::Cursor<Vec<u8>>>> {
+fn parse_session(body: &Value) -> Result<crate::launcher::auth::NexonSession, Resp> {
     serde_json::from_value(body["session"].clone())
         .map_err(|e| err(&format!("'session' is invalid: {}", e), 400))
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_passport(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_session_check(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    match crate::launcher::auth::get_passport(&session) {
-        Ok(passport) => ok(json!({ "passport": passport })),
-        Err(e) => err(&e.to_string(), 500),
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    let mut status = match crate::launcher::auth::check_session(&mut session) { Ok(s) => s, Err(e) => return auth_err(e) };
+    let mut refreshed = false;
+    if status == 401 && crate::launcher::auth::refresh(&mut session).is_ok() {
+        refreshed = true;
+        status = crate::launcher::auth::check_session(&mut session).unwrap_or(status);
+    }
+    ok(json!({ "valid": status == 200, "status": status, "refreshed": refreshed, "session": session }))
+}
+
+fn handle_launcher_passport(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    match crate::launcher::auth::prepare_launch(&mut session) {
+        Ok(passport) => ok(json!({ "passport": passport, "session": session })),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_maintenance(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_maintenance(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
     match crate::launcher::patch::is_maintenance(&session) {
         Ok(maintenance) => ok(json!({ "maintenance": maintenance })),
-        Err(e) => err(&e.to_string(), 500),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_version(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_version(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    match crate::launcher::patch::get_latest_version(&session) {
-        Ok(version) => ok(json!({ "version": version })),
-        Err(e) => err(&e.to_string(), 500),
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    match crate::launcher::patch::fetch_manifest(&mut session) {
+        Ok(info) => ok(json!({ "version": info.version, "manifest_url": info.manifest_url, "session": session })),
+        Err(e) => auth_err(e),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profiles_list() -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_update_check(req: &mut Request) -> Resp {
+    use crate::launcher::patch;
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let game_path = match body["game_path"].as_str() { Some(s) => s, None => return err("'game_path' is required", 400) };
+    if let Some(pid) = body["product_id"].as_u64() { crate::launcher::auth::set_product_id(pid as u32); }
+    let mut session = parse_session(&body).ok();
+    let roots = patch::GameRoots::resolve(game_path);
+    match patch::check_update(&roots, session.as_mut()) {
+        Ok(c) => ok(json!({ "check": c, "roots": roots, "session": session })),
+        Err(e) => auth_err(e),
+    }
+}
+
+/// Background patch job state (one at a time), polled via /launcher/update/status.
+#[derive(Default, Serialize, Clone)]
+struct PatchJob {
+    running: bool,
+    log: Vec<String>,
+    files_done: usize,
+    files_total: usize,
+    bytes: u64,
+    bytes_total: u64,
+    speed_bps: u64,
+    scan_done: usize,
+    scan_total: usize,
+    result: Option<crate::launcher::patch::PatchResult>,
+    error: Option<String>,
+    /// The session after the job (refreshed if a 401 forced an autologin).
+    session: Option<crate::launcher::auth::NexonSession>,
+}
+
+static PATCH_JOB: once_cell::sync::Lazy<std::sync::Mutex<PatchJob>> = once_cell::sync::Lazy::new(Default::default);
+static PATCH_CANCEL: once_cell::sync::Lazy<std::sync::Mutex<Arc<AtomicBool>>> = once_cell::sync::Lazy::new(Default::default);
+static PATCH_PAUSE: once_cell::sync::Lazy<std::sync::Mutex<Arc<AtomicBool>>> = once_cell::sync::Lazy::new(Default::default);
+
+fn handle_launcher_update(req: &mut Request) -> Resp {
+    use crate::launcher::patch::{self, PatchEvent, PatchMode, PatchOptions};
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let game_path = match body["game_path"].as_str() { Some(s) => s.to_string(), None => return err("'game_path' is required", 400) };
+    if let Some(pid) = body["product_id"].as_u64() { crate::launcher::auth::set_product_id(pid as u32); }
+    let mode = match body["mode"].as_str().unwrap_or("update") {
+        "verify" => PatchMode::Verify,
+        "force_all" | "force" => PatchMode::ForceAll,
+        _ => PatchMode::Update,
+    };
+    {
+        let mut job = PATCH_JOB.lock().unwrap();
+        if job.running { return err("a patch job is already running", 409); }
+        *job = PatchJob { running: true, ..Default::default() };
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    *PATCH_CANCEL.lock().unwrap() = cancel.clone();
+    let pause = Arc::new(AtomicBool::new(false));
+    *PATCH_PAUSE.lock().unwrap() = pause.clone();
+    // Run the before/after-patch hooks around a real (non-scan) patch, from the
+    // shared config — the GUI runs its own hooks, so run_patcher never does.
+    let run_hooks = !body["scan_only"].as_bool().unwrap_or(false);
+    let profile_name = body["profile"].as_str().unwrap_or("").to_string();
+    let opts = PatchOptions {
+        mode,
+        max_workers: (body["max_workers"].as_u64().unwrap_or(8) as usize).clamp(1, patch::MAX_WORKERS),
+        ignore: body["ignore"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        scan_only: body["scan_only"].as_bool().unwrap_or(false),
+        manifest_hash: None,
+        cancel,
+        only: body["only"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()),
+        pause: pause.clone(),
+    };
+    let session = parse_session(&body).ok();
+    std::thread::spawn(move || {
+        // A panic anywhere in the job must not leave PATCH_JOB "running"
+        // forever (that would 409 every later /launcher/update).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let roots = patch::GameRoots::resolve(&game_path);
+            let cfg = crate::launcher::config::Config::load().unwrap_or_default();
+            if run_hooks {
+                crate::launcher::launch::spawn_hook(&cfg.hooks.before_patch, &profile_name, &roots.install_root);
+            }
+            let on_event = |ev: PatchEvent| {
+                let mut job = PATCH_JOB.lock().unwrap();
+                match ev {
+                    PatchEvent::Log { message } => { job.log.push(message); }
+                    PatchEvent::Scan { done, total, .. } => { job.scan_done = done; job.scan_total = total; }
+                    PatchEvent::Download { files_done, files_total, bytes, bytes_total, speed_bps, .. } => {
+                        job.files_done = files_done; job.files_total = files_total;
+                        job.bytes = bytes; job.bytes_total = bytes_total; job.speed_bps = speed_bps;
+                    }
+                    PatchEvent::Worker { .. } => {}
+                }
+            };
+            let mut session = session;
+            let res = patch::run_patcher(&roots, session.as_mut(), &opts, &on_event);
+            if run_hooks {
+                if let Ok(r) = &res {
+                    if r.errors.is_empty() && !r.cancelled {
+                        crate::launcher::launch::spawn_hook(&cfg.hooks.after_patch, &profile_name, &roots.install_root);
+                    }
+                }
+            }
+            (session, res)
+        }));
+        let mut job = PATCH_JOB.lock().unwrap_or_else(|e| e.into_inner());
+        PATCH_JOB.clear_poison();
+        job.running = false;
+        match outcome {
+            Ok((session, res)) => {
+                job.session = session;
+                match res {
+                    Ok(r) => { job.files_total = job.files_total.max(r.need.len()); job.result = Some(r); }
+                    Err(e) => job.error = Some(e.to_string()),
+                }
+            }
+            Err(_) => job.error = Some("patch job crashed unexpectedly".to_string()),
+        }
+    });
+    ok(json!({ "started": true }))
+}
+
+fn handle_launcher_update_pause() -> Resp {
+    PATCH_PAUSE.lock().unwrap().store(true, Ordering::Relaxed);
+    ok(json!({ "paused": PATCH_JOB.lock().unwrap().running }))
+}
+
+fn handle_launcher_update_resume() -> Resp {
+    PATCH_PAUSE.lock().unwrap().store(false, Ordering::Relaxed);
+    ok(json!({ "resumed": PATCH_JOB.lock().unwrap().running }))
+}
+
+/// Scan an install (no download): list files that need updating with status + size.
+fn handle_launcher_update_scan(req: &mut Request) -> Resp {
+    use crate::launcher::patch::{self, PatchMode, PatchOptions};
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let game_path = match body["game_path"].as_str() { Some(s) => s, None => return err("'game_path' is required", 400) };
+    if let Some(pid) = body["product_id"].as_u64() { crate::launcher::auth::set_product_id(pid as u32); }
+    let mode = match body["mode"].as_str().unwrap_or("update") {
+        "verify" => PatchMode::Verify,
+        "force_all" | "force" => PatchMode::ForceAll,
+        _ => PatchMode::Update,
+    };
+    let mut session = parse_session(&body).ok();
+    let roots = patch::GameRoots::resolve(game_path);
+    let opts = PatchOptions {
+        mode,
+        ignore: body["ignore"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        only: body["only"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()),
+        ..Default::default()
+    };
+    match patch::scan(&roots, session.as_mut(), &opts) {
+        Ok(need) => ok(json!({ "roots": roots, "need": need, "session": session })),
+        Err(e) => auth_err(e),
+    }
+}
+
+/// Check several game folders against the current manifest (multi-install).
+fn handle_launcher_folders_check(req: &mut Request) -> Resp {
+    use crate::launcher::patch;
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    if let Some(pid) = body["product_id"].as_u64() { crate::launcher::auth::set_product_id(pid as u32); }
+    let mut folders: Vec<std::path::PathBuf> = body["folders"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(std::path::PathBuf::from)).collect())
+        .unwrap_or_default();
+    if body["all_folders"].as_bool().unwrap_or(false) {
+        for exe in crate::launcher::detect::find_all_game_exes() {
+            folders.push(exe);
+        }
+    }
+    if folders.is_empty() { return err("'folders' (array) or 'all_folders': true is required", 400); }
+    let mut session = parse_session(&body).ok();
+    let statuses = patch::check_folders(&folders, session.as_mut());
+    ok(json!({ "folders": statuses, "session": session }))
+}
+
+fn handle_launcher_update_status() -> Resp {
+    let job = PATCH_JOB.lock().unwrap().clone();
+    ok(serde_json::to_value(job).unwrap_or_default())
+}
+
+fn handle_launcher_update_cancel() -> Resp {
+    PATCH_CANCEL.lock().unwrap().store(true, Ordering::Relaxed);
+    ok(json!({ "cancelling": PATCH_JOB.lock().unwrap().running }))
+}
+
+fn handle_launcher_profiles_list() -> Resp {
     match crate::launcher::profile::list_profiles() {
         Ok(summaries) => ok(json!({ "profiles": summaries })),
         Err(e) => err(&e.to_string(), 500),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_save(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_save(req: &mut Request) -> Resp {
     use crate::launcher::profile::{Profile, ProfileStore};
 
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
@@ -853,8 +875,7 @@ fn handle_launcher_profile_save(req: &mut Request) -> Response<std::io::Cursor<V
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_delete(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_delete(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     match crate::launcher::profile::delete_profile(id) {
@@ -863,8 +884,7 @@ fn handle_launcher_profile_delete(req: &mut Request) -> Response<std::io::Cursor
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_activate(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_activate(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     match crate::launcher::profile::set_active_profile(id) {
@@ -873,8 +893,7 @@ fn handle_launcher_profile_activate(req: &mut Request) -> Response<std::io::Curs
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_load(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_load(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     let profile = match crate::launcher::profile::load_profile(id) { Ok(p) => p, Err(e) => return err(&e.to_string(), 404) };
@@ -886,8 +905,7 @@ fn handle_launcher_profile_load(req: &mut Request) -> Response<std::io::Cursor<V
     ok(val)
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_profile_session(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_launcher_profile_session(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
     let id = match body["id"].as_str() { Some(s) => s, None => return err("'id' is required", 400) };
     let session_token = match body["session_token"].as_str() { Some(s) => s, None => return err("'session_token' is required", 400) };
@@ -898,31 +916,97 @@ fn handle_launcher_profile_session(req: &mut Request) -> Response<std::io::Curso
     }
 }
 
-#[cfg(target_os = "windows")]
-fn handle_launcher_launch(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    use crate::launcher::{auth, launch};
-
+/// Official launch: body { session, client_dir | client_exe | game_path }.
+fn handle_launcher_launch(req: &mut Request) -> Resp {
     let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
-    let session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
-    let client_dir = match body["client_dir"].as_str() { Some(s) => s, None => return err("'client_dir' is required", 400) };
-
-    let config = match launch::fetch_launch_config(&session) { Ok(c) => c, Err(e) => return err(&e.to_string(), 500) };
-    let passport = match auth::get_passport(&session) { Ok(p) => p, Err(e) => return err(&e.to_string(), 500) };
-    let summary = launch::LaunchSummary::from(&config);
-
-    match config.spawn_client(std::path::Path::new(client_dir), &passport) {
-        Ok(_child) => ok(json!({
-            "executable": summary.executable,
-            "argumentCount": summary.argument_count,
-            "patchAvailable": summary.patch_available,
+    if let Some(pid) = body["product_id"].as_u64() { crate::launcher::auth::set_product_id(pid as u32); }
+    let mut session = match parse_session(&body) { Ok(s) => s, Err(r) => return r };
+    let path = match body["client_exe"].as_str().or(body["client_dir"].as_str()).or(body["game_path"].as_str()) {
+        Some(s) => s, None => return err("'client_exe' or 'client_dir' is required", 400),
+    };
+    let exe = crate::launcher::patch::GameRoots::resolve(path).client_exe();
+    match crate::launcher::launch::launch_official(&mut session, &exe, false) {
+        Ok(info) => ok(json!({
+            "pid": info.pid,
+            "executable": info.executable,
+            "argumentCount": info.argument_count,
+            "patchAvailable": info.patch_available,
+            "sessionExpiresIn": info.session_expires_in,
+            "session": session,
         })),
+        Err(e) => auth_err(e),
+    }
+}
+
+// ---- shared config (hooks + ignore list) -------------------------------------
+
+/// Get the shared patcher config (the 4 hooks + the ignore list). Same store the
+/// CLI uses, so the GUI and CLI share one set of hooks/ignores.
+fn handle_launcher_config_get() -> Resp {
+    match crate::launcher::config::Config::load() {
+        Ok(cfg) => ok(serde_json::to_value(&cfg).unwrap_or_default()),
         Err(e) => err(&e.to_string(), 500),
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn launcher_unavailable() -> Response<std::io::Cursor<Vec<u8>>> {
-    err("launcher endpoints are only available on Windows", 501)
+/// Replace the shared config. Body: `{ ignore: [...], hooks: { before_patch, after_patch, before_launch, after_launch } }`.
+/// Any field omitted keeps the current value.
+fn handle_launcher_config_set(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let mut cfg = match crate::launcher::config::Config::load() { Ok(c) => c, Err(e) => return err(&e.to_string(), 500) };
+    if let Some(arr) = body["ignore"].as_array() {
+        cfg.ignore = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    }
+    let hooks = &body["hooks"];
+    for (key, slot) in [
+        ("before_patch", &mut cfg.hooks.before_patch),
+        ("after_patch", &mut cfg.hooks.after_patch),
+        ("before_launch", &mut cfg.hooks.before_launch),
+        ("after_launch", &mut cfg.hooks.after_launch),
+    ] {
+        if let Some(v) = hooks.get(key).and_then(Value::as_str) {
+            *slot = v.to_string();
+        }
+    }
+    match cfg.save() {
+        Ok(_) => ok(serde_json::to_value(&cfg).unwrap_or_default()),
+        Err(e) => err(&e.to_string(), 500),
+    }
+}
+
+/// Import a Nexon session from the user's browsers (Firefox/Chrome/Edge/Brave).
+/// Reports `v20_found` when Chrome 127+ app-bound cookies block decryption.
+fn handle_launcher_import_cookies(req: &mut Request) -> Resp {
+    let body = match parse_json_body(req) { Ok(v) => v, Err(r) => return r };
+    let dev = device_id_from(&body);
+    match crate::launcher::cookies::import_from_browsers(&dev) {
+        Ok(imp) => {
+            let imported = imp.session.is_some();
+            ok(json!({
+                "session": imp.session,
+                "browser": imp.browser,
+                "v20_found": imp.v20_found,
+                "notes": imp.notes,
+                "imported": imported,
+            }))
+        }
+        Err(e) => err(&e.to_string(), 500),
+    }
+}
+
+/// Nexon Mabinogi news feed (title, url, date, image). Public; no session.
+fn handle_launcher_news(req: &mut Request) -> Resp {
+    let url = req.url().to_string();
+    if let Some(pid) = url.split('?').nth(1)
+        .and_then(|qs| qs.split('&').find(|p| p.starts_with("product_id=")))
+        .and_then(|p| p[11..].parse::<u32>().ok())
+    {
+        crate::launcher::auth::set_product_id(pid);
+    }
+    match crate::launcher::news::fetch_news() {
+        Ok(items) => ok(json!({ "items": items })),
+        Err(e) => err(&e.to_string(), 502),
+    }
 }
 
 // ---- mod VFS / pending-changes handlers --------------------------------------
@@ -963,21 +1047,26 @@ fn handle_mod_vfs_apply(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>>
     };
 
     let mut stats = json!({ "deleted": 0, "renamed": 0, "added": 0, "merged": 0 });
-    let normalize = |p: &str| -> String { p.replace('\\', "/").trim_start_matches('/').to_string() };
+    // Resolve an edit path inside the extracted tree; rejects `..`, absolute and
+    // drive paths, and names the game can't load (see validate_entry_path).
+    let target = |p: &str| -> anyhow::Result<std::path::PathBuf> {
+        crate::common::validate_entry_path(p)?;
+        crate::common::safe_join(&tmp_dir, p)
+    };
 
     for change in &changes {
         let result: anyhow::Result<()> = (|| {
             match change {
                 VfsChange::Delete { path } => {
-                    let target = tmp_dir.join(normalize(path));
+                    let target = target(path)?;
                     if target.exists() {
                         std::fs::remove_file(&target)?;
                         stats["deleted"] = (stats["deleted"].as_i64().unwrap_or(0) + 1).into();
                     }
                 }
                 VfsChange::Rename { from, to } => {
-                    let src = tmp_dir.join(normalize(from));
-                    let dst = tmp_dir.join(normalize(to));
+                    let src = target(from)?;
+                    let dst = target(to)?;
                     if let Some(p) = dst.parent() { std::fs::create_dir_all(p)?; }
                     if src.exists() {
                         std::fs::rename(&src, &dst)?;
@@ -985,7 +1074,7 @@ fn handle_mod_vfs_apply(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>>
                     }
                 }
                 VfsChange::Add { dest, local_src } => {
-                    let dst = tmp_dir.join(normalize(dest));
+                    let dst = target(dest)?;
                     if let Some(p) = dst.parent() { std::fs::create_dir_all(p)?; }
                     std::fs::copy(Path::new(local_src), &dst)?;
                     stats["added"] = (stats["added"].as_i64().unwrap_or(0) + 1).into();
@@ -1089,7 +1178,11 @@ fn handle_mod_file_read(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>>
         Some(p) => p,
         None => return err("'path' query param is required", 400),
     };
-    match std::fs::read_to_string(&path) {
+    let full = match resolve_mod_file(&mods_dir(), &path) {
+        Ok(p) => p,
+        Err(e) => return err(&e, 403),
+    };
+    match std::fs::read_to_string(&full) {
         Ok(content) => ok(json!({ "path": path, "content": content })),
         Err(e) => err(&e.to_string(), 500),
     }
@@ -1526,7 +1619,7 @@ fn handle_extract_stream(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>
 
 // ---- router -----------------------------------------------------------------
 
-fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn route(req: &mut Request, port: u16) -> Response<std::io::Cursor<Vec<u8>>> {
     let url = req.url().to_string();
     let method = req.method().clone();
 
@@ -1541,7 +1634,7 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     let path = url.split('?').next().unwrap_or(&url).to_string();
 
     match (&method, path.as_str()) {
-        (Method::Get,  "/api/v1/status")          => handle_status(),
+        (Method::Get,  "/api/v1/status")          => handle_status(port),
         (Method::Post, "/api/v1/extract")         => handle_extract(req),
         (Method::Post, "/api/v1/pack")            => handle_pack(req),
         (Method::Post, "/api/v1/list")            => handle_list(req),
@@ -1550,8 +1643,6 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Post, "/api/v1/fs/check-data-folder") => handle_check_data_folder(req),
         (Method::Get,  "/api/v1/mods")            => handle_list_mods(),
         (Method::Get,  "/api/v1/mod-template")    => handle_mod_template(),
-        (Method::Get,  "/api/v1/uotiara/mods")    => handle_uotiara_list(req),
-        (Method::Post, "/api/v1/uotiara/build")   => handle_uotiara_build(req),
         (Method::Get,  "/api/v1/mabi-version")    => handle_mabi_version(),
         (Method::Post, "/api/v1/extract/stream")  => handle_extract_stream(req),
 
@@ -1566,33 +1657,33 @@ fn route(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         (Method::Post, "/api/v1/convert")           => handle_convert(req),
         (Method::Post, "/api/v1/pmg/export")        => handle_pmg_export(req),
 
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/login")             => handle_launcher_login(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/login/otp")         => handle_launcher_login_otp(req),
+        (Method::Post, "/api/v1/launcher/login/tpa")         => handle_launcher_login_tpa(req),
         (Method::Post, "/api/v1/launcher/autologin")         => handle_launcher_autologin(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/session/check")     => handle_launcher_session_check(req),
         (Method::Post, "/api/v1/launcher/passport")          => handle_launcher_passport(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/maintenance")       => handle_launcher_maintenance(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/version")           => handle_launcher_version(req),
-        #[cfg(target_os = "windows")]
+        (Method::Post, "/api/v1/launcher/update/check")      => handle_launcher_update_check(req),
+        (Method::Post, "/api/v1/launcher/update")            => handle_launcher_update(req),
+        (Method::Get,  "/api/v1/launcher/update/status")     => handle_launcher_update_status(),
+        (Method::Post, "/api/v1/launcher/update/cancel")     => handle_launcher_update_cancel(),
+        (Method::Post, "/api/v1/launcher/update/pause")      => handle_launcher_update_pause(),
+        (Method::Post, "/api/v1/launcher/update/resume")     => handle_launcher_update_resume(),
+        (Method::Post, "/api/v1/launcher/update/scan")       => handle_launcher_update_scan(req),
+        (Method::Post, "/api/v1/launcher/folders/check")     => handle_launcher_folders_check(req),
+        (Method::Get,  "/api/v1/launcher/config")            => handle_launcher_config_get(),
+        (Method::Post, "/api/v1/launcher/config")            => handle_launcher_config_set(req),
+        (Method::Post, "/api/v1/launcher/import/cookies")    => handle_launcher_import_cookies(req),
+        (Method::Get,  "/api/v1/launcher/news")              => handle_launcher_news(req),
         (Method::Get,  "/api/v1/launcher/profiles")          => handle_launcher_profiles_list(),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/save")      => handle_launcher_profile_save(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/delete")    => handle_launcher_profile_delete(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/activate")  => handle_launcher_profile_activate(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/load")      => handle_launcher_profile_load(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/profile/session")   => handle_launcher_profile_session(req),
-        #[cfg(target_os = "windows")]
         (Method::Post, "/api/v1/launcher/launch")            => handle_launcher_launch(req),
-
-        #[cfg(not(target_os = "windows"))]
-        (_, p) if p.starts_with("/api/v1/launcher/") => launcher_unavailable(),
 
         // Anything else under /api/ is a genuine 404; anything not under /api/
         // falls through to the WebUI static bundle (`mabi-patcher serve` hosts
@@ -1669,42 +1760,82 @@ fn handle_static(path: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     }
 }
 
-/// Bearer-token check for non-loopback binds. Loopback (127.0.0.1/localhost)
-/// is always trusted since it's the same machine. Any other bind address
-/// (Docker "0.0.0.0", LAN) requires `MABI_API_TOKEN` to be set and matched
-/// against `Authorization: Bearer <token>` — launcher credentials and
-/// mod-apply are too sensitive to leave open once reachable off-box.
-fn check_auth(req: &Request, host: &str) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+fn is_loopback_bind(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// The `host:port` authorities a loopback-bound server answers to.
+fn loopback_authorities(port: u16) -> [String; 3] {
+    [format!("127.0.0.1:{}", port), format!("localhost:{}", port), format!("[::1]:{}", port)]
+}
+
+/// DNS-rebinding guard for loopback binds: the Host header must name the
+/// loopback interface on the bound port. A rebinding page reaches us as
+/// `attacker.example:port`, which is rejected here. A missing Host is
+/// allowed (browsers always send one; only bare non-browser clients omit it).
+fn loopback_host_ok(request_host: Option<&str>, port: u16) -> bool {
+    let h = match request_host {
+        Some(h) => h.trim().to_ascii_lowercase(),
+        None => return true,
+    };
+    if loopback_authorities(port).contains(&h) { return true; }
+    port == 80 && matches!(h.as_str(), "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// Whether a browser `Origin` may call this API. Tauri webviews are always
+/// allowed. On a loopback bind only the loopback origins on the bound port
+/// are accepted (not "whatever Host the request claims", which a rebinding
+/// page controls); otherwise the Origin must match the request's own Host.
+fn origin_ok(origin: &str, request_host: &str, loopback_port: Option<u16>) -> bool {
+    if origin.starts_with("tauri://") { return true; }
+    let origin = origin.trim().to_ascii_lowercase();
+    let authority = match origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
+        Some(a) => a,
+        None => return false,
+    };
+    match loopback_port {
+        Some(port) => loopback_authorities(port).iter().any(|a| a == authority),
+        None => authority == request_host.trim().to_ascii_lowercase(),
+    }
+}
+
+/// Request guard run before routing.
+///
+/// Loopback binds (127.0.0.1/localhost/::1) need no token, but are protected
+/// against DNS rebinding and malicious tabs: the Host header must be a
+/// loopback authority on the bound port and any Origin must be one of those
+/// loopback origins (or a Tauri webview). Any other bind address (Docker
+/// "0.0.0.0", LAN) requires `MABI_API_TOKEN` to be set and matched against
+/// `Authorization: Bearer <token>` — launcher credentials and mod-apply are
+/// too sensitive to leave open once reachable off-box.
+fn check_auth(req: &Request, host: &str, port: u16) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+    let header = |name: &str| req.headers().iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string());
+    let loopback = is_loopback_bind(host);
+    let request_host = header("host");
+
+    if loopback && !loopback_host_ok(request_host.as_deref(), port) {
+        return Some(err("Invalid Host header", 403));
+    }
+
     if *req.method() == Method::Options {
         return None; // let CORS preflight through regardless of auth
     }
 
     // Reject cross-origin browser requests regardless of bind address. The
-    // CORS preflight below answers with a permissive header (needed for the
-    // Tauri app / a dev Vite server on a different port), which on its own
-    // would let ANY webpage's JS silently call this API via the user's own
-    // browser on localhost — loopback-bind trust only defends against
-    // remote network attackers, not a malicious tab the user has open. A
-    // same-origin request either sends no Origin header, or one matching
-    // this request's own Host header; anything else is rejected here before
-    // it reaches a handler, independent of whether a token is configured.
-    if let Some(origin) = req.headers().iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("origin"))
-        .map(|h| h.value.as_str().to_string())
-    {
-        let request_host = req.headers().iter()
-            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("host"))
-            .map(|h| h.value.as_str().to_string())
-            .unwrap_or_default();
-        let same_origin = origin.strip_prefix("http://").map(|rest| rest == request_host).unwrap_or(false)
-            || origin.strip_prefix("https://").map(|rest| rest == request_host).unwrap_or(false)
-            || origin.starts_with("tauri://");
-        if !same_origin {
+    // CORS preflight answers with a permissive header (needed for the Tauri
+    // app), which on its own would let ANY webpage's JS call this API via the
+    // user's own browser — loopback-bind trust only defends against remote
+    // network attackers, not a malicious tab the user has open.
+    if let Some(origin) = header("origin") {
+        let lp = if loopback { Some(port) } else { None };
+        if !origin_ok(&origin, request_host.as_deref().unwrap_or(""), lp) {
             return Some(err("Cross-origin requests are not allowed", 403));
         }
     }
 
-    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+    if loopback {
         return None;
     }
     let required = match std::env::var("MABI_API_TOKEN") {
@@ -1736,14 +1867,82 @@ pub fn run_server(host: &str, port: u16, stop: Arc<AtomicBool>) -> Result<()> {
     let server = Server::http(&addr)
         .map_err(|e| anyhow::anyhow!("API server bind failed on {}: {}", addr, e))?;
     log::info!("[API] Listening on http://{}", addr);
+    serve(&server, host, &stop);
+    Ok(())
+}
+
+/// Start the API server on a free loopback port in the background.
+/// Returns the port and the stop flag (used by the built-in MCP server).
+pub fn spawn_ephemeral() -> Result<(u16, Arc<AtomicBool>)> {
+    let server = Server::http("127.0.0.1:0")
+        .map_err(|e| anyhow::anyhow!("API server bind failed: {}", e))?;
+    let port = server.server_addr().to_ip()
+        .map(|a| a.port())
+        .ok_or_else(|| anyhow::anyhow!("API server has no TCP address"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    std::thread::spawn(move || serve(&server, "127.0.0.1", &stop2));
+    Ok((port, stop))
+}
+
+/// Routes that can run for seconds to minutes (network scans, game launch);
+/// served on their own thread instead of the single accept loop.
+fn is_long_running(req: &Request) -> bool {
+    *req.method() == Method::Post
+        && matches!(
+            req.url().split('?').next().unwrap_or(""),
+            "/api/v1/launcher/update/scan" | "/api/v1/launcher/launch"
+        )
+}
+
+/// Cap on concurrently running long requests (each holds a thread).
+const MAX_LONG_REQUESTS: usize = 4;
+static LONG_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One slot of `MAX_LONG_REQUESTS`; released on drop (also on panic).
+struct LongSlot;
+
+impl LongSlot {
+    fn acquire() -> Option<LongSlot> {
+        LONG_IN_FLIGHT
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LONG_REQUESTS).then_some(n + 1))
+            .ok()
+            .map(|_| LongSlot)
+    }
+}
+
+impl Drop for LongSlot {
+    fn drop(&mut self) {
+        LONG_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn serve(server: &Server, host: &str, stop: &AtomicBool) {
+    // The port actually bound (differs from the requested one for port 0).
+    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
     loop {
         if stop.load(Ordering::Relaxed) { break; }
         match server.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(Some(mut req)) => {
-                let resp = match check_auth(&req, host) {
-                    Some(unauthorized) => unauthorized,
-                    None => route(&mut req),
-                };
+                if let Some(unauthorized) = check_auth(&req, host, port) {
+                    let _ = req.respond(unauthorized);
+                    continue;
+                }
+                if is_long_running(&req) {
+                    // Off the accept loop so status/cancel/pause/MCP stay responsive.
+                    match LongSlot::acquire() {
+                        Some(slot) => {
+                            std::thread::spawn(move || {
+                                let _slot = slot;
+                                let resp = route(&mut req, port);
+                                let _ = req.respond(resp);
+                            });
+                        }
+                        None => { let _ = req.respond(err("Server busy, try again shortly", 503)); }
+                    }
+                    continue;
+                }
+                let resp = route(&mut req, port);
                 let _ = req.respond(resp);
             }
             Ok(None) => {}
@@ -1751,7 +1950,47 @@ pub fn run_server(host: &str, port: u16, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     log::info!("[API] Server stopped");
-    Ok(())
+}
+
+/// Bind `host:port` now (so bind errors are reported) and serve on a background
+/// thread. Returns the bound port and the stop flag.
+pub fn spawn_bound(host: &str, port: u16) -> Result<(u16, Arc<AtomicBool>)> {
+    let addr = format!("{}:{}", host, port);
+    let server = Server::http(&addr)
+        .map_err(|e| anyhow::anyhow!("API server bind failed on {}: {}", addr, e))?;
+    let bound = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    let host = host.to_string();
+    std::thread::spawn(move || serve(&server, &host, &stop2));
+    Ok((bound, stop))
+}
+
+/// `serve [--host HOST] [-p|--port PORT]` for executables without a full clap
+/// CLI (the GUI exe). Runs until killed, or until Enter in an interactive terminal.
+pub fn serve_from_args(args: &[String]) -> Result<()> {
+    let mut host = "127.0.0.1".to_string();
+    let mut port = DEFAULT_PORT;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--host" => host = it.next().cloned().ok_or_else(|| anyhow::anyhow!("--host needs a value"))?,
+            "-p" | "--port" => port = it.next().and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("--port needs a number"))?,
+            other => return Err(anyhow::anyhow!("unknown serve argument: {}", other)),
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            let stop2 = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let _ = std::io::stdin().read_line(&mut String::new());
+                stop2.store(true, Ordering::Relaxed);
+            });
+        }
+    }
+    run_server(&host, port, stop)
 }
 
 /// Spawn the API server on a background thread (loopback only). Returns the stop flag.
@@ -1773,3 +2012,116 @@ pub struct ServeArgs {
     pub port: u16,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_utf8_and_edges() {
+        assert_eq!(percent_decode("C%3A%5Cmods%5Ca.mod"), "C:\\mods\\a.mod");
+        assert_eq!(percent_decode("caf%C3%A9%20%ED%95%9C"), "café 한");
+        assert_eq!(percent_decode("%41"), "A");
+        assert_eq!(percent_decode("ab%4"), "ab%4");
+        assert_eq!(percent_decode("ab%"), "ab%");
+        assert_eq!(percent_decode("%zz%+1"), "%zz%+1");
+        assert_eq!(percent_decode("%FF"), "\u{FFFD}");
+    }
+
+    #[test]
+    fn mod_file_restricted_to_mods_folder() {
+        let dir = std::env::temp_dir().join(format!("mabi_api_modfile_{}", std::process::id()));
+        let mods = dir.join("mods");
+        std::fs::create_dir_all(mods.join("sub")).unwrap();
+        std::fs::write(mods.join("a.mod"), "x").unwrap();
+        std::fs::write(mods.join("sub").join("b.mod"), "y").unwrap();
+        std::fs::write(dir.join("secret.txt"), "s").unwrap();
+
+        assert!(resolve_mod_file(&mods, "a.mod").is_ok());
+        assert!(resolve_mod_file(&mods, "sub/b.mod").is_ok());
+        assert!(resolve_mod_file(&mods, mods.join("a.mod").to_str().unwrap()).is_ok());
+        assert!(resolve_mod_file(&mods, "../secret.txt").is_err());
+        assert!(resolve_mod_file(&mods, dir.join("secret.txt").to_str().unwrap()).is_err());
+        assert!(resolve_mod_file(&mods, mods.join("..").join("secret.txt").to_str().unwrap()).is_err());
+        assert!(resolve_mod_file(&mods, "sub").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cors_allows_authorization_header() {
+        let h = cors_headers().into_iter()
+            .find(|h| h.field.equiv("Access-Control-Allow-Headers")).unwrap();
+        assert!(h.value.as_str().contains("Authorization"));
+    }
+
+    #[test]
+    fn loopback_host_header_must_be_loopback_on_bound_port() {
+        assert!(loopback_host_ok(Some("127.0.0.1:7331"), 7331));
+        assert!(loopback_host_ok(Some("LOCALHOST:7331"), 7331));
+        assert!(loopback_host_ok(Some("[::1]:7331"), 7331));
+        assert!(loopback_host_ok(None, 7331));
+        assert!(!loopback_host_ok(Some("evil.example:7331"), 7331));
+        assert!(!loopback_host_ok(Some("127.0.0.1:8080"), 7331));
+        assert!(!loopback_host_ok(Some("127.0.0.1"), 7331));
+        assert!(loopback_host_ok(Some("localhost"), 80));
+    }
+
+    #[test]
+    fn origin_rules() {
+        // Loopback bind: only loopback origins on the bound port.
+        assert!(origin_ok("http://127.0.0.1:7331", "127.0.0.1:7331", Some(7331)));
+        assert!(origin_ok("http://localhost:7331", "127.0.0.1:7331", Some(7331)));
+        assert!(origin_ok("tauri://localhost", "127.0.0.1:7331", Some(7331)));
+        assert!(!origin_ok("http://evil.example:7331", "evil.example:7331", Some(7331)));
+        assert!(!origin_ok("http://localhost:5173", "127.0.0.1:7331", Some(7331)));
+        assert!(!origin_ok("null", "127.0.0.1:7331", Some(7331)));
+        // Non-loopback bind: same-origin with the request's Host.
+        assert!(origin_ok("http://10.0.0.5:7331", "10.0.0.5:7331", None));
+        assert!(!origin_ok("http://evil.example", "10.0.0.5:7331", None));
+    }
+
+    #[test]
+    fn rebinding_requests_are_rejected() {
+        let (port, stop) = spawn_ephemeral().unwrap();
+        let client = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{}/api/v1/status", port);
+        let status = |host: Option<String>, origin: Option<&str>| {
+            let mut rb = client.get(&url);
+            if let Some(h) = host { rb = rb.header("Host", h); }
+            if let Some(o) = origin { rb = rb.header("Origin", o); }
+            rb.send().unwrap().status().as_u16()
+        };
+        let r_ok = status(None, None);
+        let r_local_origin = status(None, Some(&format!("http://localhost:{}", port)));
+        let r_rebound = status(Some(format!("evil.example:{}", port)), None);
+        let r_cross = status(None, Some("http://evil.example"));
+        let r_rebound_origin = status(
+            Some(format!("evil.example:{}", port)),
+            Some(&format!("http://evil.example:{}", port)),
+        );
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(r_ok, 200);
+        assert_eq!(r_local_origin, 200);
+        assert_eq!(r_rebound, 403);
+        assert_eq!(r_cross, 403);
+        assert_eq!(r_rebound_origin, 403);
+    }
+
+    #[test]
+    fn long_slots_are_bounded_and_released() {
+        let slots: Vec<_> = std::iter::from_fn(LongSlot::acquire).take(MAX_LONG_REQUESTS + 1).collect();
+        assert!(slots.len() <= MAX_LONG_REQUESTS);
+        drop(slots);
+        assert!(LongSlot::acquire().is_some());
+    }
+
+    #[test]
+    fn status_reports_bound_port() {
+        let (port, stop) = spawn_ephemeral().unwrap();
+        let body = reqwest::blocking::Client::builder().no_proxy().build().unwrap()
+            .get(format!("http://127.0.0.1:{}/api/v1/status", port)).send().unwrap().text().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"]["port"].as_u64(), Some(port as u64));
+    }
+}
