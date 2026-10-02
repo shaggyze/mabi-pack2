@@ -13,6 +13,64 @@ use log::{debug, info, warn, trace};
 use mabi_pack2::{load_salts, list, extract, pack, pack_v1};
 
 #[cfg(target_os = "windows")]
+fn is_ran_as_admin_fast() -> bool {
+    use std::ptr;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+    use winapi::um::securitybaseapi::GetTokenInformation;
+    use winapi::um::winnt::{TokenElevation, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY};
+
+    unsafe {
+        let mut token: HANDLE = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0 {
+            let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+            if GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut _,
+                size,
+                &mut size,
+            ) != 0
+            {
+                return elevation.TokenIsElevated != 0;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn request_elevation_fast() {
+    use std::ptr;
+    use winapi::um::shellapi::ShellExecuteW;
+    use std::os::windows::ffi::OsStrExt;
+
+    let path = std::env::current_exe().unwrap();
+    let path_w: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = std::ffi::OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+
+    // Re-quote args so file paths with spaces survive the ShellExecuteW lpParameters string.
+    let orig_args: Vec<String> = std::env::args().skip(1).collect();
+    let args_str: String = orig_args.iter()
+        .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.clone() })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let params_w: Vec<u16> = std::ffi::OsStr::new(&args_str).encode_wide().chain(std::iter::once(0)).collect();
+    let params_ptr = if args_str.is_empty() { ptr::null() } else { params_w.as_ptr() };
+
+    unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            verb.as_ptr(),
+            path_w.as_ptr(),
+            params_ptr,
+            ptr::null(),
+            winapi::um::winuser::SW_SHOWNORMAL,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
 extern "C" {
     fn AttachConsole(dwProcessId: u32) -> i32;
     fn FreeConsole() -> i32;
@@ -121,6 +179,41 @@ fn main() -> Result<()> {
     }
 
     #[cfg(target_os = "windows")]
+    {
+        // Fast elevation check: if the user wants to run elevated, elevate instantly before loading WebView2 GUI
+        let appdata = env::var("APPDATA").unwrap_or_default();
+        let config_path = Path::new(&appdata)
+            .join("com.shaggyze.mabi-patcher")
+            .join("config.json");
+        let portable_config = Path::new("config.json");
+        
+        let target_config = if portable_config.exists() {
+            portable_config.to_path_buf()
+        } else {
+            config_path
+        };
+        
+        if target_config.exists() {
+            if let Ok(config_str) = std::fs::read_to_string(&target_config) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&config_str) {
+                    if v["patcher_run_elevated"].as_bool().unwrap_or(false) {
+                        if !is_ran_as_admin_fast() {
+                            request_elevation_fast();
+                            std::process::exit(0);
+                        }
+                    }
+                } else if config_str.contains("\"patcher_run_elevated\": true") || config_str.contains("\"patcher_run_elevated\":true") {
+                    // Fallback string matching if JSON parsing fails for some reason
+                    if !is_ran_as_admin_fast() {
+                        request_elevation_fast();
+                        std::process::exit(0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     if !is_webview2_installed() {
         let installed = show_webview2_missing_dialog();
         if !installed {
@@ -151,7 +244,7 @@ fn run_cli_logic() -> Result<()> {
                 let out_str = out.to_str().unwrap();
                 let salts = load_salts();
                 if file.to_lowercase().ends_with(".it") {
-                    return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+                    return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, false, false, None).map(|_| ());
                 } else {
                     return pack_v1::run_extract_v1(file, out_str);
                 }
@@ -259,7 +352,7 @@ fn run_cli_logic() -> Result<()> {
         let out_str = out.to_str().unwrap();
         if file.to_lowercase().ends_with(".it") {
             debug!("[CLI] Running .it search-extraction to: {}", out_str);
-            return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+            return extract::run_extract_with_key_search(file, out_str, None, &salts, vec![], None, false, false, false, None).map(|_| ());
         } else {
             debug!("[CLI] Running legacy .pack extraction to: {}", out_str);
             return pack_v1::run_extract_v1(file, out_str);
@@ -283,7 +376,7 @@ fn run_cli_logic() -> Result<()> {
                             let path_str = path.to_str().unwrap();
                             trace!("[CLI] Auto-extracting neighbor: {}", path_str);
                             if ext == "it" {
-                                let _ = extract::run_extract_with_key_search(path_str, out_str, None, &salts, vec![], None, false, None).map(|_| ());
+                                let _ = extract::run_extract_with_key_search(path_str, out_str, None, &salts, vec![], None, false, false, false, None);
                             } else {
                                 let _ = pack_v1::run_extract_v1(path_str, out_str);
                             }
@@ -306,7 +399,7 @@ fn run_cli_logic() -> Result<()> {
         } else {
             let filters: Vec<String> = sub_matches.get_many::<String>("filter").map_or(Vec::new(), |v| v.map(|s| s.clone()).collect());
             debug!("[CLI] Handling .it input with {} regex filters.", filters.len());
-            return extract::run_extract_with_key_search(input, output, key, &salts, filters, None, false, None).map(|_| ());
+            return extract::run_extract_with_key_search(input, output, key, &salts, filters, None, false, false, false, None).map(|_| ());
         }
     }
 

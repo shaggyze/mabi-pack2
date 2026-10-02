@@ -1,68 +1,44 @@
-use mabi_pack2::pmg::{ObjExportOptions, PmgFile};
+// Debug probe for the Nexon regional-auth login endpoint.
+// Credentials come from MABI_EMAIL / MABI_PASSWORD; never hardcode them here.
 
+#[cfg(not(target_os = "windows"))]
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    eprintln!("pmg_export uses the Nexon launcher module, which is only built on Windows");
+    std::process::exit(1);
+}
 
-    let mut input = r"C:\Users\Shaggy\Software\pmg\tmp_weapon_dkknighttwohandsword.pmg".to_string();
-    let mut output = r"C:\Users\Shaggy\Software\pmg\output.obj".to_string();
-    let mut opts = ObjExportOptions::default();
-    let mut i = 1;
+#[cfg(target_os = "windows")]
+fn main() {
+    let email = std::env::var("MABI_EMAIL").expect("set MABI_EMAIL");
+    let password = std::env::var("MABI_PASSWORD").expect("set MABI_PASSWORD");
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "--group" => {
-                i += 1;
-                opts.group = args.get(i).and_then(|s| s.parse().ok());
-            }
-            "--no-colors"    => opts.vertex_colors = false,
-            "--no-transform" => opts.full_transform = false,
-            s if !s.starts_with("--") && input == r"C:\Users\Shaggy\Software\pmg\tmp_weapon_dkknighttwohandsword.pmg" => {
-                input = s.to_string();
-            }
-            s if !s.starts_with("--") => {
-                output = s.to_string();
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    println!("Testing auth directly with plaintext on regional-auth with correct JSON fields...");
+    let dev = mabi_pack2::launcher::auth::device_id("");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("NexonLauncher.nxl-release-18.14.10-220-fc7480c-coreapp-3.3.0")
+        .build().unwrap();
 
-    let data = std::fs::read(&input).expect("failed to read PMG");
-    let pmg = PmgFile::parse(&data).expect("failed to parse PMG");
+    let req = serde_json::json!({
+        "autoLogin": false,
+        "captchaToken": "M".repeat(64),
+        "captchaVersion": "v3",
+        "clientId": "7853644408",
+        "deviceId": dev,
+        "id": email,
+        "localTime": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        "password": password,
+        "scope": "us.launcher.all",
+        "timeOffset": 0,
+    });
 
-    println!("mesh: {}", pmg.mesh_name);
-    for (gi, g) in pmg.groups.iter().enumerate() {
-        println!("group[{}] '{}' — {} sub-meshes", gi, g.label, g.lods.len());
-        for (li, lod) in g.lods.iter().enumerate() {
-            let total_faces = lod.face_indices.len() / 3;
-            println!(
-                "  lod[{}] mesh='{}' parts2='{}' stats='{}' normal='{}' colormap='{}' tex='{}' \
-                 verts={} faces={} strips={} skins={}",
-                li,
-                lod.mesh_name,
-                lod.parts2,
-                lod.stats,
-                lod.normal,
-                lod.color_map,
-                lod.texture_name,
-                lod.vertices.len(),
-                total_faces,
-                lod.strip_indices.len(),
-                lod.skins.len(),
-            );
-            // Sample major matrix translation
-            let m = &lod.major_matrix;
-            println!(
-                "         major_matrix translation = ({:.3}, {:.3}, {:.3})",
-                m[3], m[7], m[11]
-            );
-        }
-    }
-
-    let obj = pmg.to_obj_with(&opts);
-    std::fs::write(&output, &obj).expect("failed to write OBJ");
-    println!(
-        "Wrote {} bytes → {} [colors={} full_transform={} group={:?}]",
-        obj.len(), output, opts.vertex_colors, opts.full_transform, opts.group
-    );
+    let resp = client
+        .post("https://www.nexon.com/api/regional-auth/v1.0/no-auth/launcher/email/login")
+        .json(&req)
+        .send().unwrap();
+    println!("Status: {}", resp.status());
+    println!("Body: {}", resp.text().unwrap());
 }

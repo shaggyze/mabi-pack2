@@ -10,6 +10,7 @@
 # Logs
 *.log
 log.txt
+out.txt
 GEMINI.md
 CLAUDE.md
 
@@ -32,6 +33,9 @@ CLAUDE.md
 .windsurf
 skills-lock.json
 
+# Private, never push
+/.private_backup_diff
+
 # Generated / temp
 output.csv
 *.bak
@@ -42,6 +46,7 @@ build_log.txt
 
 # Scratch / diagnostics
 examples/
+*test*
 
 # Binaries
 *.exe

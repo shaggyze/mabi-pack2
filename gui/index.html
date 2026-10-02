@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>mabi-pack2 v1.4.1</title>
+  <title>mabi-patcher v2.0.0</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
@@ -23,30 +23,50 @@
       <div class="sidebar-header">
         <div class="logo-wrap">
           <div class="logo">MP</div>
-          <span class="version-tag">v1.4.1</span>
+          <span class="version-tag">v2.0.0</span>
         </div>
         <button id="sidebar-toggle" class="sidebar-collapse-btn" data-tooltip="tooltip_sidebar_toggle">◀</button>
       </div>
       <nav class="nav-links">
-        <button class="nav-item active" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
+        <button class="nav-item active" data-tab="dashboard" id="tab-dashboard" data-tooltip="tab_dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-text" id="tab-dashboard-text" data-i18n="tab_dashboard">Dashboard</span>
+        </button>
+        <button class="nav-item" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
           <span class="nav-icon">🔓</span>
-          <span class="nav-text" id="tab-extract-text">Extract</span>
+          <span class="nav-text" id="tab-extract-text" data-i18n="tab_extract">Extract</span>
         </button>
         <button class="nav-item" data-tab="pack" id="tab-pack" data-tooltip="tab_pack">
           <span class="nav-icon">📦</span>
-          <span class="nav-text" id="tab-pack-text">Pack</span>
+          <span class="nav-text" id="tab-pack-text" data-i18n="tab_pack">Pack</span>
         </button>
         <button class="nav-item" data-tab="list" id="tab-list" data-tooltip="tab_list">
           <span class="nav-icon">🔍</span>
-          <span class="nav-text" id="tab-list-text">List</span>
+          <span class="nav-text" id="tab-list-text" data-i18n="tab_list">List</span>
         </button>
         <button class="nav-item" data-tab="differ" id="tab-differ" data-tooltip="tab_differ">
-          <span class="nav-icon">⚡</span>
-          <span class="nav-text" id="tab-differ-text">Differ</span>
+          <span class="nav-icon">🔀</span>
+          <span class="nav-text" id="tab-differ-text" data-i18n="tab_differ">Differ</span>
+        </button>
+        <button class="nav-item" data-tab="jobs" id="tab-jobs" data-tooltip="tab_jobs">
+          <span class="nav-icon">📋</span>
+          <span class="nav-text" id="tab-jobs-text" data-i18n="tab_jobs">Jobs</span>
+        </button>
+        <button class="nav-item" data-tab="patcher" id="tab-patcher" data-tooltip="tab_patcher">
+          <span class="nav-icon">🛠️</span>
+          <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
+        </button>
+        <button class="nav-item" data-tab="features" id="tab-features" data-tooltip="tab_features">
+          <span class="nav-icon">🎛️</span>
+          <span class="nav-text" id="tab-features-text" data-i18n="tab_features">Features</span>
+        </button>
+        <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
+          <span class="nav-icon">🚀</span>
+          <span class="nav-text" id="tab-launcher-text" data-i18n="tab_launcher">Launcher</span>
         </button>
         <button class="nav-item" data-tab="settings" id="tab-settings" data-tooltip="tab_settings">
           <span class="nav-icon">⚙️</span>
-          <span class="nav-text" id="tab-settings-text">Settings</span>
+          <span class="nav-text" id="tab-settings-text" data-i18n="tab_settings">Settings</span>
         </button>
       </nav>
       <div class="sidebar-footer">
@@ -57,15 +77,278 @@
 
     <main class="container">
       <header class="top-header">
-        <h1 id="main-title">mabi-pack2</h1>
+        <h1 id="main-title">mabi-patcher</h1>
         <div id="progress-container">
           <div id="progress-bar"></div>
           <span id="eta-msg"></span>
         </div>
       </header>
 
+      <!-- Dashboard Tab -->
+      <div id="dashboard" class="tab-content active">
+        <div class="dashboard-grid">
+          <div class="dash-card dash-card-gauge">
+            <h3 id="dash-sys-title" data-i18n="dash_sys_title">System</h3>
+            <div class="gauges-row">
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="cpu-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span id="lbl_cpu" class="gauge-name" data-i18n="lbl_cpu">CPU</span>
+                  <span id="cpu-val" class="gauge-val">0%</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="mem-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span id="lbl_mem" class="gauge-name" data-i18n="lbl_mem">RAM</span>
+                  <span id="mem-val" class="gauge-val">0 MB</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="disk-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span class="gauge-name" data-i18n="lbl_disk">HDD</span>
+                  <span id="disk-val" class="gauge-val">0 GB</span>
+                </div>
+              </div>
+              <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+                  <path class="gauge-track" d="M10,65 A50,50 0 0,1 110,65"/>
+                  <path class="gauge-fill" id="net-arc" d="M10,65 A50,50 0 0,1 110,65" stroke-dasharray="0 157"/>
+                </svg>
+                <div class="gauge-label-wrap">
+                  <span class="gauge-name" data-i18n="lbl_net">NET</span>
+                  <span id="net-val" class="gauge-val">0 KB/s</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="dash-card" id="dash-pipe-card" style="display:none">
+            <h3 id="dash-pipe-title">Patch Progress</h3>
+            <div class="pipe-stat">
+              <div class="pipe-bar-bg"><div class="pipe-bar" id="dash-pipe-extract" style="width:0%"></div></div>
+              <span id="dash-pipe-label">Idle</span>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card recent-activity">
+          <h3 id="recentActivity" data-i18n="recentActivity">Recent Activity</h3>
+          <div id="activity-list" class="activity-list">
+            <div class="activity-item no-activity" id="noActivity" data-i18n="noActivity">No recent activity</div>
+          </div>
+        </div>
+
+        <div class="dash-card dash-card-mods">
+          <div class="roadmap-header">
+            <h3 id="dash_mods_title">Mod Loader</h3>
+            <button class="tab-btn" id="btn-mod-source-toggle" style="margin-left:auto;font-size:11px;padding:2px 8px;" data-i18n="btn_mod_online">Online</button>
+            <span id="dash-api-badge" class="api-badge" title="REST API active">API :7331</span>
+          </div>
+          <div id="dash-mods-path" class="mods-path"></div>
+          <div id="dash-mods-list" class="mods-list">
+            <div class="mods-empty" id="dash-mods-empty">No .mod files found in mods/</div>
+          </div>
+          <div class="mods-actions">
+            <button class="tab-btn" id="btn-open-mods-dir" data-tooltip="tooltip_open_mods_dir">Open Folder</button>
+            <button class="tab-btn" id="btn-new-mod-template" data-tooltip="tooltip_new_mod_template">New .mod Template</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Jobs Queue Tab -->
+      <div id="jobs" class="tab-content">
+        <div class="jobs-panel">
+          <div class="card">
+            <div class="card-header">
+              <span id="jobs-title-text">Job Queue</span>
+              <button class="tab-btn" id="btn-jobs-clear-done" style="margin-left:auto;font-size:11px;padding:2px 8px;" data-i18n="jobs_clear_done">Clear Done</button>
+            </div>
+            <div class="jobs-add-row">
+              <select id="jobs-type-select" class="form-input" style="max-width:130px;">
+                <option value="extract" data-i18n="job_type_extract">Extract</option>
+                <option value="pack" data-i18n="job_type_pack">Pack</option>
+                <option value="differ" data-i18n="job_type_differ">Differ</option>
+                <option value="merge" data-i18n="job_type_merge">Merge</option>
+                <option value="apply-mod" data-i18n="job_type_apply_mod">Apply Mod</option>
+              </select>
+              <input type="text" id="jobs-input" class="form-input" placeholder="Input path" data-i18n-placeholder="jobs_input_placeholder" />
+              <button class="tab-btn" id="btn-jobs-browse-input" data-tooltip="tooltip_browse">…</button>
+              <input type="text" id="jobs-output" class="form-input" placeholder="Output path" data-i18n-placeholder="jobs_output_placeholder" />
+              <button class="tab-btn" id="btn-jobs-browse-output" data-tooltip="tooltip_browse">…</button>
+              <input type="text" id="jobs-key" class="form-input" style="max-width:130px;" placeholder="key / salt" data-i18n-placeholder="jobs_key_placeholder" />
+              <button class="tab-btn primary" id="btn-jobs-add" data-i18n="jobs_add">Add</button>
+            </div>
+          </div>
+
+          <div class="card" id="jobs-list-card">
+            <div class="card-header">
+              <span id="jobs-list-header-text">Queue</span>
+              <span id="jobs-count-badge" style="font-size:11px;opacity:.6;margin-left:6px;"></span>
+              <button class="tab-btn primary" id="btn-jobs-run-all" style="margin-left:auto;" data-i18n="jobs_run_all">Run All</button>
+            </div>
+            <div id="jobs-list" class="jobs-list">
+              <div class="jobs-empty" id="jobs-empty-msg" data-i18n="jobs_empty_msg">No jobs queued. Add extract or pack jobs above.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Features Editor Tab -->
+      <div id="features" class="tab-content">
+        <div class="features-panel">
+          <div class="card">
+            <div class="card-header" id="features-title-text">Features.xml Editor</div>
+            <div class="form-group">
+              <label id="features-archive-label-text">Archive (.it / .pack)</label>
+              <div class="input-row">
+                <input type="text" id="features-archive" class="form-input" placeholder="path\to\package.it" />
+                <button class="tab-btn" id="btn-features-browse" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label id="features-key-label-text">Salt / Key (optional)</label>
+              <input type="text" id="features-key" class="form-input" placeholder="auto-detect" />
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-features-load">
+                <span id="btn-features-load-text">Load Features</span>
+              </button>
+              <button class="tab-btn success hidden" id="btn-features-save">
+                <span id="btn-features-save-text">Save to Archive</span>
+              </button>
+            </div>
+            <div id="features-status" class="hidden" style="margin-top:8px;font-size:12px;opacity:.7;"></div>
+          </div>
+
+          <!-- Servers section -->
+          <div class="card hidden" id="features-servers-card">
+            <div class="card-header" id="features-servers-header-text">Servers</div>
+            <div id="features-servers-list" class="features-server-list"></div>
+          </div>
+
+          <!-- Features section -->
+          <div class="card hidden" id="features-list-card">
+            <div class="card-header">
+              <span id="features-list-header-text">Features</span>
+              <span id="features-count-badge" style="font-size:11px;opacity:.6;margin-left:8px;"></span>
+              <input type="text" id="features-search" class="form-input" placeholder="Search features…"
+                style="margin-left:auto;max-width:180px;font-size:12px;padding:3px 8px;" />
+            </div>
+            <div id="features-list" class="features-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Launcher Tab -->
+      <div id="launcher" class="tab-content">
+        <div class="launcher-panel">
+          <div class="card">
+            <div class="card-header">
+              <span id="launcher-title-text">Nexon NA Launcher</span>
+            </div>
+            <div class="launcher-status-bar">
+              <span id="launcher-status-dot" class="status-dot"></span>
+              <span id="launcher-status-text">Not logged in</span>
+            </div>
+          </div>
+
+          <!-- Profile quick-select -->
+          <div class="card" id="launcher-profile-quick-card">
+            <div class="card-header" id="launcher-profile-quick-header-text">Profile</div>
+            <div class="input-row" style="gap:6px">
+              <select id="launcher-page-profile-select" class="form-input" style="flex:1">
+                <option value="">— No profiles saved —</option>
+              </select>
+              <button class="tab-btn" id="btn-launcher-manage-profiles" style="font-size:11px;white-space:nowrap">Manage</button>
+            </div>
+            <div id="launcher-profile-badge" style="font-size:11px;margin-top:6px;color:var(--text-muted)"></div>
+          </div>
+
+          <!-- Login form (hidden for custom-server profiles) -->
+          <div class="card" id="launcher-login-card">
+            <div class="card-header" id="launcher-login-header-text">Login</div>
+            <div class="form-group">
+              <label id="launcher-email-label-text">Nexon Email</label>
+              <input type="email" id="launcher-email" class="form-input" placeholder="you@example.com" autocomplete="username" />
+            </div>
+            <div class="form-group">
+              <label id="launcher-password-label-text">Password</label>
+              <input type="password" id="launcher-password" class="form-input" placeholder="••••••••" autocomplete="current-password" />
+            </div>
+                          <div class="form-group" id="launcher-verification-group" style="display:none;">
+                <label id="launcher-verification-label-text">Verify Code</label>
+                <input type="text" id="launcher-verification" class="form-input" placeholder="Email Verification Code" />
+              </div>
+              <div class="form-group form-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="launcher-remember" />
+                <span id="launcher-remember-text">Remember me</span>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-launcher-login">
+                <span id="btn-launcher-login-text">Login</span>
+              </button>
+              <button class="tab-btn" id="btn-launcher-import-session" title="Import session from the running Nexon Launcher (no password needed)">
+                <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Session info (shown after login) -->
+          <div class="card hidden" id="launcher-session-card">
+            <div class="card-header" id="launcher-session-header-text">Session</div>
+            <div class="launcher-session-row">
+              <span id="launcher-session-label-text">Session token:</span>
+              <span id="launcher-session-preview" class="launcher-token-preview">—</span>
+            </div>
+            <div class="launcher-session-row">
+              <span id="launcher-version-label-text">Game version:</span>
+              <span id="launcher-version-value">—</span>
+            </div>
+            <div class="launcher-session-row">
+              <span id="launcher-maintenance-label-text">Maintenance:</span>
+              <span id="launcher-maintenance-value">—</span>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn" id="btn-launcher-logout">
+                <span id="btn-launcher-logout-text">Log out</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Launch section -->
+          <div class="card" id="launcher-launch-card">
+            <div class="card-header" id="launcher-launch-header-text">Launch Game</div>
+            <div class="form-group">
+              <label id="launcher-client-label-text">Mabinogi Folder</label>
+              <div class="input-row">
+                <input type="text" id="launcher-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
+                <button class="tab-btn" id="btn-launcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="tab-btn primary" id="btn-launcher-launch">
+                <span id="btn-launcher-launch-text">Launch Mabinogi</span>
+              </button>
+              <button class="tab-btn" id="btn-profile-save-after-launch">Save to Profile</button>
+            </div>
+            <div id="launcher-launch-result" class="hidden"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Extract Tab -->
-      <div id="extract" class="tab-content active">
+      <div id="extract" class="tab-content">
         <div class="form-group">
           <label id="label_archive">Archive:</label>
           <div class="input-row">
@@ -168,6 +451,7 @@
               <div id="file-tree-empty" class="tree-empty-state" id="file-tree-empty">Browse for a .it or .pack archive above to view its contents</div>
             </div>
           </div>
+          <div class="resize-handle-v" id="list-split-handle"></div>
           <div class="preview-pane">
             <div class="preview-header">
                 <div class="preview-tabs">
@@ -196,9 +480,10 @@
                     </div>
                 </div>
 
-                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative">
-                    <div id="three-viewport" style="width:100%; height:100%; min-height:400px"></div>
+                <div id="preview-3d" class="preview-tab-content" style="padding:0;position:relative;">
+                    <div id="three-viewport" style="width:100%; height:400px; min-height:150px; flex-shrink:0"></div>
                     <div id="pmg-info" style="position:absolute;top:6px;left:8px;font-size:0.75em;opacity:0.7;pointer-events:none;"></div>
+                    <div id="preview-3d-resize-handle" style="height:8px;cursor:ns-resize;background:linear-gradient(to bottom,transparent 2px,var(--border-glass,rgba(255,255,255,0.18)) 2px,var(--border-glass,rgba(255,255,255,0.18)) 3px,transparent 3px);flex-shrink:0;user-select:none;" title="Drag to resize 3D viewport"></div>
                 </div>
             </div>
           </div>
@@ -210,6 +495,15 @@
             <button id="ctxConvIt" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_it">TO .IT</button>
             <button id="ctxConvPack" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_pack">TO .PACK</button>
         </div>
+
+        <!-- VFS edit toolbar -->
+        <div class="input-row vfs-toolbar hidden" id="vfs-toolbar" style="margin-top: 6px; gap: 6px;">
+            <span id="vfs-pending-badge" class="vfs-badge">0 changes</span>
+            <button id="btn-vfs-merge" class="tab-btn" style="flex:0; white-space:nowrap" data-tooltip="tooltip_vfs_merge">MERGE .IT</button>
+            <button id="btn-vfs-apply" class="run-btn" style="flex:1" data-tooltip="tooltip_vfs_apply">APPLY CHANGES</button>
+            <button id="btn-vfs-reset" class="tab-btn" style="color:var(--accent-warn,#f90)" data-tooltip="tooltip_vfs_reset">RESET</button>
+        </div>
+
       </div>
 
       <!-- Differ Tab -->
@@ -249,10 +543,389 @@
           <button id="differ-run" class="run-btn" data-tooltip="tooltip_differ_run">GENERATE DIFF</button>
       </div>
 
+      <!-- Patcher Tab -->
+      <div id="patcher" class="tab-content">
+      <div style="display:flex;flex-direction:column;gap:0;height:100%;padding:10px 12px;box-sizing:border-box">
+
+        <!-- Version row -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="display:flex;flex-direction:column;align-items:center;background:var(--bg-input);border-radius:6px;padding:4px 14px;min-width:78px">
+            <span style="font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em" data-i18n="patcher_installed">Installed</span>
+            <span style="font-size:1.1rem;font-weight:bold;color:var(--text-primary)" id="patcher-version-local">—</span>
+          </div>
+          <span style="color:var(--text-muted);font-size:1.1rem">→</span>
+          <div style="display:flex;flex-direction:column;align-items:center;background:var(--bg-input);border-radius:6px;padding:4px 14px;min-width:78px;border:1px solid rgba(0,229,255,0.18)">
+            <span style="font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em" data-i18n="patcher_available">Available</span>
+            <span style="font-size:1.1rem;font-weight:bold;color:var(--accent-cyan)" id="patcher-version-remote">—</span>
+          </div>
+          <button class="tab-btn" id="btn-patcher-check" style="margin-left:auto;font-size:0.75rem;padding:3px 10px" data-i18n="patcher_check">Check</button>
+        </div>
+
+        <!-- Game path -->
+        <div class="input-row" style="margin-bottom:6px">
+          <input type="text" id="patcher-game-path" class="form-input" placeholder="C:\Nexon\Mabinogi" />
+          <button class="tab-btn" id="btn-patcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
+        </div>
+
+        <!-- Action buttons + inline status -->
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <button class="tab-btn primary" id="btn-patcher-patch" style="padding:5px 18px;font-size:0.9rem" data-i18n="patcher_patch">▶ Patch</button>
+          <button class="tab-btn" id="btn-patcher-verify" data-i18n="patcher_verify">Verify</button>
+          <button class="tab-btn" id="btn-patcher-repair" data-i18n="patcher_repair">Repair</button>
+          <button class="tab-btn" id="btn-patcher-stop" style="display:none" data-i18n="patcher_stop">■ Stop</button>
+          <span id="patcher-status" style="font-size:0.8rem;color:var(--text-muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
+        </div>
+
+        <!-- Progress bar -->
+        <div id="patcher-progress-wrap" style="display:none;margin-bottom:8px">
+          <div style="position:relative;height:8px;background:var(--bg-input);border-radius:6px;overflow:hidden">
+            <div id="patcher-progress-bar" style="height:100%;width:0%;background:var(--accent-cyan);transition:width 0.2s ease;border-radius:6px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:3px">
+            <span id="patcher-progress-detail" style="font-size:0.72rem;color:var(--text-muted)"></span>
+            <span id="patcher-speed" style="font-size:0.72rem;color:var(--text-muted)"></span>
+          </div>
+        </div>
+
+        <!-- Per-worker progress bars (up to 10 simultaneous downloads/installs, like HyddwnLauncher) -->
+        <div id="patcher-bars" style="display:flex;flex-direction:column;gap:3px;min-height:60px;max-height:240px;overflow-y:auto"></div>
+      </div>
+      </div>
+
       <!-- Settings Tab -->
       <div id="settings" class="tab-content">
-        <div class="settings-section">
-            <h3 id="set_visuals">Visuals</h3>
+        <!-- Sub-tab bar -->
+        <div class="settings-subtabs">
+          <button class="settings-stab" data-stab="autostart">⏱ Autostart</button>
+          <button class="settings-stab" data-stab="engine">⚙️ Engine</button>
+          <button class="settings-stab" data-stab="fileassoc">🔗 File Assoc</button>
+          <button class="settings-stab" data-stab="launcher">🚀 Launcher</button>
+          <button class="settings-stab" data-stab="patcher">🛠️ Patcher</button>
+          <button class="settings-stab active" data-stab="themes">🎨 Themes</button>
+        </div>
+
+        <!-- Autostart sub-tab -->
+        <div id="stab-autostart" class="settings-stab-content">
+          <div class="settings-section">
+            <div class="sys-stat">
+              <span id="label_startup_extract">Auto extract</span>
+              <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_startup_switch">Switch to List tab on open</span>
+              <label class="switch"><input type="checkbox" id="settings-startup-switch"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_list_auto_expand">Auto-expand folders when filtering</span>
+              <label class="switch"><input type="checkbox" id="settings-list-auto-expand"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_audio_autoplay">Autoplay audio previews</span>
+              <label class="switch"><input type="checkbox" id="settings-audio-autoplay"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_audio_loop">Loop audio previews</span>
+              <label class="switch"><input type="checkbox" id="settings-audio-loop"><span class="slider"></span></label>
+            </div>
+            <div class="settings-radio-row">
+              <span id="label_list_auto_select">Auto-select on filter</span>
+              <div class="radio-group" id="list-auto-select-group">
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="none" id="select-none"> <span id="label_select_none">None</span></label>
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="first" id="select-first"> <span id="label_select_first">First</span></label>
+                <label class="radio-label"><input type="radio" name="list-auto-select" value="all" id="select-all"> <span id="label_select_all">All</span></label>
+              </div>
+            </div>
+            <div class="form-group" style="margin-top:12px;">
+              <label id="label_sequence_ignore_list" data-tooltip="tooltip_sequence_ignore_list">Sequence Ignore List (one filename per line):</label>
+              <textarea id="settings-sequence-ignore" rows="3" style="width:100%;resize:vertical;font-family:monospace;font-size:12px;" placeholder="uotiara_00001.it"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Engine sub-tab -->
+        <div id="stab-engine" class="settings-stab-content">
+          <div class="settings-section">
+            <div class="form-group">
+              <div style="display:flex; gap:12px;">
+                <div style="flex:1">
+                  <label id="label_region_key_read">Region Key (Read):</label>
+                  <input type="text" id="settings-region-key" placeholder="@6QeTuOaDgJlZcBm#9" data-tooltip="tooltip_region_key_read" />
+                </div>
+                <div style="flex:1">
+                  <label id="label_region_key_write">Region Key (Write):</label>
+                  <input type="text" id="settings-write-salt" placeholder="})wWb4?-sVGHNoPKpc" data-tooltip="tooltip_region_key_write" />
+                </div>
+              </div>
+            </div>
+            <div class="form-group">
+              <label id="label_log">Log Level:</label>
+              <select id="settings-log">
+                <option value="info">Info</option>
+                <option value="warn">Warning</option>
+                <option value="error">Error</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label id="label_pack_v1_version">Legacy .pack format version:</label>
+              <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
+            </div>
+            <div class="sys-stat" style="margin-top:10px;">
+              <span data-i18n="label_parallel_ops">Parallel processing (Rayon multi-core)</span>
+              <label class="switch"><input type="checkbox" id="settings-parallel-ops" checked><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" style="margin-top:6px;">
+              <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
+              <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
+            </div>
+            <div style="margin-top:10px;">
+              <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
+              <div style="display:flex;gap:6px;align-items:center;margin-top:3px;">
+                <input type="text" id="config-path-display" readonly style="flex:1;font-size:0.75em;opacity:0.8;cursor:default;" />
+                <button id="btn_open_config_dir" class="tab-btn" style="white-space:nowrap;padding:4px 8px;font-size:0.75em;" data-tooltip="tooltip_open_config_dir">Open Folder</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;">
+              <button id="btn_wipe" class="tab-btn" style="flex:1" data-tooltip="tooltip_wipe">Wipe Salt History</button>
+              <button id="btn_reset_config" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_reset_config">Reset Settings</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- File Assoc sub-tab -->
+        <div id="stab-fileassoc" class="settings-stab-content">
+          <div class="settings-section">
+            <h4 id="set_shell" style="margin:0 0 10px 0;">Shell &amp; Registry</h4>
+            <div class="sys-stat">
+              <span id="label_assoc_it">Associate .it files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-it"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_pack">Associate .pack files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-pack"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_settings_assoc_it_full">Add 'Full Sequence' to Explorer context menu</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-it-full"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_dds">Associate .dds files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_pmg">Associate .pmg files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-pmg"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_assoc_xmlcompiled">Associate .xml.compiled files</span>
+              <label class="switch"><input type="checkbox" id="settings-assoc-xmlcompiled"><span class="slider"></span></label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;">
+              <button id="btn_admin" class="tab-btn" style="flex:1" data-tooltip="tooltip_admin">Apply Registry (Admin)</button>
+              <button id="btn_wipe_assoc" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_wipe_assoc">Wipe Registry Associations</button>
+            </div>
+
+            <h4 id="set_conversion" style="margin:16px 0 10px 0;border-top:1px solid var(--border-glass);padding-top:12px;">Conversion Defaults</h4>
+            <div class="sys-stat">
+              <span id="label_settings_auto_png">Auto-convert .dds → .png on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-png"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_settings_auto_dds">Auto-convert .png → .dds on import</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_settings_auto_features">Auto-convert features.xml.compiled → .xml on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-features"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_settings_auto_pmg">Auto-convert .pmg → .obj on extract</span>
+              <label class="switch"><input type="checkbox" id="settings-auto-pmg"><span class="slider"></span></label>
+            </div>
+          </div>
+        </div>
+
+                  <!-- Launcher sub-tab -->
+        <div id="stab-launcher" class="settings-stab-content">
+          <div class="settings-section">
+            <h4 style="margin:0 0 10px 0;">Login & Auth</h4>
+            <div class="sys-stat">
+              <span id="label-legacy-auth">Use legacy direct API login (Hyddwn) instead of WebView</span>
+              <label class="switch"><input type="checkbox" id="launcher-legacy-auth"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label-autoclose-login">Auto-close WebView login window on success</span>
+              <label class="switch"><input type="checkbox" id="launcher-autoclose-login" checked><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" style="margin-top: 8px;">
+              <span id="label-reset-login">Clear WebView Login Cache (Fixes stuck 'Stay Logged In')</span>
+              <button class="btn btn-secondary" id="btn-reset-login-cache" style="padding:4px 12px; font-size:12px;">Reset Cache</button>
+            </div>
+            <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
+            <!-- Profile manager (moved from Launcher tab) -->
+            <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
+              <div class="card-header" id="launcher-profiles-header-text">Profiles</div>
+              <!-- Detect from installed launchers -->
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+                <button class="tab-btn" id="btn-profile-detect">Detect from installed launchers</button>
+                <span id="profile-detect-status" style="font-size:11px;color:var(--text-muted)"></span>
+              </div>
+              <!-- Detected profiles import area (hidden until detect is run) -->
+              <div id="detected-profiles-area" style="display:none;margin-bottom:8px;border:1px solid var(--border-glass);border-radius:6px;padding:8px;">
+                <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text-muted)">DETECTED LAUNCHERS</div>
+                <div id="detected-profiles-list"></div>
+              </div>
+              <div class="profile-selector-row">
+                <select id="launcher-profile-select" class="form-input profile-select">
+                  <option value="">— No profiles saved —</option>
+                </select>
+                <button class="tab-btn" id="btn-profile-new" title="New profile">+</button>
+                <button class="tab-btn" id="btn-profile-delete" title="Delete profile">🗑</button>
+              </div>
+              <div id="launcher-profile-editor" class="hidden">
+                <div class="form-group">
+                  <label id="launcher-profile-name-label-text">Profile Name</label>
+                  <input type="text" id="launcher-profile-name" class="form-input" placeholder="Main Account" />
+                </div>
+                <div class="form-group">
+                  <label>Email</label>
+                  <input type="text" id="launcher-profile-email" class="form-input" placeholder="user@example.com" />
+                </div>
+                <div class="form-group">
+                  <label id="launcher-profile-client-label-text">Mabinogi Folder</label>
+                  <div class="input-row">
+                    <input type="text" id="launcher-profile-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
+                    <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
+                  </div>
+                </div>
+                <div id="launcher-profile-server-fields" style="display:none">
+                  <div style="font-size:11px;font-weight:600;margin:8px 0 4px;color:var(--text-muted)">CUSTOM SERVER</div>
+                  <div style="display:grid;grid-template-columns:1fr 80px 1fr 80px;gap:6px;align-items:center;">
+                    <input type="text" id="launcher-profile-login-ip" class="form-input" placeholder="Login IP" />
+                    <input type="number" id="launcher-profile-login-port" class="form-input" placeholder="Port" min="1" max="65535" />
+                    <input type="text" id="launcher-profile-chat-ip" class="form-input" placeholder="Chat IP" />
+                    <input type="number" id="launcher-profile-chat-port" class="form-input" placeholder="Port" min="1" max="65535" />
+                  </div>
+                  <div style="display:grid;grid-template-columns:auto;gap:4px;margin-top:4px;font-size:11px;color:var(--text-muted)">
+                    <span>Login IP / Port &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Chat IP / Port</span>
+                  </div>
+                </div>
+                <div class="form-group form-row" style="margin-top:6px">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="launcher-profile-custom-server" />
+                    <span>Use custom server</span>
+                  </label>
+                </div>
+                <div class="form-group form-row">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="launcher-profile-autologin" />
+                    <span id="launcher-profile-autologin-text">Auto-login with saved session</span>
+                  </label>
+                </div>
+                <div class="form-actions">
+                  <button class="tab-btn primary" id="btn-profile-save">Save Profile</button>
+                  <button class="tab-btn" id="btn-profile-cancel">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <!-- Update check -->
+            <div class="sys-stat" style="margin-top:8px;">
+              <span id="launcher-check-update-label">Game Update Check</span>
+              <button class="tab-btn" id="btn-launcher-check-update" data-tooltip="tooltip_check_update">Check Now</button>
+            </div>
+            <div id="launcher-update-status" class="launcher-update-status hidden" style="margin-top:6px;"></div>
+
+            <!-- Kanan Mods -->
+            <div class="card" id="kanan-mods-card" style="margin-top:12px;">
+              <div class="card-header">Kanan Mods (LibLoader)</div>
+              <div class="form-group" style="margin-bottom:6px;">
+                <label style="font-size:12px;opacity:.75;">Loader.cfg path</label>
+                <div class="input-row">
+                  <input type="text" id="kanan-cfg-path" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata\Loader.cfg" readonly style="font-size:12px;" />
+                  <button class="tab-btn" id="btn-kanan-browse">BROWSE</button>
+                </div>
+              </div>
+              <div id="kanan-mods-list" style="margin-top:4px;max-height:220px;overflow-y:auto;"></div>
+              <div class="form-actions" style="margin-top:8px;">
+                <button class="tab-btn primary hidden" id="btn-kanan-save">Save Changes</button>
+              </div>
+              <div id="kanan-status" class="hidden" style="font-size:12px;margin-top:4px;"></div>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- Patcher sub-tab -->
+        <div id="stab-patcher" class="settings-stab-content">
+          <div class="settings-section">
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_auto_update">Auto-update on launch</span>
+              <label class="switch"><input type="checkbox" id="patcher-auto-update"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_focus_on_start">Switch to Patcher tab on start</span>
+              <label class="switch"><input type="checkbox" id="patcher-focus-on-start"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_run_elevated">Always run as Administrator</span>
+              <label class="switch"><input type="checkbox" id="patcher-run-elevated"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+              <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_max_workers">Parallel workers</label>
+              <input type="number" id="patcher-max-workers" class="form-input" min="1" max="32" value="10" style="width:64px">
+            </div>
+            <div class="form-group" style="margin-top:10px">
+              <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:4px" data-i18n="label_patcher_ignore_list">Ignore List (one pattern per line, e.g. <code>data/ui.it</code> or <code>*.pack</code>)</label>
+              <textarea id="patcher-ignore-list" class="form-input" rows="4" style="width:100%;resize:vertical;font-family:monospace;font-size:0.82rem" placeholder="data/mymod.it&#10;*.pack&#10;data/sound/*"></textarea>
+              <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px" data-i18n="hint_patcher_ignore_list">Files matching these patterns will never be overwritten during patching. Wildcards (* ?) supported.</div>
+            </div>
+            <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+              <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_installed_ver">Installed version</label>
+              <span id="patcher-settings-version" style="font-size:0.85rem;color:var(--accent-cyan)">—</span>
+              <button class="tab-btn" id="btn-patcher-settings-check" style="padding:2px 8px;font-size:0.78rem" data-i18n="btn_patcher_version_refresh">Refresh</button>
+            </div>
+            <div class="form-group" style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
+              <button class="tab-btn" id="btn-patcher-force-repair" style="flex:1" data-i18n="btn_patcher_force_repair">Force Re-download All</button>
+              <button class="tab-btn" id="btn-patcher-clear-cache" data-i18n="btn_patcher_clear_cache">Clear Cache</button>
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:10px" data-i18n="label_custom_server_section">Custom Patch Server</h4>
+            <div class="sys-stat" style="margin-top:4px">
+              <span data-i18n="label_custom_server_enable">Override patch server URL</span>
+              <label class="switch"><input type="checkbox" id="patcher-hyddwn-enable"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" id="patcher-hyddwn-url-row" style="margin-top:6px;display:none">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_patcher_server_url">Patch Server URL</label>
+              <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:10px" id="label_launch_mode">Launch Mode</h4>
+            <div class="sys-stat">
+              <span id="label_launch_nexon_launcher">Via Nexon Launcher</span>
+              <label class="switch"><input type="checkbox" id="launch-use-nexon-launcher"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" style="margin-top:8px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_launch_cmd_override">Custom Launch Command (leave blank for auto)</label>
+              <textarea id="launch-cmd-override" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="{client_dir}\Client.exe {args} /P:{passport}"></textarea>
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px" id="label_launch_hooks">Launch Hooks</h4>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_patch_cmd">Before Patch</label>
+              <textarea id="pre-patch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before patching)"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_launch_cmd">Before Launch</label>
+              <textarea id="pre-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before starting client)"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_post_launch_cmd">After Launch</label>
+              <textarea id="post-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run after client starts)"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Themes sub-tab -->
+        <div id="stab-themes" class="settings-stab-content active">
+          <div class="settings-section">
             <div class="form-group">
               <label id="label_lang">Language:</label>
               <select id="settings-lang">
@@ -279,137 +952,102 @@
                 <option value="sunset-light">Sunset (Light)</option>
                 <option value="cream-dark">Cream (Dark)</option>
                 <option value="cream-light">Cream (Light)</option>
+                <optgroup label="— Terminal —">
+                  <option value="matrix-dark">Matrix (Dark)</option>
+                  <option value="terminal-dark">Terminal Amber (Dark)</option>
+                  <option value="cyber-dark">Cyber / Neon (Dark)</option>
+                  <option value="cyber-light">Cyber / Neon (Light)</option>
+                  <option value="neon-dark">Neon (Dark)</option>
+                </optgroup>
               </select>
             </div>
-            <div class="form-group">
-                <div style="display:flex; gap:12px;">
-                    <div style="flex:1">
-                        <label id="label_region_key_read">Region Key (Read):</label>
-                        <input type="text" id="settings-region-key" placeholder="@6QeTuOaDgJlZcBm#9" data-tooltip="tooltip_region_key_read" />
-                    </div>
-                    <div style="flex:1">
-                        <label id="label_region_key_write">Region Key (Write):</label>
-                        <input type="text" id="settings-write-salt" placeholder="})wWb4?-sVGHNoPKpc" data-tooltip="tooltip_region_key_write" />
-                    </div>
+
+            <!-- Theme Customizer -->
+            <div class="theme-customizer">
+              <div class="tc-header">
+                <span class="tc-title">Customize</span>
+                <div class="tc-preset-row">
+                  <select id="custom-theme-select">
+                    <option value="">— saved themes —</option>
+                  </select>
+                  <button id="btn-theme-load" class="tab-btn tc-btn">Load</button>
+                  <button id="btn-theme-delete" class="tab-btn tc-btn" style="color:var(--accent-warn,#e07070);">Delete</button>
+                  <input type="text" id="custom-theme-name" placeholder="Name…" style="width:90px;" />
+                  <button id="btn-theme-save" class="tab-btn tc-btn">Save</button>
+                  <button id="btn-theme-reset" class="tab-btn tc-btn" style="margin-left:6px;">Reset</button>
                 </div>
+              </div>
+
+              <div class="tc-grid">
+                <!-- Background colors -->
+                <div class="tc-group">
+                  <span class="tc-group-label">Background</span>
+                  <div class="tc-swatches">
+                    <label class="tc-swatch"><input type="color" id="tc-bg-deep" /><span>Deep</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-bg-sidebar" /><span>Sidebar</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-bg-input" /><span>Input</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-bg-surface" /><span>Surface</span></label>
+                  </div>
+                </div>
+
+                <!-- Accent colors -->
+                <div class="tc-group">
+                  <span class="tc-group-label">Accent</span>
+                  <div class="tc-swatches">
+                    <label class="tc-swatch"><input type="color" id="tc-accent-cyan" /><span>Primary</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-accent-blue" /><span>Secondary</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-border-color" /><span>Border</span></label>
+                  </div>
+                </div>
+
+                <!-- Text colors -->
+                <div class="tc-group">
+                  <span class="tc-group-label">Text</span>
+                  <div class="tc-swatches">
+                    <label class="tc-swatch"><input type="color" id="tc-text-primary" /><span>Primary</span></label>
+                    <label class="tc-swatch"><input type="color" id="tc-text-muted" /><span>Muted</span></label>
+                  </div>
+                </div>
+
+                <!-- Opacity sliders -->
+                <div class="tc-group tc-group-wide">
+                  <span class="tc-group-label">Transparency</span>
+                  <div class="tc-slider-row">
+                    <span>Surface</span>
+                    <input type="range" id="tc-surface-opacity" min="0" max="100" value="60" />
+                    <span id="tc-surface-opacity-val" class="tc-val">60%</span>
+                  </div>
+                  <div class="tc-slider-row">
+                    <span>Border</span>
+                    <input type="range" id="tc-border-opacity" min="0" max="100" value="30" />
+                    <span id="tc-border-opacity-val" class="tc-val">30%</span>
+                  </div>
+                </div>
+
+                <!-- Font -->
+                <div class="tc-group tc-group-wide">
+                  <span class="tc-group-label">Font</span>
+                  <div class="tc-slider-row" style="gap:8px;">
+                    <select id="tc-font-family" style="flex:1;font-size:12px;padding:3px 6px;">
+                      <option value="">Default (Segoe UI)</option>
+                      <option value="'Consolas','Courier New',monospace">Consolas (mono)</option>
+                      <option value="'Arial',sans-serif">Arial</option>
+                      <option value="'Verdana',sans-serif">Verdana</option>
+                      <option value="'Georgia',serif">Georgia (serif)</option>
+                      <option value="'JetBrains Mono','Fira Code',monospace">JetBrains Mono</option>
+                    </select>
+                  </div>
+                  <div class="tc-slider-row">
+                    <span>Size</span>
+                    <input type="range" id="tc-font-size" min="11" max="18" value="14" />
+                    <span id="tc-font-size-val" class="tc-val">14px</span>
+                  </div>
+                </div>
+              </div>
             </div>
+          </div>
         </div>
 
-        <div class="settings-section">
-            <h3 id="set_startup">Startup & Automation</h3>
-            <div class="sys-stat">
-                <span id="label_startup_extract">Auto extract</span>
-                <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_startup_switch">Switch to List tab on open</span>
-                <label class="switch"><input type="checkbox" id="settings-startup-switch"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_list_auto_expand">Auto-expand folders when filtering</span>
-                <label class="switch"><input type="checkbox" id="settings-list-auto-expand"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_audio_autoplay">Autoplay audio previews</span>
-                <label class="switch"><input type="checkbox" id="settings-audio-autoplay"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_audio_loop">Loop audio previews</span>
-                <label class="switch"><input type="checkbox" id="settings-audio-loop"><span class="slider"></span></label>
-            </div>
-            <div class="settings-radio-row">
-                <span id="label_list_auto_select">Auto-select on filter</span>
-                <div class="radio-group" id="list-auto-select-group">
-                    <label class="radio-label"><input type="radio" name="list-auto-select" value="none" id="select-none"> <span id="label_select_none">None</span></label>
-                    <label class="radio-label"><input type="radio" name="list-auto-select" value="first" id="select-first"> <span id="label_select_first">First</span></label>
-                    <label class="radio-label"><input type="radio" name="list-auto-select" value="all" id="select-all"> <span id="label_select_all">All</span></label>
-                </div>
-            </div>
-            <div class="form-group" style="margin-top:12px;">
-                <label id="label_sequence_ignore_list" data-tooltip="tooltip_sequence_ignore_list">Sequence Ignore List (one filename per line):</label>
-                <textarea id="settings-sequence-ignore" rows="3" style="width:100%;resize:vertical;font-family:monospace;font-size:12px;" placeholder="uotiara_00001.it"></textarea>
-            </div>
-        </div>
-
-        <div class="settings-section">
-            <h3 id="set_shell">Shell & Registry</h3>
-            <div class="sys-stat">
-                <span id="label_assoc_it">Associate .it files</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-it"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_assoc_pack">Associate .pack files</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-pack"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_settings_assoc_it_full">Add 'Full Sequence' to Explorer context menu</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-it-full"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_assoc_dds">Associate .dds files</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-dds"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_assoc_pmg">Associate .pmg files</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-pmg"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_assoc_xmlcompiled">Associate .xml.compiled files</span>
-                <label class="switch"><input type="checkbox" id="settings-assoc-xmlcompiled"><span class="slider"></span></label>
-            </div>
-
-            <h4 id="set_conversion" style="margin: 15px 0 10px 0; border-bottom: 1px solid var(--border-glass); padding-bottom: 5px;">Conversion Defaults</h4>
-            <div class="sys-stat">
-                <span id="label_settings_auto_png">Auto-convert .dds to .png on extract</span>
-                <label class="switch"><input type="checkbox" id="settings-auto-png"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-                <span id="label_settings_auto_dds">Auto-convert .png to .dds on import</span>
-                <label class="switch"><input type="checkbox" id="settings-auto-dds"><span class="slider"></span></label>
-            </div>
-
-            <h4 id="set_pack_opts" style="margin: 15px 0 10px 0; border-bottom: 1px solid var(--border-glass); padding-bottom: 5px;">Pack Options</h4>
-            <div class="form-group">
-                <label id="label_pack_v1_version">Legacy .pack format version:</label>
-                <input type="number" id="settings-pack-v1-version" value="999" min="1" style="width: 80px;" />
-            </div>
-
-            <div style="display:flex;gap:8px;margin-top:10px;">
-                <button id="btn_admin" class="tab-btn" style="flex:1" data-tooltip="tooltip_admin">Apply Registry (Admin)</button>
-                <button id="btn_wipe_assoc" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_wipe_assoc">Wipe Registry Associations</button>
-            </div>
-        </div>
-
-        <div class="settings-section">
-            <h3 id="set_engine">Engine</h3>
-            <div class="form-group">
-              <label id="label_log">Log Level:</label>
-              <select id="settings-log">
-                <option value="info">Info</option>
-                <option value="warn">Warning</option>
-                <option value="error">Error</option>
-                <option value="debug">Debug</option>
-                <option value="trace">Trace</option>
-              </select>
-            </div>
-            <button id="btn_wipe" class="tab-btn" data-tooltip="tooltip_wipe">Wipe Salt History</button>
-            <div class="form-group" style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px;">
-                <div class="sys-stat">
-                    <span data-i18n="label_portable_mode">Portable mode (save config next to .exe)</span>
-                    <label class="switch"><input type="checkbox" id="settings-portable-mode"><span class="slider"></span></label>
-                </div>
-                <div style="margin-top:8px;">
-                    <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
-                    <div style="display:flex;gap:6px;align-items:center;margin-top:3px;">
-                        <input type="text" id="config-path-display" readonly style="flex:1;font-size:0.75em;opacity:0.8;cursor:default;" />
-                        <button id="btn_open_config_dir" class="tab-btn" style="white-space:nowrap;padding:4px 8px;font-size:0.75em;" data-tooltip="tooltip_open_config_dir">Open Folder</button>
-                    </div>
-                </div>
-                <div style="display:flex;gap:8px;margin-top:8px;">
-                    <button id="btn_reset_config" class="tab-btn" style="flex:1;color:#e07070;" data-tooltip="tooltip_reset_config">Reset Settings</button>
-                </div>
-            </div>
-        </div>
       </div>
 
       <div class="log-container">
@@ -428,12 +1066,45 @@
     <div class="menu-item" id="menu-extract"><span id="ctx_extract">Extract</span></div>
     <div class="menu-item" id="menu-copy-name"><span id="ctx_copy_name">Copy Name</span></div>
     <div class="menu-item" id="menu-copy-key"><span id="ctx_copy_key">Copy Key</span></div>
+    <div class="menu-divider" id="menu-divider-rename"></div>
+    <div class="menu-item" id="menu-rename"><span id="ctx_rename">Rename</span></div>
+    <div class="menu-item" id="menu-delete"><span id="ctx_delete">Delete</span></div>
     <div class="menu-divider"></div>
     <div class="menu-item" id="menu-conv-png"><span id="ctx_conv_png">Convert to PNG</span></div>
     <div class="menu-item" id="menu-conv-dds"><span id="ctx_conv_dds">Convert to DDS</span></div>
+    <div class="menu-item" id="menu-conv-xml"><span id="ctx_conv_xml">Decompile to XML</span></div>
+    <div class="menu-item" id="menu-conv-obj"><span id="ctx_conv_obj">Export to OBJ</span></div>
+  </div>
+
+  <!-- VFS Conflict Resolution Dialog -->
+  <div id="conflict-dialog" class="conflict-overlay hidden">
+    <div class="conflict-modal">
+      <div class="conflict-header">File Conflict</div>
+      <div class="conflict-body">
+        <p class="conflict-msg">
+          <strong id="conflict-filename"></strong><br>already exists in the archive.
+        </p>
+        <div class="conflict-rename-row">
+          <label class="conflict-rename-label">Rename to:</label>
+          <input type="text" id="conflict-rename-input" class="form-input conflict-rename-input" />
+        </div>
+        <label class="checkbox-label conflict-apply-all-row" id="conflict-apply-all-row">
+          <input type="checkbox" id="conflict-apply-all" />
+          <span>Apply to all remaining conflicts</span>
+        </label>
+      </div>
+      <div class="conflict-actions">
+        <button class="run-btn conflict-btn-overwrite" id="conflict-btn-overwrite">Overwrite</button>
+        <button class="tab-btn conflict-btn-rename" id="conflict-btn-rename">Rename</button>
+        <button class="tab-btn conflict-btn-skip" id="conflict-btn-skip">Skip</button>
+      </div>
+    </div>
   </div>
 </body>
 </html>
 >
 >
 >
+
+
+
