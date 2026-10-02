@@ -10,6 +10,7 @@
 # Logs
 *.log
 log.txt
+out.txt
 GEMINI.md
 CLAUDE.md
 
@@ -45,6 +46,7 @@ build_log.txt
 
 # Scratch / diagnostics
 examples/
+*test*
 
 # Binaries
 *.exe
