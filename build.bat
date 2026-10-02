@@ -7,6 +7,9 @@ echo ========================================
 :: Dynamically get version from tauri.conf.json using PowerShell
 for /f "usebackq tokens=*" %%v in (`powershell -NoProfile -Command "(Get-Content gui/src-tauri/tauri.conf.json | ConvertFrom-Json).version"`) do set VERSION=%%v
 
+:: Turn on the repo pre-commit gate (scripts/precommit-check.sh) for local commits
+git config core.hooksPath .githooks >nul 2>&1
+
 echo [1/6] Cleaning up old build artifacts...
 taskkill /F /IM mabi-patcher.exe /T >nul 2>&1
 timeout /t 2 /nobreak >nul

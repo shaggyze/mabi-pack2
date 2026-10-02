@@ -31,6 +31,10 @@ pub fn get_preview_ext(entry_name: &str) -> Option<&str> {
         Some("pmg")
     } else if name.ends_with(".wav") || name.ends_with(".mp3") || name.ends_with(".ogg") || name.ends_with(".nxa") {
         Some("audio")
+    } else if name.ends_with(".gm") {
+        Some("gm")
+    } else if name.ends_with(".eff") {
+        Some("text")
     } else if name.ends_with(".anievent") {
         Some("anievent")
     } else if name.ends_with(".ani") || name.ends_with(".mov") || name.ends_with(".frm") ||

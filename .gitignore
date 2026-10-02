@@ -25,7 +25,10 @@ CLAUDE.md
 
 # Agent / Temp
 .gemini
-.claude
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/agents/
 .agents
 .clinerules
 .cursor

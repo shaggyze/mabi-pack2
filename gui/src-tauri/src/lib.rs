@@ -2267,6 +2267,99 @@ async fn get_preview_ext(
 
 
 
+fn usable_key(k: Option<String>) -> Option<String> {
+    match k {
+        Some(k) if k.is_empty() || k == "Search/Default" || k == "N/A" || k == "UNENCRYPTED" => None,
+        other => other,
+    }
+}
+
+/// Full decrypted bytes of one archive entry, sent as a binary IPC response so the
+/// 3D preview can parse PMG/DDS/GM data in the frontend (as the website preview does).
+#[tauri::command]
+async fn get_entry_bytes(
+    archive_path: String,
+    entry_name: String,
+    key: Option<String>,
+    entries_key: Option<String>,
+    iv0: Option<u32>,
+    h_off: Option<u64>,
+    mode: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let key = usable_key(key);
+    let entries_key = usable_key(entries_key);
+    let bytes = if let (Some(iv), Some(off), Some(m_str)) = (iv0, h_off, mode) {
+        let m = match m_str.as_str() {
+            "Xor"      => encryption::Snow2Mode::Xor,
+            "ModernBE" => encryption::Snow2Mode::ModernBE,
+            "ModernLE" => encryption::Snow2Mode::ModernLE,
+            "LegacyBE" => encryption::Snow2Mode::LegacyBE,
+            "LegacyLE" => encryption::Snow2Mode::LegacyLE,
+            _          => encryption::Snow2Mode::Sub,
+        };
+        common_ext::get_entry_data_exact(&archive_path, &entry_name, key, entries_key, iv, off, m).map_err(|e| e.to_string())?.0
+    } else {
+        common_ext::get_entry_data(&archive_path, &entry_name, key).map_err(|e| e.to_string())?.0
+    };
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Raw bytes of a loose file on disk (binary IPC response).
+#[tauri::command]
+async fn read_loose_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    std::fs::read(&path).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
+}
+
+/// Finds `<texture>.dds` for a loose model: the model's folder first, then up to three
+/// parent folders searched recursively (stopping at a folder named `data`, the user's
+/// home folder or a drive root).
+#[tauri::command]
+async fn find_loose_texture(model_path: String, texture: String) -> Option<String> {
+    // The name comes from the model file, so it must be a bare file name.
+    if texture.is_empty() || texture.contains(['/', '\\', ':']) || texture.contains("..") {
+        return None;
+    }
+    tauri::async_runtime::spawn_blocking(move || find_loose_texture_blocking(&model_path, &texture))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn find_loose_texture_blocking(model_path: &str, texture: &str) -> Option<String> {
+    let wanted = format!("{}.dds", texture.to_lowercase());
+    let matches = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase() == wanted).unwrap_or(false);
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['/', '\\']).to_lowercase();
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| norm(Path::new(&h)));
+    let mut dir = Path::new(model_path).parent()?.to_path_buf();
+    let direct = dir.join(&wanted);
+    if direct.is_file() {
+        return Some(direct.to_string_lossy().into_owned());
+    }
+    let mut searched: Option<PathBuf> = None;
+    for _ in 0..4 {
+        let skip = searched.clone();
+        let found = walkdir::WalkDir::new(&dir)
+            .max_depth(8)
+            .into_iter()
+            // Don't walk the subtree the previous level already covered.
+            .filter_entry(|e| skip.as_deref() != Some(e.path()))
+            .filter_map(|e| e.ok())
+            .take(50_000)
+            .find(|e| e.file_type().is_file() && matches(e.path()));
+        if let Some(e) = found {
+            return Some(e.path().to_string_lossy().into_owned());
+        }
+        let is_data = dir.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("data")).unwrap_or(false);
+        let parent = dir.parent()?.to_path_buf();
+        if is_data || home.as_deref() == Some(norm(&dir).as_str()) || parent.parent().is_none() {
+            break;
+        }
+        searched = Some(dir);
+        dir = parent;
+    }
+    None
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 
 pub struct PmgGeometry {
@@ -7062,7 +7155,7 @@ pub fn run() {
 
             execute_terminal_command, get_initial_file, check_data_folder, detect_data_prefix, log_to_file, drain_log_buffer,
 
-            preview_loose_file,
+            preview_loose_file, get_entry_bytes, read_loose_bytes, find_loose_texture,
 
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, nexon_login_webview,
 
