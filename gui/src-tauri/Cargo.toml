@@ -1,6 +1,6 @@
 [package]
 name = "mabi-patcher"
-version = "2.0.2"
+version = "2.0.3"
 description = "mabi-patcher: Mabinogi Archive & Patcher Suite"
 authors = ["ShaggyZE <shaggyze@gmail.com>"]
 edition = "2021"
