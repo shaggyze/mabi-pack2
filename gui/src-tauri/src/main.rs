@@ -156,7 +156,35 @@ fn show_webview2_missing_dialog() -> bool {
 }
 
 fn main() -> Result<()> {
+    // Copied as nexon_client.exe during a game launch: act as the stub and exit.
+    mabi_pack2::launcher::launch::run_stub_if_requested();
+
     let args: Vec<String> = env::args().collect();
+
+    // Launcher/patcher CLI: `mabi-patcher.exe login|login-otp|check-update|update|launch ...`
+    // (also accepts Rua's `--cli <command>` form).
+    {
+        use mabi_pack2::launcher::cli as launcher_cli;
+        let skip = if args.get(1).map(String::as_str) == Some("--cli") { 2 } else { 1 };
+        if args.get(skip).map(|a| launcher_cli::NAMES.contains(&a.as_str())).unwrap_or(false) {
+            #[cfg(target_os = "windows")]
+            unsafe { AttachConsole(0xFFFFFFFF); }
+            let _ = CombinedLogger::init(vec![TermLogger::new(
+                LevelFilter::Warn, ConfigBuilder::new().build(), TerminalMode::Mixed, ColorChoice::Auto,
+            ) as Box<dyn SharedLogger>]);
+            let cli_args = std::iter::once(args[0].clone()).chain(args[skip..].iter().cloned());
+            let matches = Command::new("mabi-patcher")
+                .subcommand_required(true)
+                .subcommands(launcher_cli::commands())
+                .get_matches_from(cli_args);
+            let (name, sub) = matches.subcommand().unwrap();
+            let code = launcher_cli::run(name, sub).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                1
+            });
+            std::process::exit(code);
+        }
+    }
 
     if args.len() > 1 {
         let first_arg = &args[1];

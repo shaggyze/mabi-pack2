@@ -196,8 +196,8 @@ export async function webInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
       return apiFetch<{ maintenance: boolean }>("POST", "/api/v1/launcher/maintenance", { session: args.session })
         .then((r) => r.maintenance as unknown as T);
     case "launcher_get_version":
-      return apiFetch<{ version: number }>("POST", "/api/v1/launcher/version", { session: args.session })
-        .then((r) => r.version as unknown as T);
+      return apiFetch<{ version: number; session?: unknown }>("POST", "/api/v1/launcher/version", { session: args.session })
+        .then((r) => ({ version: r.version, session: r.session }) as unknown as T);
     case "launcher_list_profiles":
       return apiFetch<{ profiles: unknown[] }>("GET", "/api/v1/launcher/profiles").then((r) => r.profiles as unknown as T);
     case "launcher_save_profile":

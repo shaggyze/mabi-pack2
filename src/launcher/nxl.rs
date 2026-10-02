@@ -10,6 +10,11 @@
 //   5. Only after every file succeeded: store the new hash and cache the manifest,
 //      so an interrupted or partial update is picked up again on the next run.
 //
+// The CLI `update` command uses `patch::run_patcher` (branch-API manifest only,
+// SHA1-checked parts, repair mode, cancel). This module is kept as a library
+// patcher; note that its no-session fallback (the public CDN hash) is a stale
+// 2014 manifest, so pass a session whenever you patch a real install.
+//
 // Install layout: manifest paths are relative to the folder holding Client.exe.
 // The hash file is `patchdata/10200.manifest.hash`, found either inside that
 // folder or next to it (official launcher layout); see `GameInstall::locate`.
@@ -262,7 +267,7 @@ pub fn fetch_remote_hash(session: Option<&mut NexonSession>) -> Result<RemoteHas
 
     if let Some(session) = session {
         let branch = auth::with_session_retry(session, |s| {
-            let info = patch::fetch_manifest(s)?;
+            let info = patch::fetch_manifest_once(s)?;
             let body = get_bytes(&client, &info.manifest_url)?;
             Ok(String::from_utf8_lossy(&body).trim().to_string())
         });

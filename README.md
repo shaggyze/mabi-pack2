@@ -81,6 +81,49 @@ mabi-pack2 batch -i ./archives_folder -o ./output -j 4 -f "\.xml$"
 Dragging a `.it` or `.pack` file onto the exe opens it directly in the GUI.  
 Right-clicking a registered file type gives an "Open with mabi-pack2" context menu entry.
 
+## Launcher & Patcher (Nexon NA, no official launcher needed)
+
+Logs in, patches and launches Mabinogi NA the same way Rua does (ported to Rust):
+
+- **Login**: email/password with MFA codes, or browser/SSO (Google etc.) via TPA
+  exchange. Expired tokens are refreshed automatically (401 → autologin → retry).
+- **Launch**: account → access → playable → passport, then a built-in
+  `nexon_client.exe` stub + `nexon_x64.dll` shim (embedded in the exe) and the
+  Nexon SDK named pipe hand the passport to `Client.exe`. Maintenance and
+  region blocks are reported before launching.
+- **Patcher**: current manifest from Nexon's branch API, parallel downloads
+  (files × 4 parts, capped total connections, retries, SHA1-checked parts),
+  Repair (hash-check every file), re-download all, ignore list, cancel/resume.
+
+```sh
+mabi-patcher login --email you@example.com --password '...'   # MFA → prints login-otp command
+mabi-patcher login-otp --mfa-key KEY --otp 123456
+mabi-patcher check-update --game-path "C:\Nexon\Library\mabinogi"   # exit 2 = update available
+mabi-patcher update --game-path "C:\Nexon\Library\mabinogi" [--verify|--force-all] [-j 8] [--ignore "*.ini"]
+mabi-patcher launch --game-path "C:\Nexon\Library\mabinogi"
+```
+
+Also: `mabi-patcher config [show | ignore add|remove PATTERN | hook EVENT [CMD]]` keeps a
+persistent ignore list (merged with `--ignore`) and hooks run before/after patching and
+launching (`%PROFILE%` = profile name). `login`/`launch` read the password from
+`MABI_PASSWORD` when `--password` is omitted, and the email from `MABI_EMAIL` when `-u` is
+omitted but a password is available. Without `--profile`, a login is saved to the profile
+with the same email (or Nexon account), otherwise to a new one — never to another account's; `login --client DIR` stores the game folder on
+the profile; when no folder is given or stored, an installed game is auto-detected.
+`launch --version` prints the latest game version; `--no-wait` returns once the game has
+taken its login ticket. The after-launch hook fires as soon as the client has started.
+
+The GUI exe accepts the same commands (`mabi-patcher.exe launch ...`, or Rua's
+`--cli launch ...` form). The local API (`mabi-patcher serve`, port 7331) exposes them
+under `/api/v1/launcher/*` (login, login/otp, login/tpa, session/check, update/check,
+update + update/status + update/cancel, launch) in place of a DLL.
+
+**Linux / Steam Deck:** the native Linux build logs in and patches directly. To launch,
+put the Windows `mabi-patcher.exe` next to it (or set `MABI_WINE_EXE`) and set
+`WINEPREFIX` to the game's prefix. `MABI_WINE` (or `WINE`) picks the Wine runner, e.g.
+`wine64`, a Proton `wine` binary or a wrapper script; default `wine`. `launch` then hands the session to the Windows
+build under Wine, because the SDK pipe and stub must run inside the prefix.
+
 ## Global Options
 - `-v`: Info logging
 - `-vv`: Debug logging
