@@ -101,11 +101,16 @@ mabi-patcher login -u you@example.com -p '...' --profile Main -c /games/mabinogi
 mabi-patcher check-update          # exit 0 = up to date, 2 = update available
 mabi-patcher update                # --force-all, --scan-only, -j N, --ignore 'mods/*'
 mabi-patcher launch --wait         # uses the active profile; MABI_WINE picks the Wine runner
+mabi-patcher login-otp -u you@example.com --mfa-key KEY --otp 123456   # if login asks for 2FA
+mabi-patcher config ignore add 'mods/*'                                # saved ignore list
+mabi-patcher config hook before-launch 'notify-send %PROFILE%'         # before/after patch or launch
 ```
 
 `-c` takes the folder holding `Client.exe` (or the exe itself). The installed
 version is read from `patchdata/10200.manifest.hash`, inside that folder or
-beside it. Build the Linux binary with `./build-linux.sh`.
+beside it. Without `-c` or a saved folder it looks for an existing install
+(Nexon Launcher config, uninstall entries, common folders and Wine prefixes).
+Build the Linux binary with `./build-linux.sh`.
 
 ## GUI
 

@@ -250,6 +250,11 @@ impl From<&Profile> for ProfileSummary {
 // ── Storage path ──────────────────────────────────────────────────────────────
 
 fn profiles_path() -> Result<PathBuf> {
+    Ok(data_dir().join("profiles.json"))
+}
+
+/// `%APPDATA%\mabi-patcher` on Windows, `~/.config/mabi-patcher` elsewhere.
+pub fn data_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var("APPDATA")
             .map(PathBuf::from)
@@ -257,7 +262,7 @@ fn profiles_path() -> Result<PathBuf> {
     } else {
         dirs_next()
     };
-    Ok(base.join("mabi-patcher").join("profiles.json"))
+    base.join("mabi-patcher")
 }
 
 #[cfg(windows)]

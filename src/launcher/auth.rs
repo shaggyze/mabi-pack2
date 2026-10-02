@@ -64,6 +64,21 @@ impl std::fmt::Display for Unauthorized {
 
 impl std::error::Error for Unauthorized {}
 
+/// Nexon wants a one-time password (HTTP 206). Finish with [`login_otp`].
+#[derive(Debug)]
+pub struct MfaRequired {
+    pub mfa_key: String,
+    pub mfa_type: String,
+}
+
+impl std::fmt::Display for MfaRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Two-factor code required ({}); mfa key: {}", self.mfa_type, self.mfa_key)
+    }
+}
+
+impl std::error::Error for MfaRequired {}
+
 /// True if `err` is (or wraps) an [`Unauthorized`] error.
 pub fn is_unauthorized(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Unauthorized>().is_some()
@@ -173,6 +188,29 @@ pub fn login(username: &str, password: &str, remember: bool) -> Result<LoginResu
             scope: SCOPE,
             time_offset: 0,
         })
+        .send()?;
+
+    parse_login_response(resp)
+}
+
+/// Finish a login that returned [`MfaRequired`] with the code from the
+/// authenticator app or email (same endpoint Rua uses).
+pub fn login_otp(mfa_key: &str, otp: &str) -> Result<LoginResult> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        #[serde(rename = "mfaKey")]
+        mfa_key: &'a str,
+        otp: &'a str,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "deviceType")]
+        device_type: &'static str,
+        locale: &'static str,
+    }
+
+    let resp = build_client()?
+        .post(format!("{}/api/account/v1/no-auth/login/launcher/otp", NEXON_BASE))
+        .json(&Req { mfa_key, otp, device_id: device_id(""), device_type: "PC", locale: "en" })
         .send()?;
 
     parse_login_response(resp)
@@ -439,6 +477,14 @@ fn parse_login_response(resp: reqwest::blocking::Response) -> Result<LoginResult
 
     let body_text = resp.text().unwrap_or_default();
 
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let v: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        return Err(MfaRequired {
+            mfa_key: v["mfaKey"].as_str().unwrap_or_default().to_string(),
+            mfa_type: v["mfaType"].as_str().unwrap_or("otp").to_string(),
+        }
+        .into());
+    }
     if !status.is_success() {
         return Err(anyhow!("Nexon auth failed ({}): {}", status, body_text));
     }

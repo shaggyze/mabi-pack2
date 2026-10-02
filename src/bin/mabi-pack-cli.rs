@@ -14,7 +14,7 @@ use log::{debug, info};
 
 // Correct library name from Cargo.toml
 use mabi_pack2::{api, load_salts, extract, list, mod_file, pack};
-use mabi_pack2::launcher::{auth, launch, nxl, patch, profile};
+use mabi_pack2::launcher::{auth, config, detect, launch, nxl, patch, profile};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -181,6 +181,32 @@ fn main() -> Result<()> {
                 .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password (or set MABI_PASSWORD)").required(false))
                 .arg(Arg::new("profile").long("profile").value_name("NAME").help("Profile to save to (default: the email); created if missing"))
                 .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Store this game folder (or Client.exe path) on the profile"))
+        )
+        .subcommand(
+            Command::new("login-otp")
+                .about("Finish a login that asked for a two-factor code")
+                .arg(Arg::new("mfa-key").long("mfa-key").value_name("KEY").help("Key printed by `login`").required(true))
+                .arg(Arg::new("otp").long("otp").value_name("CODE").help("Code from your authenticator app or email").required(true))
+                .arg(Arg::new("username").short('u').long("username").value_name("EMAIL").help("Account email, stored on a new profile"))
+                .arg(Arg::new("profile").long("profile").value_name("NAME").help("Profile to save to (default: the email)"))
+                .arg(Arg::new("client").short('c').long("client").value_name("DIR").help("Store this game folder (or Client.exe path) on the profile"))
+        )
+        .subcommand(
+            Command::new("config")
+                .about("Patcher settings: update ignore list and event hooks")
+                .subcommand(Command::new("show").about("Print the settings and where they are stored"))
+                .subcommand(
+                    Command::new("ignore")
+                        .about("Add or remove a path/wildcard the patcher must never touch")
+                        .arg(Arg::new("action").value_name("add|remove").required(true))
+                        .arg(Arg::new("pattern").value_name("PATTERN").required(true))
+                )
+                .subcommand(
+                    Command::new("hook")
+                        .about("Set a command run before/after patching or launching (%PROFILE% = profile name); omit CMD to clear")
+                        .arg(Arg::new("event").value_name("before-patch|after-patch|before-launch|after-launch").required(true))
+                        .arg(Arg::new("cmd").value_name("CMD"))
+                )
         )
         .subcommand(
             Command::new("check-update")
@@ -504,6 +530,10 @@ fn main() -> Result<()> {
         }
     } else if let Some(sub) = matches.subcommand_matches("login") {
         cmd_login(sub)?;
+    } else if let Some(sub) = matches.subcommand_matches("login-otp") {
+        cmd_login_otp(sub)?;
+    } else if let Some(sub) = matches.subcommand_matches("config") {
+        cmd_config(sub)?;
     } else if let Some(sub) = matches.subcommand_matches("check-update") {
         let code = cmd_check_update(sub)?;
         std::process::exit(code);
@@ -575,7 +605,12 @@ fn game_install(sub: &clap::ArgMatches, prof: Option<&profile::Profile>) -> Resu
         .get_one::<String>("client")
         .cloned()
         .or_else(|| prof.map(|p| p.client_dir.clone()).filter(|d| !d.is_empty()))
-        .ok_or_else(|| anyhow::anyhow!("--client <game folder> is required (no game folder saved on the profile)"))?;
+        .or_else(|| {
+            let exe = detect::find_game_exe()?;
+            info!("[GAME] Found Mabinogi at {}", exe.display());
+            Some(exe.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| anyhow::anyhow!("Mabinogi install not found; pass --client <game folder>"))?;
     nxl::GameInstall::locate(Path::new(&dir))
 }
 
@@ -585,16 +620,42 @@ fn cmd_login(sub: &clap::ArgMatches) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--password (or MABI_PASSWORD) is required"))?;
 
     info!("[LOGIN] Logging in as {}...", username);
-    let result = auth::login(username, &password, true)
-        .map_err(|e| anyhow::anyhow!("Login failed: {}", e))?;
+    match auth::login(username, &password, true) {
+        Ok(result) => save_login(sub, Some(username), result),
+        Err(e) => match e.downcast_ref::<auth::MfaRequired>() {
+            Some(mfa) => {
+                println!("Nexon wants a two-factor code ({}). Finish with:", mfa.mfa_type);
+                println!("  mabi-patcher login-otp -u {} --mfa-key {} --otp <CODE>", username, mfa.mfa_key);
+                std::process::exit(1);
+            }
+            None => Err(anyhow::anyhow!("Login failed: {}", e)),
+        },
+    }
+}
+
+fn cmd_login_otp(sub: &clap::ArgMatches) -> Result<()> {
+    let key = sub.get_one::<String>("mfa-key").unwrap();
+    let otp = sub.get_one::<String>("otp").unwrap();
+    let result = auth::login_otp(key, otp).map_err(|e| anyhow::anyhow!("Two-factor login failed: {}", e))?;
+    save_login(sub, sub.get_one::<String>("username"), result)
+}
+
+/// Store a fresh login on the named profile (created if missing) and make it active.
+fn save_login(sub: &clap::ArgMatches, email: Option<&String>, result: auth::LoginResult) -> Result<()> {
     if result.session.session_token.is_empty() {
         return Err(anyhow::anyhow!("Login succeeded but Nexon returned no NxLSession to save"));
     }
-
-    let name = sub.get_one::<String>("profile").cloned().unwrap_or_else(|| username.clone());
+    let name = sub
+        .get_one::<String>("profile")
+        .or(email)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("--profile or --username is required to save the session"))?;
     let mut store = profile::ProfileStore::load()?;
-    let mut prof = find_profile(&store, Some(&name)).unwrap_or_else(|| profile::Profile::new(&name, username));
-    prof.email = username.clone();
+    let mut prof = find_profile(&store, Some(&name))
+        .unwrap_or_else(|| profile::Profile::new(&name, email.map(String::as_str).unwrap_or("")));
+    if let Some(e) = email {
+        prof.email = e.clone();
+    }
     prof.session_token = result.session.session_token.clone();
     prof.session_expires_at = unix_now() + result.session_expires_in.max(0) as u64;
     prof.last_login_at = unix_now();
@@ -607,6 +668,30 @@ fn cmd_login(sub: &clap::ArgMatches) -> Result<()> {
     store.active_id = id;
     store.save()?;
     println!("Logged in. Session saved to profile '{}' (expires in {}s).", name, result.session_expires_in);
+    Ok(())
+}
+
+fn cmd_config(sub: &clap::ArgMatches) -> Result<()> {
+    let mut cfg = config::Config::load()?;
+    if let Some(m) = sub.subcommand_matches("ignore") {
+        let pattern = m.get_one::<String>("pattern").unwrap().trim().to_string();
+        match m.get_one::<String>("action").unwrap().as_str() {
+            "add" => {
+                if !cfg.ignore.iter().any(|p| p.eq_ignore_ascii_case(&pattern)) {
+                    cfg.ignore.push(pattern);
+                }
+            }
+            "remove" => cfg.ignore.retain(|p| !p.eq_ignore_ascii_case(&pattern)),
+            other => return Err(anyhow::anyhow!("Unknown action '{}'; use add or remove", other)),
+        }
+        cfg.save()?;
+    } else if let Some(m) = sub.subcommand_matches("hook") {
+        let event = m.get_one::<String>("event").unwrap();
+        *cfg.hooks.slot(event)? = m.get_one::<String>("cmd").cloned().unwrap_or_default();
+        cfg.save()?;
+    }
+    println!("Settings: {}", config::Config::path().display());
+    println!("{}", serde_json::to_string_pretty(&cfg)?);
     Ok(())
 }
 
@@ -644,11 +729,18 @@ fn cmd_check_update(sub: &clap::ArgMatches) -> Result<i32> {
 
 fn cmd_update(sub: &clap::ArgMatches) -> Result<i32> {
     let (install, remote) = remote_state(sub)?;
+    let cfg = config::Config::load()?;
+    let profile_name = active_profile_name(sub);
     let opts = nxl::PatchOptions {
         force_all: sub.get_flag("force-all"),
         workers: sub.get_one::<String>("workers").map(|s| s.parse()).transpose()
             .map_err(|_| anyhow::anyhow!("--workers must be a number"))?.unwrap_or(0),
-        ignore: sub.get_many::<String>("ignore").map_or(Vec::new(), |v| v.cloned().collect()),
+        ignore: sub
+            .get_many::<String>("ignore")
+            .map_or(Vec::new(), |v| v.cloned().collect())
+            .into_iter()
+            .chain(cfg.ignore.iter().cloned())
+            .collect(),
     };
 
     info!("[PATCH] Game folder: {}", install.root.display());
@@ -671,6 +763,7 @@ fn cmd_update(sub: &clap::ArgMatches) -> Result<i32> {
         return Ok(if pending.is_empty() { 0 } else { 2 });
     }
 
+    launch::spawn_hook(&cfg.hooks.before_patch, &profile_name, &install.root);
     let start = std::time::Instant::now();
     let report = nxl::apply(&install, &manifest, &pending, &opts, &|p: &nxl::Progress| {
         let secs = start.elapsed().as_secs_f64().max(0.1);
@@ -692,6 +785,7 @@ fn cmd_update(sub: &clap::ArgMatches) -> Result<i32> {
         log::error!("[PATCH] {}: {}", path, err);
     }
     if report.hash_updated {
+        launch::spawn_hook(&cfg.hooks.after_patch, &profile_name, &install.root);
         println!("Patched {} file(s). Game is up to date ({}).", report.patched, manifest.hash);
         Ok(0)
     } else {
@@ -760,17 +854,28 @@ fn cmd_launch(sub: &clap::ArgMatches) -> Result<()> {
         save_refreshed(p, &session, expires_in);
     }
 
+    let cfg = config::Config::load()?;
+    let profile_name = prof.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+    launch::spawn_hook(&cfg.hooks.before_launch, &profile_name, &client_dir);
+
     info!("[LAUNCH] Spawning {}...", config.executable_path);
     let mut child = config
         .spawn_client(&client_dir, &passport)
         .map_err(|e| anyhow::anyhow!("Spawn failed: {}", e))?;
     info!("[LAUNCH] Mabinogi launched.");
+    launch::spawn_hook(&cfg.hooks.after_launch, &profile_name, &client_dir);
 
     if sub.get_flag("wait") {
         let status = child.wait()?;
         info!("[LAUNCH] Game exited ({})", status);
     }
     Ok(())
+}
+
+/// Name of the profile a command uses, for `%PROFILE%` in hooks.
+fn active_profile_name(sub: &clap::ArgMatches) -> String {
+    let store = profile::ProfileStore::load().unwrap_or_default();
+    find_profile(&store, sub.get_one::<String>("profile")).map(|p| p.name).unwrap_or_default()
 }
 
 fn unix_now() -> u64 {
