@@ -56,6 +56,10 @@ pub struct Profile {
     /// Whether this profile uses the official Nexon servers.
     #[serde(default)]
     pub is_official: bool,
+    /// Full cookie session (AToken/g_AToken/NexonUserID...). Needed for browser/SSO
+    /// accounts, which can't be refreshed from NxLSession alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::launcher::auth::NexonSession>,
 }
 
 impl Profile {
@@ -76,6 +80,7 @@ impl Profile {
             chat_ip: String::new(),
             chat_port: 0,
             is_official: true,
+            session: None,
         }
     }
 
@@ -199,7 +204,30 @@ pub fn update_session(id: &str, session_token: &str, expires_in_secs: i32) -> Re
     let mut store = ProfileStore::load()?;
     let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile '{}' not found", id))?;
     profile.session_token = session_token.to_string();
+    // Keep the stored full session in step, so it doesn't override the newer token.
+    if let Some(s) = profile.session.as_mut() {
+        s.session_token = session_token.to_string();
+    }
     profile.session_expires_at = unix_now() + expires_in_secs.max(0) as u64;
+    profile.last_login_at = unix_now();
+    store.save()
+}
+
+/// Store a full session (and its NxLSession) on a profile after login/refresh.
+pub fn save_session(id: &str, session: &crate::launcher::auth::NexonSession, expires_in_secs: i32) -> Result<()> {
+    let mut store = ProfileStore::load()?;
+    let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile not found: {}", id))?;
+    profile.session_token = session.session_token.clone();
+    // 0 = "unknown": use the expiry of an in-place refresh, if one happened.
+    let expires_in_secs = if expires_in_secs > 0 {
+        expires_in_secs
+    } else {
+        session.refreshed_expires_in.unwrap_or(0)
+    };
+    profile.session = Some(crate::launcher::auth::NexonSession { refreshed_expires_in: None, ..session.clone() });
+    if expires_in_secs > 0 {
+        profile.session_expires_at = unix_now() + expires_in_secs as u64;
+    }
     profile.last_login_at = unix_now();
     store.save()
 }
@@ -285,11 +313,18 @@ fn unix_now() -> u64 {
 
 fn new_uuid() -> String {
     // Simple UUID v4 without external crate.
-    // Seeds with current time + stack address for uniqueness without rand crate.
-    let t = unix_now().wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    // Seeds with the time in nanoseconds, the pid, a per-process counter and a stack
+    // address, so ids created in the same second (or the same call site) differ.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = nanos.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     let dummy = 0u64;
     let addr = &dummy as *const _ as u64;
-    let seed = t ^ addr;
+    let seed = (t ^ addr ^ ((std::process::id() as u64) << 32) ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
     let mut state = seed;
     let mut next = || -> u8 {
         state ^= state << 13;
