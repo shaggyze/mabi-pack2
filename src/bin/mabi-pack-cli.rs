@@ -62,7 +62,7 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     register_shell_menu();
     let matches = Command::new("mabi-pack2")
-        .version("1.3.7")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("regomne <fallingsunz@gmail.com>")
         .arg(
             Arg::new("verbose")
