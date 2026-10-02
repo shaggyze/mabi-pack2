@@ -24,7 +24,7 @@ jobs:
       - name: Build CLI binaries
         run: cargo build --release --bins
       - name: Patcher unit tests
-        run: cargo test --release --lib launcher::
+        run: cargo test --release --lib "launcher::"
       - uses: actions/upload-artifact@v4
         with:
           name: mabi-patcher-${{ matrix.os }}

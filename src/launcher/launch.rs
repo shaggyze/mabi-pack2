@@ -233,6 +233,51 @@ impl From<&LaunchConfig> for LaunchSummary {
     }
 }
 
+/// Start a hook command without waiting for it (Rua's event hooks).
+/// `%PROFILE%` is replaced with `profile`. Empty string = no-op.
+pub fn spawn_hook(cmd: &str, profile: &str, working_dir: &Path) {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return;
+    }
+    let expanded = replace_ci(cmd, "%PROFILE%", profile);
+    #[cfg(windows)]
+    let mut shell = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", &expanded]).creation_flags(0x08000000); // CREATE_NO_WINDOW
+        c
+    };
+    #[cfg(not(windows))]
+    let mut shell = {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", &expanded]);
+        c
+    };
+    if working_dir.is_dir() {
+        shell.current_dir(working_dir);
+    }
+    match shell.spawn() {
+        Ok(_) => log::info!("Hook started: {}", expanded),
+        Err(e) => log::warn!("Hook '{}' failed to start: {}", expanded, e),
+    }
+}
+
+fn replace_ci(text: &str, needle: &str, with: &str) -> String {
+    // ASCII lowering keeps byte offsets valid for slicing `text`.
+    let lower = text.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut last = 0;
+    for (i, _) in lower.match_indices(&needle) {
+        out.push_str(&text[last..i]);
+        out.push_str(with);
+        last = i + needle.len();
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 /// Run a shell hook command (pre/post launch). Empty string = no-op.
 /// Runs synchronously and returns stdout+stderr combined.
 pub fn run_hook_cmd(cmd: &str, working_dir: &Path) -> Result<String> {

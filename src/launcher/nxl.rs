@@ -443,6 +443,17 @@ pub fn apply(
     opts: &PatchOptions,
     progress: &(dyn Fn(&Progress) + Sync),
 ) -> Result<PatchReport> {
+    apply_from(PART_BASE, install, manifest, pending, opts, progress)
+}
+
+fn apply_from(
+    part_base: &str,
+    install: &GameInstall,
+    manifest: &Manifest,
+    pending: &[PendingFile],
+    opts: &PatchOptions,
+    progress: &(dyn Fn(&Progress) + Sync),
+) -> Result<PatchReport> {
     for d in &manifest.dirs {
         let _ = std::fs::create_dir_all(install.root.join(d));
     }
@@ -462,7 +473,7 @@ pub fn apply(
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(item) = pending.get(i) else { break };
-                let result = patch_file(&client, &http, &install.root, &item.file);
+                let result = patch_file(&client, &http, part_base, &install.root, &item.file);
                 if let Err(e) = &result {
                     failed.lock().unwrap().push((item.file.path.clone(), format!("{:#}", e)));
                 }
@@ -493,6 +504,7 @@ pub fn apply(
 fn patch_file(
     client: &reqwest::blocking::Client,
     http: &Semaphore,
+    part_base: &str,
     root: &Path,
     file: &ManifestFile,
 ) -> Result<()> {
@@ -514,7 +526,7 @@ fn patch_file(
                     }
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     let Some(hash) = file.parts.get(i) else { break };
-                    if let Err(e) = download_part(client, http, hash, &part_path(i)) {
+                    if let Err(e) = download_part(client, http, part_base, hash, &part_path(i)) {
                         first_err.lock().unwrap().get_or_insert(e.context(format!("part {}", i)));
                         break;
                     }
@@ -555,11 +567,17 @@ fn patch_file(
 
 /// GET one zlib part and stream-decompress it to `out`, retrying transient
 /// failures with growing delay.
-fn download_part(client: &reqwest::blocking::Client, http: &Semaphore, hash: &str, out: &Path) -> Result<()> {
+fn download_part(
+    client: &reqwest::blocking::Client,
+    http: &Semaphore,
+    part_base: &str,
+    hash: &str,
+    out: &Path,
+) -> Result<()> {
     if hash.len() < 2 || !hash.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(anyhow!("invalid part hash '{}'", hash));
     }
-    let url = format!("{}{}/{}", PART_BASE, &hash[..2], hash);
+    let url = format!("{}{}/{}", part_base, &hash[..2], hash);
     let mut last_err = None;
     for attempt in 0..PART_ATTEMPTS {
         if attempt > 0 {
@@ -749,6 +767,80 @@ mod tests {
         let install = GameInstall::locate(&dir.join("appdata/Client.exe")).unwrap();
         assert_eq!(install.root, dir.join("appdata"));
         assert_eq!(install.patchdata, dir.join("patchdata"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Serves zlib parts like the CDN: GET /<xx>/<hash>. Unknown hashes 404.
+    fn serve_parts(parts: HashMap<String, Vec<u8>>) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let hash = req.url().rsplit('/').next().unwrap_or("").to_string();
+                let resp = match parts.get(&hash) {
+                    Some(data) => tiny_http::Response::from_data(zlib(data)),
+                    None => tiny_http::Response::from_data(Vec::new()).with_status_code(404),
+                };
+                let _ = req.respond(resp);
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn apply_downloads_joins_parts_and_records_hash() {
+        let dir = temp_dir("apply");
+        std::fs::write(dir.join("old.dat"), b"stale!").unwrap();
+        let install = GameInstall::locate(&dir).unwrap();
+
+        let mut parts = HashMap::new();
+        parts.insert("aa01".to_string(), b"hello ".to_vec());
+        parts.insert("aa02".to_string(), b"world".to_vec());
+        parts.insert("bb01".to_string(), vec![7u8; 100_000]);
+        let base = serve_parts(parts);
+
+        let m = manifest(&[("data/hello.txt", 11, &["aa01", "aa02"]), ("old.dat", 100_000, &["bb01"])]);
+        let pending = scan(&install, &m, &PatchOptions::default());
+        assert_eq!(pending.len(), 2);
+        let calls = AtomicUsize::new(0);
+        let report = apply_from(&base, &install, &m, &pending, &PatchOptions::default(), &|_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.hash_updated);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(dir.join("data/hello.txt")).unwrap(), b"hello world");
+        assert_eq!(std::fs::read(dir.join("old.dat")).unwrap(), vec![7u8; 100_000]);
+        assert!(dir.join("package").is_dir());
+        assert_eq!(install.local_hash().as_deref(), Some(m.hash.as_str()));
+        assert!(scan(&install, &m, &PatchOptions::default()).is_empty());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("data")).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(TEMP_SUFFIX)).collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_keeps_old_hash_when_a_part_is_missing() {
+        let dir = temp_dir("apply-fail");
+        std::fs::write(dir.join("keep.dat"), b"original").unwrap();
+        let install = GameInstall::locate(&dir).unwrap();
+        let mut parts = HashMap::new();
+        parts.insert("cc01".to_string(), b"new".to_vec());
+        let base = serve_parts(parts);
+
+        let m = manifest(&[("ok.dat", 3, &["cc01"]), ("keep.dat", 5, &["dd404"])]);
+        let pending = scan(&install, &m, &PatchOptions::default());
+        let report = apply_from(&base, &install, &m, &pending, &PatchOptions::default(), &|_| {}).unwrap();
+
+        assert_eq!(report.patched, 1);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "keep.dat");
+        assert!(!report.hash_updated);
+        assert!(install.local_hash().is_none());
+        assert_eq!(std::fs::read(dir.join("keep.dat")).unwrap(), b"original");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
