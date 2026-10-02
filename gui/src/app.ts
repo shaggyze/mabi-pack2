@@ -1,9 +1,11 @@
 import { invoke } from "./platform/invoke";
 import { open, save, ask, message } from "./platform/dialog";
-import { writeTextFile } from "./platform/fs";
+import { writeTextFile, writeFile } from "./platform/fs";
 import { listen } from "./platform/event";
+import { isTauri } from "./platform/isTauri";
 import { locales as TRANSLATIONS } from "./locales";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
+import type { Mounted3d } from "./preview3d/panel";
 
 interface JobEntry {
     id: number;
@@ -33,6 +35,12 @@ interface AggregateEntry extends FileEntry {
     iv0: number;
     h_off: number;
     mode: string;
+}
+
+/** Where a preview's bytes come from, captured when the preview was requested. */
+interface PreviewSource {
+    entry?: AggregateEntry;
+    loosePath?: string;
 }
 
 interface ArchiveDetails {
@@ -195,6 +203,11 @@ class App {
     private loadedEntries: AggregateEntry[] = [];
     private selectedEntry: AggregateEntry | null = null;
     private pmgViewer?: PMGViewer;
+    private viewer3d?: Mounted3d;
+    private previewGen = 0;
+    private selectGen = 0;
+    private textureIndex?: Map<string, AggregateEntry[]>;
+    private textureIndexSource?: AggregateEntry[];
     private currentArchive: string = "";
     private engineSalts: string[] = [];
     private previewCache = new Map<string, PreviewData>();
@@ -4036,7 +4049,124 @@ class App {
         return prev;
     }
 
-    private async applyPreviewToPanel(prev: PreviewData): Promise<void> {
+    private async entryBytes(e: AggregateEntry): Promise<Uint8Array> {
+        const clean = (k: string) => (k === "N/A" || k === "Search/Default" || k === "UNENCRYPTED") ? null : k;
+        const buf = await invoke<ArrayBuffer>("get_entry_bytes", {
+            archivePath: e.source_archive,
+            entryName: e.name,
+            key: clean(e.salt_used),
+            entriesKey: clean(e.entries_salt_used),
+            iv0: e.iv0,
+            hOff: e.h_off,
+            mode: e.mode,
+        });
+        return new Uint8Array(buf);
+    }
+
+    /** Full bytes of the file a preview was built from: an archive entry or a loose file. */
+    private async sourceBytes(src: PreviewSource): Promise<Uint8Array> {
+        if (src.entry) return this.entryBytes(src.entry);
+        if (src.loosePath) return new Uint8Array(await invoke<ArrayBuffer>("read_loose_bytes", { path: src.loosePath }));
+        throw new Error("nothing selected");
+    }
+
+    /** Finds `<name>.dds` in the loaded archives, or near the opened loose model. */
+    private async textureBytes(name: string, src: PreviewSource): Promise<Uint8Array | null> {
+        const want = `${name.toLowerCase()}.dds`;
+        if (src.entry) {
+            const index = this.textureIndexFor();
+            const hits = index.get(want);
+            if (!hits?.length) return null;
+            // Same archive as the model first, otherwise the newest copy (archives load oldest first).
+            const hit = hits.find(e => e.source_archive === src.entry!.source_archive) ?? hits[hits.length - 1];
+            return this.entryBytes(hit);
+        }
+        if (src.loosePath) {
+            const path = await invoke<string | null>("find_loose_texture", { modelPath: src.loosePath, texture: name });
+            return path ? new Uint8Array(await invoke<ArrayBuffer>("read_loose_bytes", { path })) : null;
+        }
+        return null;
+    }
+
+    /** Lower-case `.dds` file name → entries, rebuilt when the loaded entry list changes. */
+    private textureIndexFor(): Map<string, AggregateEntry[]> {
+        if (this.textureIndex && this.textureIndexSource === this.loadedEntries) return this.textureIndex;
+        const index = new Map<string, AggregateEntry[]>();
+        for (const e of this.loadedEntries) {
+            const base = e.name.toLowerCase().split(/[\\/¥₩]/).pop() || "";
+            if (!base.endsWith(".dds")) continue;
+            const list = index.get(base);
+            if (list) list.push(e); else index.set(base, [e]);
+        }
+        this.textureIndex = index;
+        this.textureIndexSource = this.loadedEntries;
+        return index;
+    }
+
+    /** Mounts the ported website viewer for pmg/gm/eff; false (after logging) when it can't. */
+    private async mount3d(gen: number, kind: "pmg" | "gm" | "eff", prev: PreviewData, src: PreviewSource): Promise<boolean> {
+        if (!isTauri()) return false; // the WebUI has no raw-bytes endpoint; use the Rust-parsed preview
+        const cont = document.getElementById("three-viewport")!;
+        const infoEl = document.getElementById("pmg-info")!;
+        try {
+            const [bytes, panel, { parseCssColor }] = await Promise.all([
+                this.sourceBytes(src),
+                import("./preview3d/panel"),
+                import("./pmgLoader"),
+            ]);
+            if (gen !== this.previewGen) return false;
+            // The preview tab must be visible before the viewer measures its container.
+            document.getElementById("preview-3d")!.classList.add("active");
+            infoEl.style.color = "";
+            const css = getComputedStyle(document.documentElement);
+            const hex = (v: string, d: number) => parseCssColor(css.getPropertyValue(v).trim()) ?? d;
+            let mounted: Mounted3d;
+            if (kind === "pmg") {
+                mounted = panel.mountPmg({
+                    container: cont,
+                    overlay: document.getElementById("preview-3d")!,
+                    name: prev.name.split(/[\\/]/).pop() || prev.name,
+                    bytes,
+                    accent: hex("--accent-cyan", 0x00d2ff),
+                    background: hex("--bg-surface", 0x0d0d1a),
+                    textureBytes: n => this.textureBytes(n, src),
+                    textureScope: src.entry?.source_archive ?? src.loosePath ?? "",
+                    save: (name, data) => this.save3dExport(name, data),
+                    status: t => { if (gen === this.previewGen) infoEl.textContent = t; },
+                });
+            } else if (kind === "gm") {
+                mounted = panel.mountGm({ container: cont, bytes });
+            } else {
+                const xml = bytes[0] === 0xff && bytes[1] === 0xfe
+                    ? new TextDecoder("utf-16le").decode(bytes.subarray(2))
+                    : new TextDecoder("utf-8").decode(bytes);
+                mounted = panel.mountEffect({ container: cont, xml });
+            }
+            if (gen !== this.previewGen) { mounted.dispose(); return false; }
+            this.viewer3d = mounted;
+            (window as any).__threeResizeFn = () => this.viewer3d?.resize();
+            if (kind !== "pmg") infoEl.textContent = mounted.summary;
+            this.log(`[3D] ${prev.name}  ·  ${mounted.summary}`);
+            return true;
+        } catch (err) {
+            if (gen === this.previewGen) document.getElementById("preview-3d")!.classList.remove("active");
+            this.log(`[3D] ${prev.name}: ${err}`, "warn");
+            return false;
+        }
+    }
+
+    private async save3dExport(defaultName: string, data: Uint8Array | string): Promise<void> {
+        try {
+            const out = await save({ defaultPath: defaultName });
+            if (!out) return;
+            if (typeof data === "string") await writeTextFile(out, data); else await writeFile(out, data);
+            this.log(`[3D] Exported ${out}`, "success");
+        } catch (e) {
+            this.log(`[3D] Export failed: ${e}`, "error");
+        }
+    }
+
+    private async applyPreviewToPanel(prev: PreviewData, src: PreviewSource = {}): Promise<void> {
         const visual = document.getElementById("preview-visual")!;
         const hex = document.getElementById("preview-hex")!;
         const details = document.getElementById("preview-details")!;
@@ -4044,6 +4174,8 @@ class App {
         const threed = document.getElementById("preview-3d")!;
 
         if (this.pmgViewer) { this.pmgViewer.dispose(); this.pmgViewer = undefined; (window as any).__threeResizeFn = undefined; }
+        if (this.viewer3d) { this.viewer3d.dispose(); this.viewer3d = undefined; (window as any).__threeResizeFn = undefined; }
+        const gen = ++this.previewGen;
         this._mmlStopFlag = true;
         if (this._mmlAudioCtx) { this._mmlAudioCtx.close().catch(() => {}); this._mmlAudioCtx = null; }
         [visual, hex, details, audio, threed].forEach(el => el.classList.remove("active"));
@@ -4084,7 +4216,27 @@ class App {
                 if (msgEl) msgEl.textContent = "";
                 if (this.config.audio_autoplay) audioElem.play().catch(() => {});
             }
+        } else if (ext === "pmg" && await this.mount3d(gen, "pmg", prev, src)) {
+            threed.classList.add("active");
+            activeContainer = "preview-3d";
+            visual.textContent = this.t("preview_no_visual");
+            visual.className = "preview-tab-content";
+        } else if (gen !== this.previewGen) {
+            return;
+        } else if ((ext === "gm" || ext === "eff") && await this.mount3d(gen, ext, prev, src)) {
+            threed.classList.add("active");
+            activeContainer = "preview-3d";
+            if (ext === "gm") {
+                visual.textContent = this.t("preview_no_visual");
+                visual.className = "preview-tab-content";
+            } else {
+                visual.className = "preview-tab-content xml-view";
+                visual.innerHTML = this.xmlHighlight(prev.content_text || "");
+            }
+        } else if (gen !== this.previewGen) {
+            return;
         } else if (ext === "pmg") {
+            // Website-style parse failed; fall back to the Rust-parsed single mesh.
             threed.classList.add("active");
             activeContainer = "preview-3d";
             const cont = document.getElementById("three-viewport")!;
@@ -4481,10 +4633,13 @@ class App {
         visual.textContent = this.t("preview_loading");
         visual.className = "preview-tab-content active";
 
+        const req = ++this.selectGen;
         try {
             const prev = await this.fetchPreview(e);
-            await this.applyPreviewToPanel(prev);
+            if (req !== this.selectGen) return; // a newer selection owns the panel
+            await this.applyPreviewToPanel(prev, { entry: e });
         } catch (err) {
+            if (req !== this.selectGen) return;
             this.log(`Preview error: ${err}`, "error");
             visual.className = "preview-tab-content active";
             visual.textContent = String(err);
@@ -4503,11 +4658,14 @@ class App {
         visual.textContent = this.t("preview_loading");
         visual.className = "preview-tab-content active";
 
+        const req = ++this.selectGen;
         try {
             const prev = await invoke("preview_loose_file", { path }) as PreviewData;
-            await this.applyPreviewToPanel(prev);
+            if (req !== this.selectGen) return;
+            await this.applyPreviewToPanel(prev, { loosePath: path });
             this.log(`Opened loose file: ${prev.name} (${prev.size.toLocaleString()} bytes)`);
         } catch (err) {
+            if (req !== this.selectGen) return;
             visual.textContent = `Preview error: ${err}`;
             visual.className = "preview-tab-content active";
             this.log(`Loose file preview error: ${err}`, "error");
