@@ -16,6 +16,8 @@ use crate::common::FileEntry;
 
 pub const PACK_HEADER_MAGIC_REG: &[u8; 4] = b"PACK";
 pub const PACK_HEADER_MAGIC_MABI: &[u8; 4] = b"MABI";
+/// The index stores each name in a 256-byte NUL-terminated field.
+pub const PACK_V1_NAME_MAX: usize = 255;
 
 #[derive(Debug, Clone)]
 pub struct PackEntryV1 {
@@ -26,10 +28,9 @@ pub struct PackEntryV1 {
 }
 
 fn write_file(root_dir: &str, rel_path: &str, content: Vec<u8>) -> Result<(), Error> {
-    // Normalize regional separators: ¥, \, /
-    let normalized_path = rel_path.replace(['¥', '\\', '/'], &std::path::MAIN_SEPARATOR.to_string());
-    trace!("[PACK_V1_WRITE] Preparing to write {} bytes to {}/{}", content.len(), root_dir, normalized_path);
-    let fname = Path::new(root_dir).join(normalized_path);
+    // Normalize regional separators (¥, ₩, \, /) and refuse paths escaping root_dir.
+    let fname = crate::common::safe_join(Path::new(root_dir), rel_path)?;
+    trace!("[PACK_V1_WRITE] Preparing to write {} bytes to {}", content.len(), fname.display());
     let par = fname.parent().ok_or_else(|| {
         error!("[PACK_V1_WRITE] Could not get parent directory for {:?}", fname);
         Error::msg(format!("unrecognized path: {}", fname.to_string_lossy()))
@@ -172,8 +173,15 @@ pub fn run_pack_v1(input_dir: &str, output_path: &str, version: u32) -> Result<(
     let packed_data: Result<Vec<(PackEntryV1, Vec<u8>)>, Error> = files.par_iter().map(|entry| {
         let path = entry.path();
         let rel_path = path.strip_prefix(&effective_root).unwrap();
-        // Normalize to backslashes for legacy compatibility, including international ¥ symbol
-        let name = rel_path.to_str().unwrap().replace(['/', '¥'], "\\");
+        // Normalize to backslashes for legacy compatibility, including the regional ¥ / ₩ separators
+        let name = rel_path.to_str().unwrap().replace(['/', '¥', '₩'], "\\");
+        crate::common::validate_entry_path(&name)?;
+        if name.len() > PACK_V1_NAME_MAX {
+            return Err(Error::msg(format!(
+                "entry path is {} bytes, over the .pack name field limit of {}: {}",
+                name.len(), PACK_V1_NAME_MAX, name
+            )));
+        }
 
         let mut f = StdFile::open(path)?;
         let mut data = Vec::new();
@@ -207,7 +215,7 @@ pub fn run_pack_v1(input_dir: &str, output_path: &str, version: u32) -> Result<(
     for (entry, _) in &file_data_list {
         let mut name_bytes = [0u8; 256];
         let name_src = entry.name.as_bytes();
-        let len = std::cmp::min(name_src.len(), 255);
+        let len = std::cmp::min(name_src.len(), PACK_V1_NAME_MAX);
         name_bytes[..len].copy_from_slice(&name_src[..len]);
         // Rest of name_bytes is already 0
         output_file.write_all(&name_bytes)?;

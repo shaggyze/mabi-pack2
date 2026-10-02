@@ -4,7 +4,6 @@
 /// - metadata for the WebUI to display
 /// - which files to replace/delete inside the archive
 /// - feature flag toggles (features.xml.compiled round-trip)
-/// - optional reference to uotiara.nsi for auto-generated entries
 /// - pack/extract settings
 /// - API exposure metadata
 use anyhow::{bail, Result};
@@ -122,6 +121,8 @@ impl ModPackage {
             if f.archive_path.is_empty() {
                 bail!("Each [[files]] entry must have archive_path");
             }
+            crate::common::validate_entry_path(&f.archive_path)
+                .map_err(|e| anyhow::anyhow!("[[files]] archive_path: {}", e))?;
             if matches!(f.action, FileAction::Replace | FileAction::Patch) && f.source.is_none() && f.patches.is_none() {
                 bail!("[[files]] entry '{}' with action replace/patch must have source or patches", f.archive_path);
             }
@@ -202,4 +203,24 @@ disable = []
 public       = false
 allow_remote = false
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mod_with_path(path: &str) -> String {
+        format!("[meta]\nname = \"t\"\nversion = \"1\"\n\n[[files]]\narchive_path = {:?}\naction = \"delete\"\n", path)
+    }
+
+    #[test]
+    fn archive_path_is_validated() {
+        assert!(ModPackage::from_str(&mod_with_path("data/db/a.xml")).is_ok());
+        for bad in ["../../evil.dll", "C:/Windows/evil.dll", "data/a|b.xml", "/abs.xml"] {
+            let e = ModPackage::from_str(&mod_with_path(bad)).unwrap_err();
+            assert!(e.to_string().contains("archive_path"), "{}: {}", bad, e);
+        }
+        let long = format!("data/{}", "a".repeat(300));
+        assert!(ModPackage::from_str(&mod_with_path(&long)).is_err());
+    }
 }

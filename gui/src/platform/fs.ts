@@ -1,4 +1,4 @@
-import { writeTextFile as tauriWriteTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile as tauriWriteTextFile, writeFile as tauriWriteFile } from "@tauri-apps/plugin-fs";
 import { isTauri } from "./isTauri";
 
 /** Drop-in replacement for @tauri-apps/plugin-fs's writeTextFile(). The
@@ -11,6 +11,22 @@ export async function writeTextFile(path: string, contents: string): Promise<voi
 
   const filename = path.split(/[\\/]/).pop() || "download.txt";
   const blob = new Blob([contents], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Binary counterpart of writeTextFile(), with the same browser download fallback. */
+export async function writeFile(path: string, contents: Uint8Array): Promise<void> {
+  if (isTauri()) return tauriWriteFile(path, contents);
+
+  const filename = path.split(/[\\/]/).pop() || "download.bin";
+  const blob = new Blob([contents as BlobPart]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

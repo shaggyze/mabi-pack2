@@ -155,14 +155,72 @@ fn show_webview2_missing_dialog() -> bool {
     }
 }
 
+/// The GUI's config.json, looked up like `get_config_path` in lib.rs: portable
+/// config.json next to the exe first, then the Tauri app config dir (the OS
+/// config dir + the bundle identifier from tauri.conf.json).
+fn gui_config_path() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        let portable = exe.with_file_name("config.json");
+        if portable.exists() {
+            return Some(portable);
+        }
+    }
+    directories::BaseDirs::new()
+        .map(|d| d.config_dir().join("com.shaggyze.mabi-patcher").join("config.json"))
+}
+
 fn main() -> Result<()> {
+    // Copied as nexon_client.exe during a game launch: act as the stub and exit.
+    mabi_pack2::launcher::launch::run_stub_if_requested();
+    // `mcp`: built-in MCP server on stdio for AI clients.
+    mabi_pack2::mcp::run_if_requested();
+
     let args: Vec<String> = env::args().collect();
+
+    // `serve`: the REST API, headless, from the same exe.
+    if args.get(1).map(String::as_str) == Some("serve") {
+        #[cfg(target_os = "windows")]
+        unsafe { AttachConsole(0xFFFFFFFF); }
+        let _ = CombinedLogger::init(vec![TermLogger::new(
+            LevelFilter::Info, ConfigBuilder::new().build(), TerminalMode::Mixed, ColorChoice::Auto,
+        ) as Box<dyn SharedLogger>]);
+        if let Err(e) = mabi_pack2::api::serve_from_args(&args[2..]) {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    // Launcher/patcher CLI: `mabi-patcher.exe login|login-otp|check-update|update|launch ...`
+    // (also accepts the `--cli <command>` form).
+    {
+        use mabi_pack2::launcher::cli as launcher_cli;
+        let skip = if args.get(1).map(String::as_str) == Some("--cli") { 2 } else { 1 };
+        if args.get(skip).map(|a| launcher_cli::NAMES.contains(&a.as_str())).unwrap_or(false) {
+            #[cfg(target_os = "windows")]
+            unsafe { AttachConsole(0xFFFFFFFF); }
+            let _ = CombinedLogger::init(vec![TermLogger::new(
+                LevelFilter::Warn, ConfigBuilder::new().build(), TerminalMode::Mixed, ColorChoice::Auto,
+            ) as Box<dyn SharedLogger>]);
+            let cli_args = std::iter::once(args[0].clone()).chain(args[skip..].iter().cloned());
+            let matches = Command::new("mabi-patcher")
+                .subcommand_required(true)
+                .subcommands(launcher_cli::commands())
+                .get_matches_from(cli_args);
+            let (name, sub) = matches.subcommand().unwrap();
+            let code = launcher_cli::run(name, sub).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                1
+            });
+            std::process::exit(code);
+        }
+    }
 
     if args.len() > 1 {
         let first_arg = &args[1];
         let known_cmds = ["extract", "pack", "list", "batch", "--convert", "--extract-all", "--extract-all-near", "--extract-here"];
 
-        let is_explicit_cli = known_cmds.contains(&first_arg.as_str()) || (first_arg.starts_with('-') && !Path::new(first_arg).exists() && first_arg != "--gui" && first_arg != "--full");
+        let is_explicit_cli = known_cmds.contains(&first_arg.as_str()) || (first_arg.starts_with('-') && !Path::new(first_arg).exists() && first_arg != "--gui" && first_arg != "--full" && first_arg != "--minimized");
 
         if is_explicit_cli {
             #[cfg(target_os = "windows")]
@@ -181,16 +239,17 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         // Fast elevation check: if the user wants to run elevated, elevate instantly before loading WebView2 GUI
+        // Same lookup as the GUI's get_config_path: portable config.json next to
+        // the exe first, else the app config dir (%APPDATA%\<identifier>).
         let appdata = env::var("APPDATA").unwrap_or_default();
         let config_path = Path::new(&appdata)
             .join("com.shaggyze.mabi-patcher")
             .join("config.json");
-        let portable_config = Path::new("config.json");
-        
-        let target_config = if portable_config.exists() {
-            portable_config.to_path_buf()
-        } else {
-            config_path
+        let portable_config = env::current_exe().ok().map(|p| p.with_file_name("config.json"));
+
+        let target_config = match portable_config {
+            Some(p) if p.exists() => p,
+            _ => config_path,
         };
         
         if target_config.exists() {
@@ -253,7 +312,7 @@ fn run_cli_logic() -> Result<()> {
     }
 
     let matches = Command::new("mabi-pack2")
-        .version("1.4.1")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("regomne <fallingsunz@gmail.com>")
         .arg(Arg::new("verbose").short('v').long("verbose").action(ArgAction::Count))
         .subcommand(
@@ -322,8 +381,7 @@ fn run_cli_logic() -> Result<()> {
 
     // Try to load last key from GUI config as a fallback
     let mut gui_last_key = None;
-    if let Some(proj_dirs) = directories::ProjectDirs::from("com", "shaggyze", "mabi-pack2") {
-        let config_path = proj_dirs.config_dir().join("config.json");
+    if let Some(config_path) = gui_config_path() {
         if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(config_path) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {

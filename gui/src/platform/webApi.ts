@@ -4,7 +4,7 @@
 // Extract, Pack, List, Mod Browser/Apply, Launcher, and Preview (image/text/
 // PMG 3D/RGN/area/audio) surfaces onto the REST API in src/api.rs (see
 // MISSION_CONTROL_PLAN.md Phases 2 and 5). Everything else (native file
-// dialogs, registry/association editing, elevation, kanan config, etc.) is
+// dialogs, registry/association editing, elevation, etc.) is
 // desktop-only and throws a clear error — those actions are already wrapped
 // in try/catch upstream in app.ts, so this degrades to "button does nothing"
 // rather than a crash.
@@ -196,8 +196,8 @@ export async function webInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
       return apiFetch<{ maintenance: boolean }>("POST", "/api/v1/launcher/maintenance", { session: args.session })
         .then((r) => r.maintenance as unknown as T);
     case "launcher_get_version":
-      return apiFetch<{ version: number }>("POST", "/api/v1/launcher/version", { session: args.session })
-        .then((r) => r.version as unknown as T);
+      return apiFetch<{ version: number; session?: unknown }>("POST", "/api/v1/launcher/version", { session: args.session })
+        .then((r) => ({ version: r.version, session: r.session }) as unknown as T);
     case "launcher_list_profiles":
       return apiFetch<{ profiles: unknown[] }>("GET", "/api/v1/launcher/profiles").then((r) => r.profiles as unknown as T);
     case "launcher_save_profile":
@@ -241,7 +241,7 @@ export async function webInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
 
     // ── Desktop-only: native dialogs are shimmed separately (platform/dialog.ts);
     //    everything below has no browser equivalent (registry/association
-    //    editing, elevation, kanan config, single-entry extract-to-arbitrary-
+    //    editing, elevation, single-entry extract-to-arbitrary-
     //    path, local loose-file preview) — see MISSION_CONTROL_PLAN.md. ─────
     default:
       return unsupported(cmd);

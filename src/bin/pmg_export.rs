@@ -1,13 +1,6 @@
 // Debug probe for the Nexon regional-auth login endpoint.
 // Credentials come from MABI_EMAIL / MABI_PASSWORD; never hardcode them here.
 
-#[cfg(not(target_os = "windows"))]
-fn main() {
-    eprintln!("pmg_export uses the Nexon launcher module, which is only built on Windows");
-    std::process::exit(1);
-}
-
-#[cfg(target_os = "windows")]
 fn main() {
     let email = std::env::var("MABI_EMAIL").expect("set MABI_EMAIL");
     let password = std::env::var("MABI_PASSWORD").expect("set MABI_PASSWORD");

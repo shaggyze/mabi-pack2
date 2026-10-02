@@ -26,7 +26,10 @@ CLAUDE.md
 
 # Agent / Temp
 .gemini
-.claude
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/agents/
 .agents
 .clinerules
 .cursor
@@ -47,8 +50,15 @@ build_log.txt
 # Scratch / diagnostics
 examples/
 *test*
+# keep real test sources
+!/tests/
+!/tests/*
+!/gui/test_locales*.mjs
 
 # Binaries
 *.exe
 *.pdb
 *.msi
+# nxl3p shim build output
+/nxl3p-shim/target
+__pycache__/

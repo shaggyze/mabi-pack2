@@ -85,7 +85,10 @@ fn test_mods_list_endpoint_returns_ok_even_when_dir_missing() {
 #[test]
 fn test_mod_file_read_returns_raw_toml_text() {
     let stop = start_server(17416);
-    let path = common::temp_dir_for_test("api_mod_file_read.mod");
+    // mod-file only serves files from the mods folder next to the running exe.
+    let mods = std::env::current_exe().unwrap().parent().unwrap().join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let path = mods.join(format!("api_mod_file_read_{}.mod", std::process::id()));
     std::fs::write(&path, "[meta]\nname = \"test\"\nversion = \"1.0.0\"\n").unwrap();
 
     let resp: serde_json::Value = reqwest::blocking::get(format!(
@@ -100,6 +103,25 @@ fn test_mod_file_read_returns_raw_toml_text() {
     assert!(content.contains("name = \"test\""), "expected raw TOML text, got: {}", content);
 
     let _ = std::fs::remove_file(&path);
+    stop_server(stop);
+}
+
+#[test]
+fn test_mod_file_read_refuses_paths_outside_mods_folder() {
+    let stop = start_server(17417);
+    let outside = common::temp_dir_for_test("api_mod_file_outside.mod");
+    std::fs::write(&outside, "secret").unwrap();
+    for path in [outside.to_string_lossy().to_string(), "../Cargo.toml".to_string()] {
+        let resp = reqwest::blocking::get(format!(
+            "http://127.0.0.1:17417/api/v1/mod-file?path={}",
+            urlencoding_encode(&path)
+        ))
+        .expect("request failed");
+        assert_eq!(resp.status(), 403, "{}", path);
+        let body: serde_json::Value = resp.json().expect("invalid JSON");
+        assert_eq!(body["success"], false);
+    }
+    let _ = std::fs::remove_file(&outside);
     stop_server(stop);
 }
 
