@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mabi-pack2",
-  "version": "1.4.1",
-  "identifier": "com.shaggyze.mabi-pack2",
+  "productName": "mabi-patcher",
+  "version": "2.0.0",
+  "identifier": "com.shaggyze.mabi-patcher",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
@@ -13,9 +13,10 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "mabi-pack2",
+        "title": "mabi-patcher",
         "width": 1100,
-        "height": 850
+        "height": 850,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -42,15 +43,21 @@
     "fileAssociations": [
       {
         "ext": ["it"],
-        "name": "mabi-pack2.archive",
+        "name": "mabi-patcher.archive",
         "description": "Mabinogi IT Archive",
         "mimeType": "application/octet-stream"
       },
       {
         "ext": ["pack"],
-        "name": "mabi-pack2.archive.v1",
+        "name": "mabi-patcher.archive.v1",
         "description": "Mabinogi PACK Archive",
         "mimeType": "application/octet-stream"
+      },
+      {
+        "ext": ["mod"],
+        "name": "mabi-patcher.mod",
+        "description": "mabi-patcher Mod Instruction File",
+        "mimeType": "text/plain"
       }
     ]
   }

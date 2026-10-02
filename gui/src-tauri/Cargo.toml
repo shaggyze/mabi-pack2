@@ -1,8 +1,8 @@
 [package]
-name = "mabi-pack2"
-version = "1.4.1"
-description = "Mabinogi Pack Utilities 2 GUI"
-authors = ["regomne <fallingsunz@gmail.com>"]
+name = "mabi-patcher"
+version = "2.0.0"
+description = "mabi-patcher: Mabinogi Archive & Patcher Suite"
+authors = ["ShaggyZE <shaggyze@gmail.com>"]
 edition = "2021"
 
 [lib]
@@ -30,10 +30,19 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
 base64 = "0.22"
+flate2 = "1"
+rayon = "1"
+sha1 = "0.10"
+ureq = { version = "2", features = ["native-tls"] }
+filetime = "0.2"
 directories = "5.0"
 sysinfo = "0.38.4"
 once_cell = "1.19"
 encoding_rs = "0.8"
+toml = { version = "0.8", features = ["parse"] }
+tiny_http = "0.12"
+tokio = { version = "1.53.1", features = ["time"] }
+aes-gcm = "0.11.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

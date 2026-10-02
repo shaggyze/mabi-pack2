@@ -1,12 +1,18 @@
+pub mod api;
+pub mod area;
 pub mod common;
+#[cfg(target_os = "windows")]
+pub mod launcher;
 pub mod common_ext;
 pub mod encryption;
 pub mod extract;
 pub mod list;
+pub mod mod_file;
 pub mod pack;
 pub mod pack_v1;
 pub mod patch;
 pub mod pmg;
+pub mod rgn;
 
 pub const SALTS_URL: &str = "https://shaggyze.website/files/salts.txt";
 
