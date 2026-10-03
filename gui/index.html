@@ -56,13 +56,13 @@
           <span class="nav-icon">🧩</span>
           <span class="nav-text" id="tab-mods-text" data-i18n="tab_mods">Mods</span>
         </button>
-        <button class="nav-item" data-tab="patcher" id="tab-patcher" data-tooltip="tab_patcher">
-          <span class="nav-icon">🛠️</span>
-          <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
-        </button>
         <button class="nav-item" data-tab="features" id="tab-features" data-tooltip="tab_features">
           <span class="nav-icon">🎛️</span>
           <span class="nav-text" id="tab-features-text" data-i18n="tab_features">Features</span>
+        </button>
+        <button class="nav-item" data-tab="patcher" id="tab-patcher" data-tooltip="tab_patcher">
+          <span class="nav-icon">🛠️</span>
+          <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
         </button>
         <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
           <span class="nav-icon">🚀</span>
@@ -295,11 +295,19 @@
               <button class="tab-btn primary" id="btn-launcher-login">
                 <span id="btn-launcher-login-text">Login</span>
               </button>
-              <button class="tab-btn" id="btn-launcher-import-session" data-tooltip="tooltip_import_session">
-                <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
-              </button>
-              <button class="tab-btn" id="btn-launcher-import-browser" data-i18n="btn_launcher_import_browser">Import from browser</button>
-              <button class="tab-btn" id="btn-launcher-import-kanan" data-i18n="btn_launcher_import_kanan" data-tooltip="tooltip_import_kanan">Import from Kanan</button>
+              <div class="menu-btn" id="launcher-import-menu">
+                <button class="tab-btn menu-btn-toggle" id="btn-launcher-import-toggle" aria-haspopup="menu" aria-expanded="false">
+                  <span data-i18n="btn_launcher_import_menu">Import session</span> ▾
+                </button>
+                <div class="menu-btn-list" role="menu">
+                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-session" data-tooltip="tooltip_import_session">
+                    <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
+                  </button>
+                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-browser" data-i18n="btn_launcher_import_browser">Import from browser</button>
+                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-kanan" data-i18n="btn_launcher_import_kanan" data-tooltip="tooltip_import_kanan">Import from Kanan</button>
+                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-hyddwn" data-i18n="btn_launcher_import_hyddwn">Import from Hyddwn Launcher</button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -333,7 +341,7 @@
               <div class="input-row">
                 <input type="text" id="launcher-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
                 <button class="tab-btn" id="btn-launcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
-                <button class="tab-btn" id="btn-launcher-installs" style="white-space:nowrap" data-i18n="btn_check_installs">Check all installs</button>
+                <button class="tab-btn" id="btn-launcher-installs" data-i18n="btn_check_installs">Check all installs</button>
               </div>
             </div>
             <div id="launcher-installs-panel" class="installs-panel hidden"></div>
@@ -369,7 +377,7 @@
           <div class="salt-combo-container">
               <div class="input-row">
                 <input type="text" id="extract-key" placeholder="Auto-detecting..." autocomplete="off" />
-                <button id="btn-salt-history-extract" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+                <button id="btn-salt-history-extract" class="tab-btn icon-btn" data-tooltip="tooltip_salt_history">▼</button>
               </div>
               <div id="salt-list-extract" class="salt-list-wrapper" style="display:none"></div>
           </div>
@@ -408,7 +416,7 @@
             <div class="salt-combo-container">
                 <div class="input-row">
                   <input type="text" id="pack-key" value="})wWb4?-sVGHNoPKpc" autocomplete="off" />
-                  <button id="btn-salt-history-pack" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+                  <button id="btn-salt-history-pack" class="tab-btn icon-btn" data-tooltip="tooltip_salt_history">▼</button>
                 </div>
                 <div id="salt-list-pack" class="salt-list-wrapper" style="display:none"></div>
             </div>
@@ -491,8 +499,8 @@
         </div>
         
         <div class="input-row" style="margin-top: 10px;">
-            <button id="extractSelected" class="run-btn" style="flex: 1" data-tooltip="tooltip_extract_sel">EXTRACT SELECTED</button>
-            <button id="extractAll" class="run-btn" style="flex: 1" data-tooltip="tooltip_extract_all">EXTRACT ALL</button>
+            <button id="extractSelected" class="run-btn" data-tooltip="tooltip_extract_sel">EXTRACT SELECTED</button>
+            <button id="extractAll" class="run-btn" data-tooltip="tooltip_extract_all">EXTRACT ALL</button>
             <button id="ctxConvIt" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_it">TO .IT</button>
             <button id="ctxConvPack" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_pack">TO .PACK</button>
         </div>
@@ -501,7 +509,7 @@
         <div class="input-row vfs-toolbar hidden" id="vfs-toolbar" style="margin-top: 6px; gap: 6px;">
             <span id="vfs-pending-badge" class="vfs-badge">0 changes</span>
             <button id="btn-vfs-merge" class="tab-btn" style="flex:0; white-space:nowrap" data-tooltip="tooltip_vfs_merge" data-i18n="btn_vfs_merge">MERGE .IT</button>
-            <button id="btn-vfs-apply" class="run-btn" style="flex:1" data-tooltip="tooltip_vfs_apply" data-i18n="btn_vfs_apply">APPLY CHANGES</button>
+            <button id="btn-vfs-apply" class="run-btn" data-tooltip="tooltip_vfs_apply" data-i18n="btn_vfs_apply">APPLY CHANGES</button>
             <button id="btn-vfs-reset" class="tab-btn" style="color:var(--accent-warn,#f90)" data-tooltip="tooltip_vfs_reset" data-i18n="btn_vfs_reset">RESET</button>
         </div>
 
@@ -535,7 +543,7 @@
               <div class="salt-combo-container">
                   <div class="input-row">
                     <input type="text" id="differ-key" value="@6QeTuOaDgJlZcBm#9" autocomplete="off" />
-                    <button id="btn-salt-history-differ" class="tab-btn" data-tooltip="tooltip_salt_history">▼</button>
+                    <button id="btn-salt-history-differ" class="tab-btn icon-btn" data-tooltip="tooltip_salt_history">▼</button>
                   </div>
                   <div id="salt-list-differ" class="salt-list-wrapper" style="display:none"></div>
               </div>
@@ -596,7 +604,7 @@
             <span style="font-size:0.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em" data-i18n="patcher_available">Available</span>
             <span style="font-size:1.1rem;font-weight:bold;color:var(--accent-cyan)" id="patcher-version-remote">—</span>
           </div>
-          <button class="tab-btn" id="btn-patcher-check" style="margin-left:auto;font-size:0.75rem;padding:3px 10px" data-i18n="patcher_check">Check</button>
+          <button class="tab-btn" id="btn-patcher-check" style="margin-left:auto" data-i18n="patcher_check">Check</button>
         </div>
 
         <!-- Game path -->
@@ -607,7 +615,7 @@
 
         <!-- Action buttons + inline status -->
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-          <button class="tab-btn primary" id="btn-patcher-patch" style="padding:5px 18px;font-size:0.9rem" data-i18n="patcher_patch">▶ Patch</button>
+          <button class="tab-btn primary" id="btn-patcher-patch" data-i18n="patcher_patch">▶ Patch</button>
           <button class="tab-btn" id="btn-patcher-verify" data-i18n="patcher_verify">Verify</button>
           <button class="tab-btn" id="btn-patcher-repair" data-i18n="patcher_repair">Repair</button>
           <button class="tab-btn" id="btn-patcher-scan" data-i18n="patcher_choose_files">Choose files…</button>
@@ -655,8 +663,8 @@
           <button class="settings-stab" data-stab="autostart">⏱ <span data-i18n="stab_autostart">Autostart</span></button>
           <button class="settings-stab" data-stab="engine">⚙️ <span data-i18n="stab_engine">Engine</span></button>
           <button class="settings-stab" data-stab="fileassoc">🔗 <span data-i18n="stab_file_assoc">File Assoc</span></button>
-          <button class="settings-stab" data-stab="launcher">🚀 <span data-i18n="stab_launcher">Launcher</span></button>
           <button class="settings-stab" data-stab="patcher">🛠️ <span data-i18n="stab_patcher">Patcher</span></button>
+          <button class="settings-stab" data-stab="launcher">🚀 <span data-i18n="stab_launcher">Launcher</span></button>
           <button class="settings-stab active" data-stab="themes">🎨 <span data-i18n="stab_themes">Themes</span></button>
         </div>
 
@@ -852,8 +860,8 @@
                 <select id="launcher-profile-select" class="form-input profile-select">
                   <option value="" data-i18n="launcher_no_profiles">— No profiles saved —</option>
                 </select>
-                <button class="tab-btn" id="btn-profile-new" data-tooltip="tooltip_profile_new">+</button>
-                <button class="tab-btn" id="btn-profile-delete" data-tooltip="tooltip_profile_delete">🗑</button>
+                <button class="tab-btn icon-btn" id="btn-profile-new" data-tooltip="tooltip_profile_new">+</button>
+                <button class="tab-btn icon-btn" id="btn-profile-delete" data-tooltip="tooltip_profile_delete">🗑</button>
               </div>
               <div id="launcher-profile-editor" class="hidden">
                 <div class="form-group">
@@ -1117,6 +1125,7 @@
 
       </div>
 
+      <div class="resize-handle-h" id="console-split-handle" title=""></div>
       <div class="log-container">
         <h3 id="logs">LOGS:</h3>
         <div id="log-view" class="log-box"></div>

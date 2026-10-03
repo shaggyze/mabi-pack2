@@ -222,6 +222,8 @@ function elText<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text
 }
 
 class App {
+    /** Value of the "New profile…" entry in the Launcher page profile dropdown. */
+    static readonly NEW_PROFILE_OPTION = "__new_profile__";
     private config: Config = {
         theme: "sky-dark",
         locale: "en",
@@ -460,6 +462,8 @@ class App {
             ["setupThemeCustomizer", () => this.setupThemeCustomizer()],
             ["setupPatcherTab", () => this.setupPatcherTab()],
             ["setupResizableList", () => this.setupResizableList()],
+            ["setupResizableConsole", () => this.setupResizableConsole()],
+            ["setupMenuButtons", () => this.setupMenuButtons()],
             ["setup3dPreviewResize", () => this.setup3dPreviewResize()],
             ["setupForms", () => this.setupForms()],
             ["setupNews", () => this.setupNews()],
@@ -3366,6 +3370,7 @@ class App {
         document.getElementById("btn-launcher-import-session")?.addEventListener("click", () => this.launcherImportSession());
         document.getElementById("btn-launcher-import-browser")?.addEventListener("click", () => this.launcherImportBrowser());
         document.getElementById("btn-launcher-import-kanan")?.addEventListener("click", () => this.launcherImportKanan());
+        document.getElementById("btn-launcher-import-hyddwn")?.addEventListener("click", () => this.launcherImportHyddwn());
         document.getElementById("btn-launcher-installs")?.addEventListener("click", () => this.checkAllInstalls("launcher-installs-panel"));
 
         document.getElementById("btn-launcher-check-update")?.addEventListener("click", async () => {
@@ -3415,19 +3420,19 @@ class App {
 
         // Profile quick-select on main Launcher page
         document.getElementById("launcher-page-profile-select")?.addEventListener("change", (e) => {
-            const id = (e.target as HTMLSelectElement).value;
+            const sel = e.target as HTMLSelectElement;
+            const id = sel.value;
+            if (id === App.NEW_PROFILE_OPTION) {
+                sel.value = this.activeProfileId || "";
+                this.openProfileManager(true);
+                return;
+            }
             this.selectProfile(id);
             // Mirror selection to settings dropdown
             const settingsSel = document.getElementById("launcher-profile-select") as HTMLSelectElement;
             if (settingsSel) settingsSel.value = id;
         });
-        document.getElementById("btn-launcher-manage-profiles")?.addEventListener("click", () => {
-            // Navigate to Settings > Launcher sub-tab
-            document.getElementById("tab-settings")?.click();
-            setTimeout(() => {
-                (document.querySelector("[data-stab='launcher']") as HTMLElement)?.click();
-            }, 50);
-        });
+        document.getElementById("btn-launcher-manage-profiles")?.addEventListener("click", () => this.openProfileManager(false));
 
         // Profile buttons
         document.getElementById("btn-profile-detect")?.addEventListener("click", () => this.detectLauncherProfiles());
@@ -3512,6 +3517,7 @@ class App {
             if (active) this.activeProfileId = active.id;
 
             this.renderProfileSelect();
+            this.promptIfNoUsableProfile();
 
             if (active) {
                 this.applyProfileToUI(active);
@@ -3556,6 +3562,15 @@ class App {
                 if (p.id === this.activeProfileId) opt.selected = true;
                 sel.appendChild(opt);
             }
+        }
+        // Launcher page: a last entry that opens the profile editor.
+        const pageSel = document.getElementById("launcher-page-profile-select") as HTMLSelectElement | null;
+        if (pageSel) {
+            const add = document.createElement("option");
+            add.value = App.NEW_PROFILE_OPTION;
+            add.dataset.i18n = "launcher_profile_new_option";
+            add.textContent = this.t("launcher_profile_new_option");
+            pageSel.appendChild(add);
         }
         this.startProfileExpiryTimer();
     }
@@ -3625,6 +3640,32 @@ class App {
         this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [p.name])}`, "warn");
         await this.promptRelogin();
         return true;
+    }
+
+    /** Settings > Launcher (profile list); `newProfile` also opens a blank profile editor. */
+    private openProfileManager(newProfile: boolean) {
+        document.getElementById("tab-settings")?.click();
+        setTimeout(() => {
+            (document.querySelector("[data-stab='launcher']") as HTMLElement)?.click();
+            if (newProfile) this.openProfileEditor("new");
+        }, 50);
+    }
+
+    /** A profile can launch: official needs a game folder; a custom server also needs its login IP. */
+    private profileUsable(p: any): boolean {
+        if (!p?.client_dir) return false;
+        return p.is_official !== false || !!p.login_ip;
+    }
+
+    /** Once per app run: when no saved profile can launch, open the profile manager,
+     *  scan for installed launchers and start a new profile. */
+    private noUsableProfilePrompted = false;
+    private promptIfNoUsableProfile() {
+        if (this.noUsableProfilePrompted || this.launcherProfiles.some(p => this.profileUsable(p))) return;
+        this.noUsableProfilePrompted = true;
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_no_usable_profile")}`, "warn");
+        this.openProfileManager(true);
+        void this.detectLauncherProfiles();
     }
 
     private applyProfileToUI(profile: any) {
@@ -3789,6 +3830,7 @@ class App {
                 login_ip: string; login_port: number;
                 chat_ip: string; chat_port: number;
                 is_official: boolean;
+                profiles_path?: string;
             }>;
             if (!detected || detected.length === 0) {
                 if (statusEl) statusEl.textContent = this.t("launcher_none_detected");
@@ -3808,8 +3850,9 @@ class App {
                     const info = d.is_official
                         ? `${d.name}${d.client_dir ? " — " + d.client_dir : ""}`
                         : `${d.name}${d.login_ip ? " — " + d.login_ip + ":" + d.login_port : ""}`;
+                    // Kanan accounts import under their own email, so match any kanan profile.
                     const alreadyImported = this.launcherProfiles.some(
-                        p => p.name === d.name && p.profile_type === d.source
+                        p => p.profile_type === d.source && (d.source === "kanan" ? !!p.email : p.name === d.name)
                     );
                     row.innerHTML = `
                         <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:var(--accent-cyan);color:#000">${badge}</span>
@@ -3819,6 +3862,11 @@ class App {
                     const importBtn = row.querySelector("button")!;
                     const detected_copy = d;
                     importBtn.addEventListener("click", async () => {
+                        // Kanan entries carry accounts (profiles.dat): import those, not a blank profile.
+                        if (detected_copy.source === "kanan" && detected_copy.profiles_path) {
+                            await this.launcherImportKanan(detected_copy.profiles_path);
+                            return;
+                        }
                         try {
                             await invoke("launcher_save_profile", {
                                 id: null,
@@ -4015,10 +4063,24 @@ class App {
     }
 
     /** Import saved accounts from Kanan's profiles.dat (asks for the Kanan master password). */
-    private async launcherImportKanan() {
+    private async launcherImportKanan(knownPath?: string) {
         const { importFromKanan } = await import("./kananImport");
         try {
             await importFromKanan({
+                t: (k, a) => this.t(k, a ?? []),
+                log: (m, l) => this.log(m, l),
+                reloadProfiles: () => this.loadProfiles(),
+            }, knownPath);
+        } catch (e) {
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_kanan_import_failed", [String(e)])}`, "error");
+        }
+    }
+
+    /** Import HyddwnLauncher's saved accounts (one profile + login each). */
+    private async launcherImportHyddwn() {
+        const { importFromHyddwn } = await import("./kananImport");
+        try {
+            await importFromHyddwn({
                 t: (k, a) => this.t(k, a ?? []),
                 log: (m, l) => this.log(m, l),
                 reloadProfiles: () => this.loadProfiles(),
@@ -4330,6 +4392,70 @@ class App {
             document.body.style.userSelect = "";
             localStorage.setItem("list-split-px", String(Math.round(leftPane.getBoundingClientRect().width)));
         });
+    }
+
+    /** Horizontal handle between the tab content and the LOGS console: drag to resize the console. */
+    private setupResizableConsole() {
+        const handle = document.getElementById("console-split-handle");
+        const consoleEl = document.querySelector(".log-container") as HTMLElement | null;
+        if (!handle || !consoleEl) return;
+
+        const saved = localStorage.getItem("console-height-px");
+        if (saved) consoleEl.style.height = `${saved}px`;
+
+        let dragging = false;
+        let startY = 0;
+        let startHeight = 0;
+
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            startY = (e as MouseEvent).clientY;
+            startHeight = consoleEl.getBoundingClientRect().height;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            // Dragging up grows the console; keep at least 80px of console and 200px of content.
+            const max = Math.max(80, window.innerHeight - 200);
+            const h = Math.max(80, Math.min(max, startHeight - ((e as MouseEvent).clientY - startY)));
+            consoleEl.style.height = `${h}px`;
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem("console-height-px", String(Math.round(consoleEl.getBoundingClientRect().height)));
+        });
+        handle.addEventListener("dblclick", () => {
+            consoleEl.style.height = "";
+            localStorage.removeItem("console-height-px");
+        });
+    }
+
+    /** `.menu-btn` dropdowns: the toggle opens its list; picking an item or clicking elsewhere closes it. */
+    private setupMenuButtons() {
+        const closeAll = (except?: Element) => document.querySelectorAll(".menu-btn.open").forEach(m => {
+            if (m === except) return;
+            m.classList.remove("open");
+            m.querySelector(".menu-btn-toggle")?.setAttribute("aria-expanded", "false");
+        });
+        document.querySelectorAll(".menu-btn").forEach(menu => {
+            const toggle = menu.querySelector(".menu-btn-toggle");
+            toggle?.addEventListener("click", (e) => {
+                e.stopPropagation();
+                closeAll(menu);
+                const open = menu.classList.toggle("open");
+                toggle.setAttribute("aria-expanded", String(open));
+            });
+            menu.querySelectorAll(".menu-btn-item").forEach(item => item.addEventListener("click", () => closeAll()));
+        });
+        document.addEventListener("click", () => closeAll());
+        document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeAll(); });
     }
 
     private setup3dPreviewResize() {

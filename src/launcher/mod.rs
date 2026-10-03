@@ -5,6 +5,8 @@ pub mod config;
 pub mod cookie_dec;
 pub mod cookies;
 pub mod detect;
+pub mod hyddwn_import;
+pub mod import_guard;
 pub mod kanan_import;
 pub mod keystore;
 pub mod launch;
