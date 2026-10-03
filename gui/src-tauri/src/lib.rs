@@ -4554,8 +4554,33 @@ async fn nexon_login_webview(app: tauri::AppHandle, profile_id: Option<String>) 
 /// Import session from the official Nexon Launcher's cookie store.
 #[tauri::command]
 fn launcher_import_session(profile_id: Option<String>) -> Result<serde_json::Value, String> {
+    use mabi_pack2::launcher::{auth, import_guard, profile};
+    const SOURCE: &str = "nexon_launcher";
     let dev = login_device_id(profile_id.as_deref(), "");
-    let session = mabi_pack2::launcher::auth::import_from_nexon_launcher(&dev).map_err(|e| e.to_string())?;
+    let source_mtime = auth::nexon_launcher_cookie_db().map(|p| import_guard::file_mtime(&p)).unwrap_or(0);
+    let profile_expires_at = profile_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|id| profile::ProfileStore::load().ok().and_then(|st| st.get(id).map(|p| p.session_expires_at)))
+        .unwrap_or(0);
+    // Skip a source whose session was already found expired and has not changed since.
+    if import_guard::blocked(SOURCE, source_mtime, profile_expires_at).is_some() {
+        log::info!("[Launcher] Nexon Launcher import skipped: its session was already found expired");
+        return Err("The Nexon Launcher's saved session was already found expired and has not changed since. Log in to the Nexon Launcher, then import again.".to_string());
+    }
+    let mut session = auth::import_from_nexon_launcher(&dev).map_err(|e| e.to_string())?;
+    // Check the session before handing it over; a dead one is flagged, not saved.
+    let expired = match auth::check_session(&mut session) {
+        Ok(200) => false,
+        Ok(_) => matches!(auth::refresh(&mut session), Err(ref e) if auth::is_session_expired(e)),
+        Err(_) => false, // network trouble: let the caller try the session
+    };
+    if expired {
+        import_guard::flag(SOURCE, source_mtime, profile_expires_at);
+        log::warn!("[Launcher] Nexon Launcher session is expired; flagged until it changes");
+        return Err("The Nexon Launcher's saved session is expired. Log in to the Nexon Launcher, then import again.".to_string());
+    }
+    import_guard::clear(SOURCE);
     Ok(serde_json::json!({ "session": session }))
 }
 
@@ -5326,6 +5351,10 @@ struct DetectedProfile {
 
     is_official: bool,
 
+    /// Kanan: the profiles.dat this entry was found from (empty for other sources).
+
+    profiles_path: String,
+
 }
 
 
@@ -5373,6 +5402,9 @@ fn detect_launcher_profiles() -> Result<Vec<DetectedProfile>, String> {
             chat_port: 8002,
 
             is_official: true,
+
+
+            profiles_path: String::new(),
 
         });
 
@@ -5444,6 +5476,9 @@ fn detect_launcher_profiles() -> Result<Vec<DetectedProfile>, String> {
 
                             is_official: false,
 
+
+                            profiles_path: String::new(),
+
                         });
 
                     }
@@ -5458,40 +5493,31 @@ fn detect_launcher_profiles() -> Result<Vec<DetectedProfile>, String> {
 
 
 
-    // 3. Cichol (Kanan) launcher
 
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
 
-        let cichol = std::path::PathBuf::from(&local).join("Cichol").join("Cichol.exe");
 
-        if cichol.exists() {
 
-            detected.push(DetectedProfile {
-
-                source: "kanan".to_string(),
-
-                name: "Kanan".to_string(),
-
-                client_dir: String::new(),
-
-                login_ip: String::new(),
-
-                login_port: 0,
-
-                chat_ip: String::new(),
-
-                chat_port: 0,
-
-                is_official: false,
-
-            });
-
-        }
-
+    // 3. Kanan: its Launcher.exe keeps saved accounts in profiles.dat beside it
+    //    (usually <Mabinogi>\Kanan, installed there by uotiara). Kanan launches
+    //    the official NA client, so the entry is an official profile.
+    if let Some(dat) = mabi_pack2::launcher::kanan_import::default_path() {
+        let client_dir = mabi_pack2::launcher::kanan_import::game_dirs()
+            .into_iter()
+            .find(|d| d.join("Client.exe").exists())
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
+        detected.push(DetectedProfile {
+            source: "kanan".to_string(),
+            name: "Kanan".to_string(),
+            client_dir,
+            login_ip: String::new(),
+            login_port: 0,
+            chat_ip: String::new(),
+            chat_port: 0,
+            is_official: true,
+            profiles_path: dat.to_string_lossy().to_string(),
+        });
     }
-
-
-
     Ok(detected)
 
 }
@@ -7063,6 +7089,73 @@ fn repair_game_files(game_path: String) -> Result<serde_json::Value, String> {
 
 
 
+// ── Elevated drag-and-drop (WM_DROPFILES) ────────────────────────────────────
+// Windows (UIPI) never delivers an OLE drop from a non-admin Explorer to an admin
+// window, so tauri://drag-drop never fires while elevated. The legacy WM_DROPFILES
+// path can be opened with ChangeWindowMessageFilterEx: accept files on the main
+// window, subclass its WndProc, and re-emit drops as the same tauri://drag-drop event.
+#[cfg(windows)]
+mod elevated_drop {
+    use tauri::{Emitter, Manager};
+    use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
+    use winapi::shared::windef::{HWND, POINT};
+    use winapi::um::shellapi::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
+    use winapi::um::winuser::{
+        CallWindowProcW, ChangeWindowMessageFilterEx, SetWindowLongPtrW, GWLP_WNDPROC, MSGFLT_ALLOW,
+        WM_COPYDATA, WM_DROPFILES, WNDPROC,
+    };
+
+    const WM_COPYGLOBALDATA: UINT = 0x0049;
+    static OLD_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+    static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+    unsafe extern "system" fn wndproc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if msg == WM_DROPFILES {
+            let hdrop = wp as HDROP;
+            let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+            let mut paths = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
+                let mut buf = vec![0u16; len as usize + 1];
+                DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as UINT);
+                paths.push(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+            let mut pt = POINT { x: 0, y: 0 };
+            DragQueryPoint(hdrop, &mut pt);
+            DragFinish(hdrop);
+            if let Some(app) = APP.get() {
+                log::info!("[DROP] WM_DROPFILES: {} file(s)", paths.len());
+                let _ = app.emit("tauri://drag-drop", serde_json::json!({
+                    "paths": paths,
+                    "position": { "x": pt.x, "y": pt.y },
+                }));
+            }
+            return 0;
+        }
+        let old: WNDPROC = std::mem::transmute(OLD_PROC.load(std::sync::atomic::Ordering::Relaxed));
+        CallWindowProcW(old, hwnd, msg, wp, lp)
+    }
+
+    /// Enable WM_DROPFILES on the main window. Call once, only when elevated.
+    pub fn install(app: &tauri::AppHandle) -> Result<(), String> {
+        let win = app.get_webview_window("main").ok_or("no main window")?;
+        let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as HWND;
+        let _ = APP.set(app.clone());
+        unsafe {
+            for m in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
+                ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, std::ptr::null_mut());
+            }
+            let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wndproc as isize);
+            if old == 0 {
+                return Err("SetWindowLongPtrW failed".into());
+            }
+            OLD_PROC.store(old, std::sync::atomic::Ordering::Relaxed);
+            DragAcceptFiles(hwnd, 1);
+        }
+        Ok(())
+    }
+}
+
 pub fn run() {
 
     tauri::Builder::default()
@@ -7089,6 +7182,14 @@ pub fn run() {
 
             if let Err(e) = setup_tray(app) {
                 log::warn!("[GUI] Tray icon unavailable: {}", e);
+            }
+
+            #[cfg(windows)]
+            if is_ran_as_admin() {
+                match elevated_drop::install(&handle) {
+                    Ok(()) => log::info!("[GUI] Elevated: WM_DROPFILES drag-and-drop enabled"),
+                    Err(e) => log::warn!("[GUI] Elevated drag-and-drop unavailable: {}", e),
+                }
             }
 
             // `--minimized` (the Start with Windows entry): start hidden in the tray,
@@ -7215,7 +7316,7 @@ pub fn run() {
             patch_pause, patch_resume, patch_scan, patch_check_all_installs,
 
             launcher_import_browser, launcher_save_profile_session,
-            kanan_import::kanan_default_path, kanan_import::kanan_list_accounts, kanan_import::kanan_import_accounts, kanan_import::kanan_import_otp,
+            kanan_import::kanan_default_path, kanan_import::kanan_list_accounts, kanan_import::kanan_import_accounts, kanan_import::kanan_import_otp, kanan_import::hyddwn_list_accounts, kanan_import::hyddwn_import_accounts,
 
             shared_config_load, shared_config_save, fetch_news, open_external_url, set_tray_labels,
             get_start_with_windows, set_start_with_windows,

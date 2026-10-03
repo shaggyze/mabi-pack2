@@ -604,12 +604,17 @@ pub fn session_from_browser_cookies(
     Ok(None)
 }
 
+/// The official Nexon Launcher's cookie store (`%APPDATA%\NexonLauncher\Network\Cookies`).
+pub fn nexon_launcher_cookie_db() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(|a| std::path::PathBuf::from(a).join("NexonLauncher").join("Network").join("Cookies"))
+}
+
 /// Import session tokens from the official Nexon Launcher's cookie store.
 /// `device_id` is stamped on the session (the target profile's id; `device_id("")`
 /// for the legacy machine-only id).
 pub fn import_from_nexon_launcher(device_id: &str) -> Result<NexonSession> {
-    let appdata = std::env::var("APPDATA").map_err(|_| anyhow!("APPDATA not set"))?;
-    let db = std::path::PathBuf::from(&appdata).join("NexonLauncher").join("Network").join("Cookies");
+    let db = nexon_launcher_cookie_db().ok_or_else(|| anyhow!("APPDATA not set"))?;
     if !db.exists() {
         return Err(anyhow!("Nexon Launcher not installed or not found"));
     }
