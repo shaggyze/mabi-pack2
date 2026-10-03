@@ -36,10 +36,10 @@ pub fn dpapi_decrypt(_encrypted: &[u8]) -> Result<Vec<u8>, String> {
 
 pub fn get_webview2_key() -> Result<Vec<u8>, String> {
     let localappdata = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA not set".to_string())?;
+    // Chromium keeps `Local State` at the user-data root, beside (not inside) the `Default` profile.
     let local_state_path = std::path::PathBuf::from(localappdata)
         .join("com.shaggyze.mabi-patcher")
         .join("EBWebView")
-        .join("Default")
         .join("Local State");
     get_chromium_key(&local_state_path)
 }

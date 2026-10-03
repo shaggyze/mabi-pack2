@@ -212,14 +212,63 @@ pub fn read_profiles(path: &Path, master_password: &str) -> Result<Vec<ImportedA
 /// directory, i.e. next to its `Launcher.exe`. Returns the first existing
 /// candidate (current directory, then this program's folder).
 pub fn default_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    candidate_paths().into_iter().find(|p| p.is_file())
+}
+
+/// Where Kanan's `profiles.dat` can live. Kanan opens a bare `profiles.dat` in its
+/// working directory (LauncherApp.cpp), i.e. beside its `Launcher.exe`, and keeps
+/// no registry key, so check the folders Kanan is installed into:
+///   - `<Mabinogi>\Kanan\` (the uotiara installer's `$INSTDIR\Kanan`)
+///   - `<Mabinogi>\Tiara's Moonshine Mod\Tools\Kanan\` and the same under a
+///     `Documents\GitHub\uotiara` checkout
+///   - this process's working directory and exe folder
+pub fn candidate_paths() -> Vec<PathBuf> {
+    const KANAN_SUBDIRS: [&str; 2] = ["Kanan", r"Tiara's Moonshine Mod\Tools\Kanan"];
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for game in game_dirs() {
+        for sub in KANAN_SUBDIRS {
+            dirs.push(game.join(sub));
+        }
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        dirs.push(PathBuf::from(home).join(r"Documents\GitHub\uotiara").join(KANAN_SUBDIRS[1]));
+    }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(PROFILES_FILE));
+        dirs.push(cwd);
     }
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
-        candidates.push(dir.join(PROFILES_FILE));
+        dirs.push(dir);
     }
-    candidates.into_iter().find(|p| p.is_file())
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        let p = d.join(PROFILES_FILE);
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Mabinogi install folders: `HKCU\Software\Nexon\Mabinogi` (default value, the
+/// key uotiara's installer reads) and the Nexon Launcher default path.
+pub fn game_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+        if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Software\Nexon\Mabinogi") {
+            if let Ok(dir) = key.get_value::<String, _>("") {
+                if !dir.trim().is_empty() {
+                    dirs.push(PathBuf::from(dir.trim()));
+                }
+            }
+        }
+    }
+    let nexon_default = PathBuf::from(r"C:\Nexon\Library\mabinogi\appdata");
+    if !dirs.contains(&nexon_default) {
+        dirs.push(nexon_default);
+    }
+    dirs
 }
 
 /// Resolve a user-given path: a folder (Kanan's install dir) or
@@ -275,9 +324,32 @@ fn client_dir_from(client_path: &str) -> String {
     }
 }
 
+/// Where an imported account came from: sets the new profile's `profile_type`
+/// and the label used in names and messages.
+#[derive(Debug, Clone, Copy)]
+pub enum ImportSource {
+    Kanan,
+    Hyddwn,
+}
+
+impl ImportSource {
+    pub fn profile_type(self) -> &'static str {
+        match self {
+            ImportSource::Kanan => "kanan",
+            ImportSource::Hyddwn => "hyddwn",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ImportSource::Kanan => "Kanan",
+            ImportSource::Hyddwn => "Hyddwn Launcher",
+        }
+    }
+}
+
 /// The profile an account imports into: an existing profile with the same
-/// email (case-insensitive), else a new `kanan` profile named after it.
-fn profile_for_import(store: &profile::ProfileStore, acct: &ImportedAccount) -> profile::Profile {
+/// email (case-insensitive), else a new profile of `source`'s type named after it.
+fn profile_for_import(store: &profile::ProfileStore, acct: &ImportedAccount, source: ImportSource) -> profile::Profile {
     if let Some(p) = store.profiles.iter().find(|p| p.email.eq_ignore_ascii_case(&acct.username)) {
         let mut p = p.clone();
         if p.client_dir.is_empty() {
@@ -287,10 +359,10 @@ fn profile_for_import(store: &profile::ProfileStore, acct: &ImportedAccount) -> 
     }
     let mut name = acct.username.clone();
     if store.profiles.iter().any(|p| p.name == name) {
-        name = format!("{} (Kanan)", acct.username);
+        name = format!("{} ({})", acct.username, source.label());
     }
     let mut p = profile::Profile::new(&name, &acct.username);
-    p.profile_type = "kanan".to_string();
+    p.profile_type = source.profile_type().to_string();
     p.client_dir = client_dir_from(&acct.client_path);
     p.auto_login = true;
     p
@@ -299,14 +371,19 @@ fn profile_for_import(store: &profile::ProfileStore, acct: &ImportedAccount) -> 
 /// Create (or reuse) the account's profile, log in with its device id and
 /// save the session. The password is used only for this login request.
 pub fn import_account(acct: &ImportedAccount) -> Result<ImportOutcome> {
+    import_account_from(acct, ImportSource::Kanan)
+}
+
+/// [`import_account`] for accounts read from another launcher (`source`).
+pub fn import_account_from(acct: &ImportedAccount, source: ImportSource) -> Result<ImportOutcome> {
     let mut store = profile::ProfileStore::load()?;
-    let p = profile_for_import(&store, acct);
+    let p = profile_for_import(&store, acct, source);
     let (id, name, device_id) = (p.id.clone(), p.name.clone(), p.device_id());
     store.upsert(p);
     store.save()?;
 
     let status = if acct.password.is_empty() {
-        ImportStatus::Failed { error: "No password saved in Kanan for this account".to_string() }
+        ImportStatus::Failed { error: format!("No password saved in {} for this account", source.label()) }
     } else {
         match auth::login(&acct.username, &acct.password, &device_id) {
             Ok(res) => {
@@ -598,7 +675,7 @@ mod tests {
             client_path: r"C:\Mabi\Client.exe".into(),
         };
         let mut store = profile::ProfileStore::default();
-        let p = profile_for_import(&store, &acct);
+        let p = profile_for_import(&store, &acct, ImportSource::Kanan);
         assert_eq!(p.profile_type, "kanan");
         assert_eq!(p.email, "Alice@Example.com");
         assert!(p.client_dir.ends_with("Mabi"));
@@ -606,11 +683,11 @@ mod tests {
         let existing = profile::Profile::new("main", "alice@example.com");
         let id = existing.id.clone();
         store.upsert(existing);
-        assert_eq!(profile_for_import(&store, &acct).id, id);
+        assert_eq!(profile_for_import(&store, &acct, ImportSource::Kanan).id, id);
         // A name clash with another account gets a suffix.
         let mut store = profile::ProfileStore::default();
         store.upsert(profile::Profile::new("Alice@Example.com", "other@example.com"));
-        assert_eq!(profile_for_import(&store, &acct).name, "Alice@Example.com (Kanan)");
+        assert_eq!(profile_for_import(&store, &acct, ImportSource::Kanan).name, "Alice@Example.com (Kanan)");
     }
 
     #[test]
