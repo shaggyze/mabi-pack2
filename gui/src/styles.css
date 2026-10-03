@@ -1132,3 +1132,63 @@ input:checked + .slider:before { transform: translateX(20px); }
   100% { left: 100%; }
 }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Button sizing system ──────────────────────────────────────────────────
+   Buttons size to their label. Three heights: 28 (small), 34 (default, matches
+   inputs), 40 (primary run action). Single-glyph buttons are square. */
+:root { --btn-h-sm: 28px; --btn-h: 34px; --btn-h-lg: 40px; }
+
+button.tab-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: var(--btn-h); min-width: 0; padding: 0 14px;
+    font-size: 0.76rem; letter-spacing: 0.06em; line-height: 1;
+    border-radius: 4px; flex: 0 0 auto;
+}
+button.tab-btn.primary {
+    background: var(--accent-cyan); color: #000; border-color: var(--accent-cyan);
+}
+button.tab-btn.primary:hover { filter: brightness(1.12); background: var(--accent-cyan); }
+button.tab-btn:disabled { opacity: .45; cursor: not-allowed; }
+button.tab-btn.icon-btn { width: var(--btn-h); padding: 0; font-size: 0.9rem; letter-spacing: 0; }
+
+/* Primary run actions: sized to label, left-aligned, never full width. */
+button.run-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    align-self: flex-start; flex: 0 0 auto;
+    height: var(--btn-h-lg); min-width: 200px; padding: 0 40px 0 28px;
+    font-size: 0.85rem; letter-spacing: 0.08em; margin-top: 8px;
+}
+.conflict-btn-overwrite { min-width: 0 !important; margin-top: 0; }
+
+/* Rows: buttons beside an input match its height; groups wrap instead of clipping. */
+.input-row { align-items: stretch; flex-wrap: wrap; }
+.input-row > input, .input-row > .form-input, .input-row > select,
+.input-row > .salt-combo-container { flex: 1 1 220px; min-width: 0; }
+.input-row > button.tab-btn { height: auto; min-height: var(--btn-h); }
+.form-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Compact buttons inside lists, headers and toolbars. */
+.tc-btn, .card-header button.tab-btn, .mod-item button.tab-btn,
+.settings-section button.tab-btn.btn-sm, button.tab-btn.btn-sm {
+    height: var(--btn-h-sm) !important; padding: 0 10px !important; font-size: 0.7rem !important;
+}
+
+/* Console resize handle (between tab content and LOGS). Double-click resets. */
+.resize-handle-h { height: 10px; margin-top: 0.5rem; cursor: row-resize; flex-shrink: 0; position: relative; }
+.resize-handle-h::after { content: ''; position: absolute; top: 4px; left: 0; right: 0; height: 2px; background: var(--border-glass); border-radius: 1px; transition: background 0.15s; }
+.resize-handle-h:hover::after, .resize-handle-h.dragging::after { background: var(--accent-cyan); }
+.resize-handle-h + .log-container { margin-top: 0; }
+
+/* Dropdown menu button (e.g. Launcher "Import session ▾"). */
+.menu-btn { position: relative; display: inline-flex; }
+.menu-btn-list {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; min-width: 100%;
+    flex-direction: column; padding: 4px; background: var(--bg-sidebar, #0d1b2a);
+    border: 1px solid var(--accent-cyan); border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.menu-btn.open .menu-btn-list { display: flex; }
+.menu-btn-item {
+    background: transparent; border: none; color: var(--text-primary); text-align: left; white-space: nowrap;
+    padding: 8px 12px; font-size: 0.8rem; border-radius: 3px; cursor: pointer;
+}
+.menu-btn-item:hover, .menu-btn-item:focus-visible { background: color-mix(in srgb, var(--accent-cyan) 15%, transparent); color: var(--accent-cyan); outline: none; }
