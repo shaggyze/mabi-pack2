@@ -175,7 +175,20 @@ On any error the temp file is deleted and the error is recorded as
 Each file is written under the content root with `common::safe_join`.
 Manifest entries whose path is absolute, has a drive prefix or contains
 `..` are skipped when the manifest is parsed (logged as `skipping manifest
-entry`).
+entry`). A file is not written when any existing folder or file on its path
+below the content root is a junction or symlink (`refuse_links`).
+
+Size limits stop a broken or hostile response early:
+
+| Limit | Value |
+|---|---|
+| Manifest download | 64 MiB |
+| Manifest after unzip | 256 MiB |
+| Part download, and part after unzip | 64 MiB each |
+| Files in a manifest | 200,000 |
+| Parts per file | 4,096 (larger entries are skipped) |
+| File size | 8 GiB (larger entries are skipped) |
+| Path length | 260 characters (longer entries are skipped) |
 
 ### Pause
 

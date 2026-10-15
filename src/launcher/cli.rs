@@ -1,11 +1,11 @@
 // Launcher CLI, shared by mabi-patcher.exe (GUI) and the CLI binary.
 //
-//   login [--profile N] [-u E -p P] [--client DIR]          -u/-p may come from MABI_EMAIL/MABI_PASSWORD
+//   login [--profile N] [-u E --password-stdin] [--client DIR]  -u / password may come from MABI_EMAIL/MABI_PASSWORD
 //   login-otp --mfa-key K --otp CODE [--profile N] [-u E] [--client DIR]
 //   config [show | ignore add|remove PATTERN | hook EVENT [CMD]]
 //   check-update [--profile N] [--game-path P]              exit 2 = update available
 //   update [--profile N] [--game-path P] [--force-all|--verify] [--scan-only] [-j N] [--ignore PAT]...
-//   launch [--profile N] [--client P] [-u E -p P] [--wait|--no-wait] [--version] [--manifest]
+//   launch [--profile N] [--client P] [-u E --password-stdin] [--wait|--no-wait] [--version] [--manifest]
 //   import-kanan [--file PATH] [--list]                      Kanan profiles.dat → profiles (prompts for master password)
 //
 // The game folder defaults to --game-path/--client, then the profile's folder,
@@ -23,6 +23,20 @@ use super::{auth, config, cookies, detect, launch, news, patch, profile};
 
 pub const NAMES: [&str; 9] =
     ["login", "login-otp", "config", "check-update", "update", "launch", "import-cookies", "news", "import-kanan"];
+
+/// `--password-stdin`: read the account password from the first line of stdin.
+fn password_stdin_arg() -> Arg<'static> {
+    Arg::new("password-stdin")
+        .long("password-stdin")
+        .action(ArgAction::SetTrue)
+        .help("Read the Nexon account password from stdin (or set MABI_PASSWORD)")
+}
+
+/// `-p/--password VALUE` is still parsed so old scripts get a clear error: a
+/// password on the command line is readable by every program on the PC.
+fn password_rejected_arg() -> Arg<'static> {
+    Arg::new("password").long("password").short('p').value_name("PASSWORD").hide(true)
+}
 
 pub fn commands() -> Vec<Command<'static>> {
     let profile_arg = || Arg::new("profile").long("profile").value_name("NAME").help("Profile to use (default: active/first profile)");
@@ -46,7 +60,8 @@ pub fn commands() -> Vec<Command<'static>> {
                 .about("Log in to Nexon NA (email/password) or refresh the profile's stored session")
                 .arg(profile_arg())
                 .arg(Arg::new("email").long("email").alias("username").short('u').value_name("EMAIL").help("Nexon account email (or set MABI_EMAIL)"))
-                .arg(Arg::new("password").long("password").short('p').value_name("PASSWORD").help("Nexon account password (or set MABI_PASSWORD)"))
+                .arg(password_stdin_arg())
+                .arg(password_rejected_arg())
                 .arg(Arg::new("client").long("client").short('c').value_name("DIR").help("Store this game folder (or Client.exe path) on the profile")),
             Command::new("login-otp")
                 .about("Submit the MFA code after `login` printed an MFA key")
@@ -95,7 +110,8 @@ pub fn commands() -> Vec<Command<'static>> {
                 .about("Log in (if needed) and launch Mabinogi without the Nexon Launcher; waits for the game to exit unless --no-wait")
                 .arg(profile_arg())
                 .arg(Arg::new("username").short('u').long("username").alias("email").value_name("EMAIL").help("Nexon account email (or MABI_EMAIL; otherwise the profile session is used)"))
-                .arg(Arg::new("password").short('p').long("password").value_name("PASSWORD").help("Nexon account password (or set MABI_PASSWORD)"))
+                .arg(password_stdin_arg())
+                .arg(password_rejected_arg())
                 .arg(Arg::new("client").short('c').long("client").alias("game-path").value_name("PATH").help("Mabinogi folder or Client.exe (default: profile, then auto-detect)"))
                 .arg(Arg::new("session-file").long("session-file").value_name("FILE").help("Use (and delete) a session JSON file — used by the Linux→Wine hand-off"))
                 .arg(Arg::new("remember").long("remember").action(ArgAction::SetTrue).help("Save the session for auto-login (always done; kept for compatibility)"))
@@ -216,18 +232,33 @@ fn save_profile_session(p: &profile::Profile, s: &auth::NexonSession) {
     }
 }
 
-fn password_arg(sub: &clap::ArgMatches) -> Option<String> {
-    sub.get_one::<String>("password")
-        .cloned()
-        .or_else(|| env_nonempty("MABI_PASSWORD"))
+/// The account password from `--password-stdin` or `MABI_PASSWORD`. `--password
+/// VALUE` is refused: other programs can read a process's command line.
+fn password_arg(sub: &clap::ArgMatches) -> Result<Option<String>> {
+    if sub.try_get_one::<String>("password").ok().flatten().is_some() {
+        return Err(anyhow::anyhow!(
+            "--password on the command line is visible to other programs on this PC; \
+             pipe it in with --password-stdin or set MABI_PASSWORD"
+        ));
+    }
+    if sub.try_get_one::<bool>("password-stdin").ok().flatten().copied().unwrap_or(false) {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let pw = line.trim_end_matches(['\r', '\n']).to_string();
+        if pw.is_empty() {
+            return Err(anyhow::anyhow!("--password-stdin: no password on stdin"));
+        }
+        return Ok(Some(pw));
+    }
+    Ok(env_nonempty("MABI_PASSWORD"))
 }
 
 /// Account email from `key` (-u), else `MABI_EMAIL` — the env fallback only applies
 /// when a password is available too, so a bare `login`/`launch` still uses the profile.
-fn email_arg(sub: &clap::ArgMatches, key: &str) -> Option<String> {
+fn email_arg(sub: &clap::ArgMatches, key: &str, have_password: bool) -> Option<String> {
     sub.get_one::<String>(key)
         .cloned()
-        .or_else(|| password_arg(sub).and_then(|_| env_nonempty("MABI_EMAIL")))
+        .or_else(|| if have_password { env_nonempty("MABI_EMAIL") } else { None })
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
@@ -246,7 +277,7 @@ fn login_device_id(profile_name: Option<&String>, email: &str) -> String {
 pub fn profile_session(profile_name: Option<&String>) -> Result<(profile::Profile, auth::NexonSession)> {
     let store = profile::ProfileStore::load()?;
     let p = find_profile(&store, profile_name)
-        .ok_or_else(|| anyhow::anyhow!("No profile found — run `login --email ... --password ...` first"))?;
+        .ok_or_else(|| anyhow::anyhow!("No profile found — log in with the GUI first"))?;
     let mut s = p.session.clone().unwrap_or_default();
     // The top-level token is written by every save path (including the GUI's
     // update_session), so it is the newest NxLSession.
@@ -265,7 +296,7 @@ pub fn profile_session(profile_name: Option<&String>) -> Result<(profile::Profil
     if p.session_expired() {
         let who = if p.email.is_empty() { String::new() } else { format!(" -u {}", p.email) };
         return Err(anyhow::anyhow!(
-            "The saved session of profile '{}' has expired — log in again: mabi-patcher login{} --password <PASSWORD> (or use the GUI login)",
+            "The saved session of profile '{}' has expired — log in again with the GUI (or: mabi-patcher login{} --password-stdin)",
             p.name, who
         ));
     }
@@ -351,9 +382,10 @@ fn run_launcher_cmd(name: &str, sub: &clap::ArgMatches) -> Result<i32> {
 
     match name {
         "login" => {
-            let email = email_arg(sub, "email");
+            let password = password_arg(sub)?;
+            let email = email_arg(sub, "email", password.is_some());
             let client = sub.get_one::<String>("client");
-            match (email, password_arg(sub)) {
+            match (email, password) {
                 (Some(e), Some(pw)) => print_login(auth::login(&e, &pw, &login_device_id(profile_name, &e)), profile_name, &e, client),
                 (None, None) => {
                     let (p, _) = profile_session(profile_name)?;
@@ -370,8 +402,8 @@ fn run_launcher_cmd(name: &str, sub: &clap::ArgMatches) -> Result<i32> {
                     }
                     Ok(0)
                 }
-                (Some(_), None) => Err(anyhow::anyhow!("--password (or MABI_PASSWORD) is required with --email")),
-                (None, Some(_)) => Err(anyhow::anyhow!("--email (or MABI_EMAIL) is required with --password")),
+                (Some(_), None) => Err(anyhow::anyhow!("--password-stdin (or MABI_PASSWORD) is required with --email")),
+                (None, Some(_)) => Err(anyhow::anyhow!("--email (or MABI_EMAIL) is required with a password")),
             }
         }
         "login-otp" => {
@@ -575,10 +607,11 @@ fn run_launcher_cmd_rest(name: &str, sub: &clap::ArgMatches, profile_name: Optio
             if let Some(f) = sub.get_one::<String>("session-file") {
                 return launch_from_session_file(sub, std::path::Path::new(f), wait);
             }
-            let (p, mut s) = match email_arg(sub, "username") {
+            let password = password_arg(sub)?;
+            let (p, mut s) = match email_arg(sub, "username", password.is_some()) {
                 Some(u) => {
-                    let pw = password_arg(sub)
-                        .ok_or_else(|| anyhow::anyhow!("--password (or MABI_PASSWORD) is required with --username"))?;
+                    let pw = password
+                        .ok_or_else(|| anyhow::anyhow!("--password-stdin (or MABI_PASSWORD) is required with --username"))?;
                     let res = auth::login(&u, &pw, &login_device_id(profile_name, &u))?;
                     let p = store_session(profile_name, &u, &res.session, res.session_expires_in, None)?;
                     (p, res.session)
@@ -681,6 +714,13 @@ mod tests {
         parse(&["launch", "--profile", "main", "--game-path", "/g", "--no-wait", "--manifest"]);
         parse(&["launch", "--session-file", "/tmp/s.json", "--client", "/g"]);
         parse(&["import-kanan", "--file", "C:/Kanan/profiles.dat", "--list"]);
+        parse(&["login", "-u", "a@b.c", "--password-stdin"]);
+        parse(&["launch", "-u", "a@b.c", "--password-stdin", "--no-wait"]);
+
+        // A password value on the command line is refused, not used.
+        let m = parse(&["login", "-u", "a@b.c", "-p", "pw"]);
+        let (_, sub) = m.subcommand().unwrap();
+        assert!(password_arg(sub).is_err());
 
         let m = parse(&["update", "--ignore", "x", "--ignore", "y"]);
         let (_, sub) = m.subcommand().unwrap();

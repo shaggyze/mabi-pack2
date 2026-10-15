@@ -8,6 +8,7 @@
 // left-handed Y-up space, which becomes rotation.y = rotation + 90° here with the model
 // mirrored on Z. Not verified against the game client.
 import * as THREE from "three";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import type { PmgPart } from "./pmg";
 import type { DecodedTexture } from "./ddsDecode";
 import { dataTextureFrom } from "./modelViewer";
@@ -34,6 +35,7 @@ export interface WorldView {
     reset(): void;
     resize(): void;
     dispose(): void;
+    exportGLB(): void;
 }
 
 const S = 0.01;
@@ -366,6 +368,28 @@ export function createWorldView(opts: WorldViewOptions): WorldView {
             camera.updateProjectionMatrix();
             dirty = true;
         },
+        exportGLB() {
+            const exporter = new GLTFExporter();
+            exporter.parse(
+                scene,
+                (gltf) => {
+                    const blob = new Blob([gltf as ArrayBuffer], { type: "application/octet-stream" });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.style.display = "none";
+                    link.href = url;
+                    link.download = "scene.glb";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                },
+                (error) => {
+                    console.error("An error happened during parsing", error);
+                },
+                { binary: true }
+            );
+        },
         dispose() {
             if (disposed) return;
             disposed = true;
@@ -380,3 +404,4 @@ export function createWorldView(opts: WorldViewOptions): WorldView {
         },
     };
 }
+

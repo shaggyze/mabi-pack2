@@ -70,7 +70,9 @@ function exportableMaterial(m: THREE.Material): THREE.Material {
     return clone;
 }
 
-export function createModelViewer(container: HTMLElement, parts: PmgPart[], opts: ModelViewerOptions = {}): ModelViewer {
+import type { FrmBone } from "./frm";
+
+export function createModelViewer(container: HTMLElement, parts: PmgPart[], opts: ModelViewerOptions & { bones?: FrmBone[] } = {}): ModelViewer {
     const accent = opts.accent ?? 0x00d2ff;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(opts.background ?? 0x0d0d1a);
@@ -105,6 +107,41 @@ export function createModelViewer(container: HTMLElement, parts: PmgPart[], opts
     const materials: THREE.MeshPhongMaterial[] = [];
     const bounds = new THREE.Box3();
 
+    let skeleton: THREE.Skeleton | null = null;
+    if (opts.bones && opts.bones.length > 0) {
+        const threeBones = opts.bones.map(b => {
+            const bone = new THREE.Bone();
+            bone.name = b.name;
+            bone.matrixAutoUpdate = false;
+            // localMatrix is column-major 16-element array
+            bone.matrix.fromArray(b.localMatrix);
+            bone.matrix.decompose(bone.position, bone.quaternion, bone.scale);
+            bone.updateMatrixWorld(true);
+            return bone;
+        });
+        
+        for (let i = 0; i < opts.bones.length; i++) {
+            const parentId = opts.bones[i].parentId;
+            if (parentId >= 0 && parentId < threeBones.length && parentId !== i) {
+                threeBones[parentId].add(threeBones[i]);
+            }
+        }
+        
+        for (let i = 0; i < threeBones.length; i++) {
+            if (!threeBones[i].parent) model.add(threeBones[i]);
+        }
+        
+        skeleton = new THREE.Skeleton(threeBones);
+        // Compute inverse bind matrices from the provided global inverse matrix or let Three compute them
+        if (opts.bones[0].inverseGlobalMatrix) {
+            for (let i = 0; i < opts.bones.length; i++) {
+                skeleton.boneInverses[i].fromArray(opts.bones[i].inverseGlobalMatrix);
+            }
+        } else {
+            skeleton.calculateInverses();
+        }
+    }
+
     // Parts named only with underscores are collision/helper meshes on the site; skip them.
     for (const part of parts.filter(p => !/^_+$/.test(p.textureName || ""))) {
         if (part.positions.length < 9 || part.indices.length < 3) continue;
@@ -113,6 +150,12 @@ export function createModelViewer(container: HTMLElement, parts: PmgPart[], opts
         geo.setAttribute("position", new THREE.Float32BufferAttribute(part.positions, 3));
         if (part.uvs.length) geo.setAttribute("uv", new THREE.Float32BufferAttribute(part.uvs, 2));
         if (vary) geo.setAttribute("color", new THREE.Float32BufferAttribute(part.colors, 3));
+        
+        if (skeleton && part.skinIndices && part.skinWeights) {
+            geo.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(part.skinIndices, 4));
+            geo.setAttribute("skinWeight", new THREE.Float32BufferAttribute(part.skinWeights, 4));
+        }
+
         geo.setIndex(part.indices);
         geo.computeVertexNormals();
         geo.computeBoundingBox();
@@ -127,7 +170,14 @@ export function createModelViewer(container: HTMLElement, parts: PmgPart[], opts
         });
         mat.userData.textureName = part.textureName || "";
         mat.userData.hasColors = vary;
-        const mesh = new THREE.Mesh(geo, mat);
+        
+        const mesh = skeleton ? new THREE.SkinnedMesh(geo, mat) : new THREE.Mesh(geo, mat);
+        if (skeleton && (mesh as unknown as THREE.SkinnedMesh).isSkinnedMesh) {
+            const sm = mesh as unknown as THREE.SkinnedMesh;
+            sm.bind(skeleton, new THREE.Matrix4());
+            sm.normalizeSkinWeights();
+        }
+
         mesh.name = part.textureName || "part";
         model.add(mesh);
         geometries.push(geo);

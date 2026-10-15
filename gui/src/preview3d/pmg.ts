@@ -10,6 +10,13 @@ interface PmgVertex {
     u: number; v: number;
 }
 
+export interface PmgSkin {
+    vertexIndex: number;
+    boneIndex: number;
+    weight: number;
+    unknown: number;
+}
+
 export interface PmgSubmesh {
     parts: string;
     meshName: string;
@@ -23,6 +30,7 @@ export interface PmgSubmesh {
     faceIndices: number[];
     stripIndices: number[];
     vertices: PmgVertex[];
+    skins: PmgSkin[];
 }
 
 export interface PmgFile {
@@ -40,6 +48,8 @@ export interface PmgPart {
     uvs: number[];
     colors: number[];
     indices: number[];
+    skinIndices?: number[];
+    skinWeights?: number[];
     vertexCount: number;
     faceCount: number;
 }
@@ -69,8 +79,17 @@ function readBody(r: BinaryReader, faceCount: number, stripCount: number, vertCo
     for (let i = 0; i < stripCount; i++) stripIndices[i] = r.u16();
     const vertices = new Array<PmgVertex>(vertCount);
     for (let i = 0; i < vertCount; i++) vertices[i] = readVertex(r);
-    for (let i = 0; i < skinCount; i++) { r.i32(); r.i32(); r.f32(); r.i32(); }
-    return { faceIndices, stripIndices, vertices };
+    
+    const skins = new Array<PmgSkin>(skinCount);
+    for (let i = 0; i < skinCount; i++) { 
+        skins[i] = {
+            vertexIndex: r.i32(),
+            boneIndex: r.i32(),
+            weight: r.f32(),
+            unknown: r.i32()
+        };
+    }
+    return { faceIndices, stripIndices, vertices, skins };
 }
 
 function readCounts(r: BinaryReader) {
@@ -179,6 +198,8 @@ interface SubmeshGeometry {
     uvs: Float32Array;
     colors: Float32Array;
     indices: number[];
+    skinIndices: Float32Array;
+    skinWeights: Float32Array;
     vertexCount: number;
 }
 
@@ -187,6 +208,20 @@ function submeshGeometry(m: PmgSubmesh): SubmeshGeometry {
     const positions = new Float32Array(n * 3);
     const uvs = new Float32Array(n * 2);
     const colors = new Float32Array(n * 3);
+    const skinIndices = new Float32Array(n * 4);
+    const skinWeights = new Float32Array(n * 4);
+    
+    // Process skin weights per vertex (up to 4)
+    const skinsByVert = new Array<PmgSkin[]>(n);
+    if (m.skins) {
+        for (const skin of m.skins) {
+            if (skin.vertexIndex >= 0 && skin.vertexIndex < n) {
+                if (!skinsByVert[skin.vertexIndex]) skinsByVert[skin.vertexIndex] = [];
+                skinsByVert[skin.vertexIndex].push(skin);
+            }
+        }
+    }
+
     const o = m.majorMatrix;
     const useMatrix = Array.isArray(o) && o.length === 16 && isFinite(o[0]);
     for (let i = 0; i < n; i++) {
@@ -200,6 +235,22 @@ function submeshGeometry(m: PmgSubmesh): SubmeshGeometry {
         }
         uvs[i * 2] = v.u; uvs[i * 2 + 1] = v.v;
         colors[i * 3] = v.r / 255; colors[i * 3 + 1] = v.g / 255; colors[i * 3 + 2] = v.b / 255;
+        
+        const skins = skinsByVert[i];
+        if (skins && skins.length > 0) {
+            skins.sort((a, b) => b.weight - a.weight);
+            let sum = 0;
+            for (let j = 0; j < 4; j++) {
+                if (j < skins.length) {
+                    skinIndices[i * 4 + j] = skins[j].boneIndex;
+                    skinWeights[i * 4 + j] = skins[j].weight;
+                    sum += skins[j].weight;
+                }
+            }
+            if (sum > 0) {
+                for (let j = 0; j < 4; j++) skinWeights[i * 4 + j] /= sum;
+            }
+        }
     }
     const indices = m.faceIndices.length ? m.faceIndices.slice() : stripToTriangles(m.stripIndices);
     // A mirroring matrix flips winding; swap two corners so faces stay front-facing.
@@ -211,7 +262,7 @@ function submeshGeometry(m: PmgSubmesh): SubmeshGeometry {
             }
         }
     }
-    return { positions, uvs, colors, indices, vertexCount: n };
+    return { positions, uvs, colors, indices, skinIndices, skinWeights, vertexCount: n };
 }
 
 /** Merges the visible submeshes into one part per texture. */
@@ -225,12 +276,19 @@ export function pmgParts(file: PmgFile): PmgPart[] {
         let part = byTexture.get(tex);
         if (!part) {
             const slot = /^b(\d+)$/i.exec(s.colorMap || "");
-            part = { textureName: tex, colorSlot: slot ? Number(slot[1]) - 1 : -1, positions: [], uvs: [], colors: [], indices: [], vertexCount: 0, faceCount: 0 };
+            part = { 
+                textureName: tex, colorSlot: slot ? Number(slot[1]) - 1 : -1, 
+                positions: [], uvs: [], colors: [], indices: [], 
+                skinIndices: [], skinWeights: [],
+                vertexCount: 0, faceCount: 0 
+            };
             byTexture.set(tex, part);
         }
         for (const x of g.positions) part.positions.push(x);
         for (const x of g.uvs) part.uvs.push(x);
         for (const x of g.colors) part.colors.push(x);
+        for (const x of g.skinIndices) part.skinIndices!.push(x);
+        for (const x of g.skinWeights) part.skinWeights!.push(x);
         for (const i of g.indices) part.indices.push(i + part.vertexCount);
         part.vertexCount += g.vertexCount;
     }

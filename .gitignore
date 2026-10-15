@@ -26,10 +26,7 @@ CLAUDE.md
 
 # Agent / Temp
 .gemini
-.claude/*
-!.claude/settings.json
-!.claude/hooks/
-!.claude/agents/
+.claude/
 .agents
 .clinerules
 .cursor
@@ -53,7 +50,6 @@ examples/
 # keep real test sources
 !/tests/
 !/tests/*
-!/gui/test_locales*.mjs
 
 # Binaries
 *.exe
@@ -62,3 +58,14 @@ examples/
 # nxl3p shim build output
 /nxl3p-shim/target
 __pycache__/
+
+# Local tooling only: the repo holds what is needed to build.
+.githooks/
+.github/copilot-instructions.md
+/scripts/
+/set-version.bat
+*.zip
+/gui/test_locales*.mjs
+# Mobile icons: the desktop build uses only the icons tauri.conf.json lists.
+/gui/src-tauri/icons/android/
+/gui/src-tauri/icons/ios/

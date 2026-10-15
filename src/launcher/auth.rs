@@ -434,11 +434,23 @@ pub fn check_session(session: &mut NexonSession) -> Result<u16> {
     Ok(status)
 }
 
+/// GET /account/v1/account with `Bearer g_AToken` (AToken fallback), merging
+/// Set-Cookie. The launch chain's first step, as in Rua's `FetchAccountAndMerge`:
+/// browser sessions carry a game-scoped token the plain AToken check can reject.
+pub fn fetch_account(session: &mut NexonSession) -> Result<u16> {
+    let resp = request(reqwest::Method::GET, "/account/v1/account", Some(session))
+        .bearer_auth(session.game_token().to_string())
+        .send()?;
+    let status = resp.status().as_u16();
+    session.merge_set_cookies(resp.headers());
+    Ok(status)
+}
+
 /// Official launcher order: account → access → playable → passport.
 /// Refreshes once on 401. Returns the passport (ticket) for `/P:` and the pipe.
 pub fn prepare_launch(session: &mut NexonSession) -> Result<String> {
     with_refresh(session, |s| {
-        let status = check_session(s)?;
+        let status = fetch_account(s)?;
         if status == 401 {
             return Err(AuthError::SessionExpired("account check".into()).into());
         }
@@ -452,7 +464,16 @@ pub fn prepare_launch(session: &mut NexonSession) -> Result<String> {
             )
             .into());
         }
-        if access.http_status == 200 && !access.is_playable {
+        // Rua gates on the body flag for any status: a 403/5xx here means no verdict,
+        // and playable/passport would only fail later with a vaguer error.
+        if access.http_status != 200 {
+            return Err(AuthError::NotPlayable(format!(
+                "Nexon's access check failed (HTTP {}). Mabinogi may be under maintenance; try again later.",
+                access.http_status
+            ))
+            .into());
+        }
+        if !access.is_playable {
             return Err(AuthError::NotPlayable(
                 "Mabinogi is currently unavailable (under maintenance or not yet open). Try again later.".into(),
             )
@@ -588,16 +609,22 @@ pub fn session_from_browser_cookies(
     let get = |n: &str| cookies.get(n).cloned().unwrap_or_default();
     let nxl = get("NxLSession");
     let a_token = get("AToken");
-    if !nxl.is_empty() && !a_token.is_empty() {
+    let g_token = get("g_AToken");
+    if !nxl.is_empty() && (!a_token.is_empty() || !g_token.is_empty()) {
         let mut s = NexonSession { tpa: true, device_id: device_id.to_string(), ..Default::default() };
         for (k, v) in cookies {
             s.set_cookie(k, v.clone());
+        }
+        // Some launcher replies set only g_AToken; AToken-only calls need it too (as Rua does).
+        if s.access_token.is_empty() {
+            s.access_token = s.g_access_token.clone();
         }
         return Ok(Some(s));
     }
     let tpa = get("TpaSession");
     if !tpa.is_empty() {
-        let mut result = exchange_tpa(&tpa, device_id)?;
+        // Nexon may still be trusting the device (20027): retry like the NXL launcher.
+        let mut result = with_device_trust_retry(|| exchange_tpa(&tpa, device_id), std::thread::sleep)?;
         result.session.tpa = true;
         return Ok(Some(result.session));
     }
@@ -638,6 +665,44 @@ pub fn import_from_tauri_webview(device_id: &str) -> Result<NexonSession> {
 /// failures such as a rejected TPA exchange, so the login window can stop polling.
 /// `device_id` is stamped on the session, as for [`import_from_nexon_launcher`].
 pub fn poll_tauri_webview(device_id: &str) -> Result<Option<NexonSession>> {
+    poll_tauri_webview_with(device_id, false)
+}
+
+/// [`poll_tauri_webview`] for a window that has left the login page. A web login
+/// can finish with only `arenaSid` (no NxLSession, no TpaSession); Rua then calls
+/// access + account with the web cookies to get launcher tokens. Same here.
+pub fn poll_tauri_webview_after_login(device_id: &str) -> Result<Option<NexonSession>> {
+    poll_tauri_webview_with(device_id, true)
+}
+
+/// Upgrade a web login (`arenaSid` cookies only) to a launcher session: POST
+/// /game-auth2/v1/access then GET /account/v1/account with the raw web cookies,
+/// collecting Set-Cookie. Ok(None) when Nexon hands back no AToken.
+pub fn upgrade_web_session(
+    cookies: &std::collections::HashMap<String, String>,
+    device_id: &str,
+) -> Result<Option<NexonSession>> {
+    if !cookies.contains_key("arenaSid") {
+        return Ok(None);
+    }
+    let raw: String = cookies.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("; ");
+    let mut s = NexonSession { tpa: true, device_id: device_id.to_string(), ..Default::default() };
+    s.merge_cookie_string(&raw);
+    let resp = request(reqwest::Method::POST, "/game-auth2/v1/access", None)
+        .header("Cookie", raw.clone())
+        .json(&serde_json::json!({ "productId": product_id_str() }))
+        .send()?;
+    s.merge_set_cookies(resp.headers());
+    let merged = if s.cookie_header().is_empty() { raw.clone() } else { format!("{}; {}", raw, s.cookie_header()) };
+    let mut rb = request(reqwest::Method::GET, "/account/v1/account", None).header("Cookie", merged);
+    if !s.game_token().is_empty() {
+        rb = rb.bearer_auth(s.game_token().to_string());
+    }
+    s.merge_set_cookies(rb.send()?.headers());
+    Ok(if s.access_token.is_empty() { None } else { Some(s) })
+}
+
+fn poll_tauri_webview_with(device_id: &str, after_login: bool) -> Result<Option<NexonSession>> {
     use crate::launcher::cookie_dec;
     let localappdata = std::env::var("LOCALAPPDATA").map_err(|_| anyhow!("LOCALAPPDATA not set"))?;
     let db = std::path::PathBuf::from(&localappdata)
@@ -649,9 +714,31 @@ pub fn poll_tauri_webview(device_id: &str) -> Result<Option<NexonSession>> {
     if !db.exists() {
         return Ok(None);
     }
-    let key = cookie_dec::get_webview2_key().map_err(|e| anyhow!("Failed to read WebView2 key: {}", e))?;
-    let map = read_cookie_db(&db, Some(&key))?;
-    session_from_browser_cookies(&map, device_id)
+    let key = match cookie_dec::get_webview2_key() {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let map = match read_cookie_db(&db, Some(&key)) {
+        Ok(m) => m,
+        Err(_) => return Ok(None), // Ignore lock errors (os error 32) and keep polling
+    };
+    session_from_login_cookies(&map, device_id, after_login)
+}
+
+/// Session from the login window's cookies: NxLSession used directly, TpaSession
+/// exchanged, and (once the window left the login page) an arenaSid-only web
+/// login upgraded via access + account. Ok(None) = not logged in yet.
+pub fn session_from_login_cookies(
+    cookies: &std::collections::HashMap<String, String>,
+    device_id: &str,
+    after_login: bool,
+) -> Result<Option<NexonSession>> {
+    match session_from_browser_cookies(cookies, device_id)? {
+        Some(s) => Ok(Some(s)),
+        // Network trouble during the upgrade is not final: keep polling.
+        None if after_login => Ok(upgrade_web_session(cookies, device_id).unwrap_or(None)),
+        None => Ok(None),
+    }
 }
 
 fn read_cookie_db(
@@ -912,6 +999,13 @@ mod tests {
         );
         assert!(r.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn web_upgrade_needs_arena_sid() {
+        // No arenaSid: no network call, nothing to upgrade.
+        let m: std::collections::HashMap<String, String> = [("_ga".to_string(), "x".to_string())].into();
+        assert!(upgrade_web_session(&m, "dev").unwrap().is_none());
     }
 
     #[test]

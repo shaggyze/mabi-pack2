@@ -292,7 +292,7 @@ impl PrivateDbCopy {
         for suffix in ["-wal", "-shm"] {
             let side = PathBuf::from(format!("{}{}", src.display(), suffix));
             if side.is_file() {
-                copy_private(&side, &PathBuf::from(format!("{}{}", copy.db.display(), suffix)))?;
+                let _ = copy_private(&side, &PathBuf::from(format!("{}{}", copy.db.display(), suffix)));
             }
         }
         Ok(copy)

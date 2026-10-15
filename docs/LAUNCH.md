@@ -27,7 +27,11 @@ to the Nexon SDK over a named pipe. mabi-patcher provides all three:
 
 `launch_official_with(session, client_exe, wait, on_started)`:
 
-1. **Check** that `Client.exe` exists.
+1. **Check** that `Client.exe` exists and is signed by Nexon
+   (`signature::verify_nexon_client`): WinVerifyTrust with revocation checked
+   across the whole chain, and the signer's organization must contain
+   `NEXON`. The file stays open with read-only sharing until the game has
+   started, so it cannot be swapped after the check.
 2. **Passport.** `auth::prepare_launch` runs account → access → playable →
    passport, refreshing once on a 401 (see
    [NEXON_AUTH.md](NEXON_AUTH.md#launch-chain)). Maintenance and region
@@ -241,3 +245,8 @@ CLI hooks are set with `mabi-patcher config hook` (see
 [CLI.md](CLI.md#config)). `before-launch` runs before the login chain;
 `after-launch` runs as soon as `Client.exe` has started. Both run in the
 install folder, do not block, and expand `%PROFILE%`.
+
+Hooks that run to completion (`run_hook`, used by the GUI) go through
+`cmd /C`. When the hook's program needs administrator rights (exit code 740,
+or cmd's "requires elevation" message), the hook runs again through
+ShellExecuteEx with the `runas` verb, which shows the UAC prompt.

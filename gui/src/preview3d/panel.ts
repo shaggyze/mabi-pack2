@@ -56,6 +56,8 @@ export interface ModelHost {
     background: number;
     /** Returns the DDS bytes for a texture name, or null when it isn't found. */
     textureBytes(name: string): Promise<Uint8Array | null>;
+    /** Returns bytes for an arbitrary file name, or null when not found. */
+    fileBytes(name: string): Promise<Uint8Array | null>;
     /** Cache key scope for textures (e.g. the archive path). */
     textureScope: string;
     save(defaultName: string, data: Uint8Array | string): Promise<void>;

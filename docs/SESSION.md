@@ -91,8 +91,7 @@ email, ignoring case.
 
 **No profile given, reading a session** (`check-update`, `update`, `launch`
 without `-u`, `login` without credentials): the active profile, else the
-first one. If there is none: `No profile found — run 'login --email ...
---password ...' first`.
+first one. If there is none: `No profile found — log in with the GUI first`.
 
 **No profile given, saving a new login** (`login`, `login-otp`, `launch -u`):
 `profile_for_login` picks

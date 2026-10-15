@@ -4,9 +4,12 @@ How to build, test and release mabi-patcher, and a list of known problems in
 the current code.
 
 Sources: `Cargo.toml`, `build.rs`, `build.bat`, `build-all.bat`,
-`build-linux.sh`, `Dockerfile`, `scripts/precommit-check.sh`,
-`.githooks/pre-commit`, `.claude/settings.json`, `.claude/hooks/`,
-`.github/workflows/cli.yml`, `tests/`, `gui/src-tauri/tauri.conf.json`.
+`build-linux.sh`, `Dockerfile`, `.github/workflows/cli.yml`, `tests/`,
+`gui/src-tauri/tauri.conf.json`.
+
+The repository holds only what is needed to build and test. Editor and agent
+settings, git hooks and helper scripts stay local and are listed in
+`.gitignore`.
 
 ---
 
@@ -67,11 +70,10 @@ cargo build --release --bin mabi-patcher        # target/release/mabi-patcher
 `build.bat`:
 
 1. Reads the version from `gui/src-tauri/tauri.conf.json` (PowerShell).
-2. Runs `git config core.hooksPath .githooks` to turn on the pre-commit gate.
-3. Kills any running `mabi-patcher.exe` and deletes the old exe and
+2. Kills any running `mabi-patcher.exe` and deletes the old exe and
    installers.
-4. `npm install` and `npm run tauri build` in `gui/`.
-5. Copies `gui\src-tauri\target\release\mabi-patcher*` to the repository root
+3. `npm install` and `npm run tauri build` in `gui/`.
+4. Copies `gui\src-tauri\target\release\mabi-patcher*` to the repository root
    and checks that `mabi-patcher.exe` exists.
 
 `build-all.bat` does the same after a deep clean (`gui\dist` and
@@ -87,9 +89,9 @@ copies `build.rs` and `nxl3p-shim/` too, because `build.rs` needs them.
 
 ---
 
-## Pre-commit gate
+## Checks before a commit
 
-`scripts/precommit-check.sh` refuses a commit unless these pass:
+Run these and fix every failure before committing:
 
 | Step | Command |
 |---|---|
@@ -97,25 +99,8 @@ copies `build.rs` and `nxl3p-shim/` too, because `build.rs` needs them.
 | Lint (errors only) | `cargo clippy --release --bins --lib` |
 | Library tests | `cargo test --release --lib` |
 | Integration tests | `cargo test --release --tests` |
-| GUI type check (only when files under `gui/` changed) | `npx --no-install tsc --noEmit` in `gui/` |
-| GUI crate check (same condition) | `cargo check` in `gui/src-tauri` (with `--target $GUI_TARGET` if set) |
-
-"Changed" means staged, unstaged or untracked files. The GUI steps need
-`gui/node_modules`; set `SKIP_GUI_CHECK=1` to skip them.
-
-It runs from:
-
-- `.githooks/pre-commit`, enabled with `git config core.hooksPath .githooks`
-  (`build.bat` does this);
-- the Claude Code `PreToolUse` hook `.claude/hooks/check-before-commit.sh`,
-  which runs it before any `git commit` command and blocks the call on
-  failure.
-
-Do not bypass it with `--no-verify`.
-
-`.claude/hooks/session-start.sh` prepares Claude Code cloud sessions only
-(`CLAUDE_CODE_REMOTE=true`): adds clippy and rustfmt, fetches and builds all
-targets, and runs `npm install` in `gui/`.
+| GUI type check (when files under `gui/` changed) | `npx --no-install tsc --noEmit` in `gui/` |
+| GUI crate check (same condition) | `cargo check` in `gui/src-tauri` |
 
 ---
 
@@ -154,15 +139,7 @@ CI does not build the GUI.
 
 ## Version number
 
-Set it with one command from the repository root, then rebuild:
-
-```
-set-version.bat 2.0.6              (Windows; runs scripts\set-version.ps1)
-scripts/set-version.sh 2.0.6       (Linux / macOS / Git Bash)
-```
-
-Run either one with no version to print the current one. The script
-changes every file that holds the number, and nothing else:
+Change it in every file that holds the number, then rebuild:
 
 | File | Field |
 |---|---|

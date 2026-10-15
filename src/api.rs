@@ -1905,7 +1905,7 @@ struct LongSlot;
 impl LongSlot {
     fn acquire() -> Option<LongSlot> {
         LONG_IN_FLIGHT
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LONG_REQUESTS).then_some(n + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LONG_REQUESTS).then_some(n + 1))
             .ok()
             .map(|_| LongSlot)
     }

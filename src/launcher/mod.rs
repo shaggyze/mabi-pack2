@@ -13,6 +13,7 @@ pub mod launch;
 pub mod news;
 pub mod patch;
 pub mod profile;
+pub mod signature;
 
 pub use auth::{AuthError, LoginResult, NexonSession};
 pub use launch::{LaunchConfig, LaunchInfo};

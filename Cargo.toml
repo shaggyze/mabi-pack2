@@ -53,7 +53,7 @@ tiny_http = "0.12"
 toml = { version = "0.8", features = ["parse"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 aes-gcm = "0.11.1"
-winapi = { version = "0.3.9", features = ["dpapi", "wincrypt", "winbase", "synchapi", "handleapi", "namedpipeapi", "fileapi", "processthreadsapi", "winerror", "minwinbase", "winnt", "errhandlingapi", "ioapiset", "minwindef", "libloaderapi", "shellapi", "tlhelp32", "wincred", "consoleapi", "processenv", "wincon", "memoryapi", "sddl", "securitybaseapi", "ntsecapi"] }
+winapi = { version = "0.3.9", features = ["dpapi", "wincrypt", "winbase", "synchapi", "handleapi", "namedpipeapi", "fileapi", "processthreadsapi", "winerror", "minwinbase", "winnt", "errhandlingapi", "ioapiset", "minwindef", "libloaderapi", "shellapi", "tlhelp32", "wincred", "consoleapi", "processenv", "wincon", "memoryapi", "sddl", "securitybaseapi", "ntsecapi", "wintrust", "softpub"] }
 
 [profile.release]
 opt-level = 3

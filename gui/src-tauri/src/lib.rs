@@ -319,6 +319,17 @@ struct Config {
 
     patcher_run_elevated: bool,
 
+    /// Launcher servers the Server dropdown offers besides the official one:
+    /// [{ id, name, login_ip, login_port, chat_ip, chat_port }].
+    #[serde(default)]
+
+    launcher_servers: Vec<serde_json::Value>,
+
+    /// Selected launcher server id; empty = official Nexon servers.
+    #[serde(default)]
+
+    launcher_server_id: String,
+
     #[serde(default)]
 
     launch_use_nexon_launcher: bool,
@@ -444,6 +455,10 @@ impl Default for Config {
             patcher_max_workers: 10,
 
             patcher_run_elevated: false,
+
+            launcher_servers: Vec::new(),
+
+            launcher_server_id: String::new(),
 
             launch_use_nexon_launcher: false,
 
@@ -4508,47 +4523,209 @@ fn delete_webview_cookies() {
     let _ = std::fs::remove_file(&cookies_db);
 }
 
-/// Browser (SSO / Google / email) login in an embedded WebView. Polls the WebView2
-/// cookie store; NxLSession is used directly, TpaSession is exchanged.
+/// Nexon login page as the NXL launcher opens it: the return_url makes Nexon
+/// issue a launcher session (NxLSession) rather than a web-only one.
+const NEXON_LOGIN_URL: &str = "https://www.nexon.com/account/en/login?autologin=false&return_url=https%3A%2F%2Fnxl.nxfs.nexon.com%2F";
+
+/// Runs before every page script in the login window (same behaviour as Rua):
+/// 1. sets an arenaSid cookie when missing (the launcher's redirector normally does;
+///    without it the login API answers with a web-only session);
+/// 2. watches fetch/XHR replies from the login, regional-auth and passport APIs and
+///    copies NxLSession / AToken / NxGUN from their JSON into cookies, so the cookie
+///    poll sees them even when Nexon returns them only in the body.
+/// Only runs on https nexon.com pages, never on SSO or captcha providers.
+const NEXON_LOGIN_INIT_JS: &str = r#"(function () {
+  if (location.protocol !== "https:" || !/(^|\.)nexon\.com$/i.test(location.hostname)) return;
+  function setCookie(n, v) { document.cookie = n + "=" + v + "; path=/; domain=.nexon.com; secure"; }
+  if (!/(^|;\s*)arenaSid=/.test(document.cookie)) {
+    var id = (crypto.randomUUID && crypto.randomUUID()) ||
+      "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+        var r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16);
+      });
+    setCookie("arenaSid", id);
+  }
+  function wanted(u) {
+    u = String(u || "");
+    return u.indexOf("no-auth/login") >= 0 || u.indexOf("regional-auth") >= 0 || u.indexOf("passport") >= 0;
+  }
+  function capture(text) {
+    try {
+      var d = JSON.parse(text) || {};
+      var nxl = d.nxLSession || d.NxLSession || "";
+      var at = d.aToken || d.AToken || "";
+      var gun = d.nxGUN || d.NxGUN || "";
+      if (nxl) setCookie("NxLSession", nxl);
+      if (at) setCookie("AToken", at);
+      if (nxl && gun) setCookie("NxGUN", gun);
+    } catch (e) {}
+  }
+  var origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function (input, init) {
+      var u = typeof input === "string" ? input : (input && (input.url || input.href)) || "";
+      var p = origFetch.apply(this, arguments);
+      if (wanted(u)) p.then(function (r) { r.clone().text().then(capture, function () {}); }, function () {});
+      return p;
+    };
+  }
+  var origOpen = XMLHttpRequest.prototype.open, origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__nxUrl = u; return origOpen.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function () {
+    var x = this;
+    if (wanted(x.__nxUrl)) x.addEventListener("loadend", function () { capture(x.responseText); });
+    return origSend.apply(this, arguments);
+  };
+})();"#;
+
+/// Nexon's device-confirmation / emailed-code pages. The cookies can already look
+/// complete there, but closing the window would abort the verification.
+fn is_nexon_verification_page(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("nexon.com")
+        && ["/verify", "verification", "/otp", "/mfa", "/2fa", "two-step", "/device"].iter().any(|k| u.contains(k))
+}
+
+/// Browser (SSO / Google / email) login in an embedded WebView, set up like the NXL
+/// launcher (and Rua): launcher User-Agent, launcher return_url and the startup
+/// script above. Cookies are read live from WebView2 every 2 s; NxLSession is used
+/// directly, TpaSession is exchanged, an arenaSid-only login is upgraded.
 #[tauri::command]
-async fn nexon_login_webview(app: tauri::AppHandle, profile_id: Option<String>) -> Result<serde_json::Value, String> {
+async fn nexon_login_webview(
+    app: tauri::AppHandle,
+    profile_id: Option<String>,
+    title: Option<String>,
+    verify_title: Option<String>,
+) -> Result<serde_json::Value, String> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    use mabi_pack2::launcher::auth;
 
     let dev = login_device_id(profile_id.as_deref(), "");
+    if let Some(old) = app.get_webview_window("nexon_login") {
+        let _ = old.destroy();
+    }
     delete_webview_cookies();
-    let window = WebviewWindowBuilder::new(
-        &app,
-        "nexon_login",
-        WebviewUrl::External("https://www.nexon.com/account/en/login".parse().unwrap())
-    )
-    .title("Nexon Login")
-    .inner_size(500.0, 800.0)
-    .resizable(true)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let window = WebviewWindowBuilder::new(&app, "nexon_login", WebviewUrl::External(NEXON_LOGIN_URL.parse().unwrap()))
+        .title(title.as_deref().unwrap_or("Nexon Login"))
+        .inner_size(500.0, 800.0)
+        .resizable(true)
+        .user_agent(auth::USER_AGENT)
+        .initialization_script(NEXON_LOGIN_INIT_JS)
+        .build()
+        .map_err(|e| e.to_string())?;
 
+    // A web login can end with only arenaSid; it is upgraded via access + account
+    // once the window has left the login page, at most 3 times.
+    let mut upgrade_tries = 0u32;
+    // NxLSession can arrive a moment before the rest of the launcher cookies, so a
+    // found session is confirmed on the next poll before the window closes.
+    let mut pending = false;
+    let mut last_cookies: std::collections::HashMap<String, String> = Default::default();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if app.get_webview_window("nexon_login").is_none() {
-            return Err("Login window closed".to_string());
+            // Window closed by the user: use the last cookies read, if they hold a session.
+            let d = dev.clone();
+            let c = last_cookies.clone();
+            if let Ok(Ok(Some(session))) =
+                tauri::async_runtime::spawn_blocking(move || auth::session_from_login_cookies(&c, &d, false)).await
+            {
+                return Ok(serde_json::json!({ "session": session, "expiresIn": 28800 }));
+            }
+            return Err("Login window closed without logging in".to_string());
+        }
+        let url = window.url().map(|u| u.to_string()).unwrap_or_default();
+        // The window title tells the user what Nexon wants on the emailed-code step.
+        let verifying = is_nexon_verification_page(&url);
+        let want_title = if verifying { verify_title.as_deref() } else { title.as_deref() };
+        if let Some(t) = want_title {
+            if window.title().map(|cur| cur != t).unwrap_or(false) {
+                let _ = window.set_title(t);
+            }
+        }
+        // SSO / captcha providers and Nexon's verification pages: keep waiting.
+        if !url.contains("nexon.com") || verifying {
+            pending = false;
+            continue;
+        }
+        // Read the live cookie store off the async runtime (WebView2 deadlock note in tauri docs).
+        let w = window.clone();
+        let cookies = match tauri::async_runtime::spawn_blocking(move || w.cookies()).await {
+            Ok(Ok(c)) => c,
+            _ => continue,
+        };
+        let map: std::collections::HashMap<String, String> = cookies
+            .iter()
+            .filter(|c| c.domain().map(|d| d.to_ascii_lowercase().contains("nexon")).unwrap_or(false))
+            .filter(|c| !c.value().is_empty())
+            .map(|c| (c.name().to_string(), c.value().to_string()))
+            .collect();
+        last_cookies = map.clone();
+        let on_login_page = url.contains("/account/en/login") || url.contains("/nxl/login");
+        let after_login = !on_login_page && upgrade_tries < 3 && !map.contains_key("NxLSession") && !map.contains_key("TpaSession");
+        if after_login {
+            upgrade_tries += 1;
+        }
+        if !pending && map.contains_key("NxLSession") && !map.contains_key("TpaSession") {
+            pending = true;
+            continue;
         }
         let d = dev.clone();
-        let polled = tauri::async_runtime::spawn_blocking(move || mabi_pack2::launcher::auth::poll_tauri_webview(&d))
+        let polled = tauri::async_runtime::spawn_blocking(move || auth::session_from_login_cookies(&map, &d, after_login))
             .await
             .map_err(|e| e.to_string())?;
         match polled {
             Ok(Some(session)) => {
+                log::info!("[Launcher] Browser login complete (tpa={})", session.tpa);
                 let _ = window.close();
-                return Ok(serde_json::json!({ "session": session, "expiresIn": 86400 }));
+                return Ok(serde_json::json!({ "session": session, "expiresIn": 28800 }));
             }
             Ok(None) => {}
-            // A rejected TpaSession exchange is final (single-use cookie) — stop and report.
+            // A rejected TpaSession exchange is final (single-use cookie): stop and report.
             Err(e) => {
                 let _ = window.close();
                 return Err(e.to_string());
             }
         }
     }
+}
+
+/// The profile's stored session, checked with Nexon first (as Rua does on start):
+/// GET /account (200 = use as is); a 401 is refreshed through autologin where
+/// Nexon allows it (email logins; browser/SSO sessions can't be). Returns
+/// `{ session, expiresIn? }`; an error means "log in again".
+#[tauri::command]
+async fn launcher_restore_session(id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use mabi_pack2::launcher::{auth, profile};
+        let p = profile::load_profile(&id).map_err(|e| e.to_string())?;
+        if !p.is_session_valid() {
+            return Err("No valid stored session".to_string());
+        }
+        let mut session = match p.session.clone() {
+            Some(s) => s,
+            None => return Err("No stored session".to_string()),
+        };
+        match auth::fetch_account(&mut session) {
+            Ok(200) => {
+                // Account may hand back refreshed cookies: keep them on the profile.
+                let _ = profile::save_session(&id, &session, 0);
+                Ok(serde_json::json!({ "session": session }))
+            }
+            Ok(401) => {
+                let expires = auth::refresh_with_expiry(&mut session).map_err(|e| e.to_string())?;
+                let _ = profile::save_session(&id, &session, expires);
+                Ok(serde_json::json!({ "session": session, "expiresIn": expires }))
+            }
+            Ok(code) => Err(format!("Session check failed (HTTP {})", code)),
+            // Network trouble: keep the stored session; the launch retries and refreshes.
+            Err(e) => {
+                log::warn!("[Launcher] Session check failed: {}", e);
+                Ok(serde_json::json!({ "session": session }))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Import session from the official Nexon Launcher's cookie store.
@@ -4622,7 +4799,7 @@ fn launcher_save_profile_session(id: String, session: SessionInfo, expires_in: O
 
 /// Email/password login. Returns {session} or {mfa_required, mfa_key} or {captcha_required}.
 #[tauri::command]
-async fn launcher_login(username: String, password: String, _remember: Option<bool>, _verification_code: Option<String>, profile_id: Option<String>) -> Result<serde_json::Value, String> {
+async fn launcher_login(username: String, password: String, _remember: Option<bool>, profile_id: Option<String>) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let dev = login_device_id(profile_id.as_deref(), &username);
         login_response(mabi_pack2::launcher::auth::login(&username, &password, &dev))
@@ -7097,15 +7274,17 @@ fn repair_game_files(game_path: String) -> Result<serde_json::Value, String> {
 #[cfg(windows)]
 mod elevated_drop {
     use tauri::{Emitter, Manager};
-    use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
+    use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM, DWORD}; // Cleaned up the DWORD import path here
     use winapi::shared::windef::{HWND, POINT};
     use winapi::um::shellapi::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
     use winapi::um::winuser::{
-        CallWindowProcW, ChangeWindowMessageFilterEx, SetWindowLongPtrW, GWLP_WNDPROC, MSGFLT_ALLOW,
-        WM_COPYDATA, WM_DROPFILES, WNDPROC,
+        CallWindowProcW, ChangeWindowMessageFilterEx, SetWindowLongPtrW, GWLP_WNDPROC,
+        WM_COPYDATA, WM_DROPFILES, WNDPROC, // Removed MSGFLT_ALLOW from here since it's defined below
     };
 
     const WM_COPYGLOBALDATA: UINT = 0x0049;
+    const MSGFLT_ALLOW: DWORD = 1; // Explicitly defined using the cleanly imported DWORD type
+    
     static OLD_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
     static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
@@ -7145,7 +7324,7 @@ mod elevated_drop {
             for m in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
                 ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, std::ptr::null_mut());
             }
-            let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wndproc as isize);
+            let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wndproc as *const () as isize);
             if old == 0 {
                 return Err("SetWindowLongPtrW failed".into());
             }
@@ -7293,7 +7472,7 @@ pub fn run() {
 
             launcher_list_profiles, launcher_save_profile, launcher_delete_profile,
 
-            launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session,
+            launcher_set_active_profile, launcher_load_profile, launcher_update_profile_session, launcher_restore_session,
 
             detect_launcher_profiles,
 

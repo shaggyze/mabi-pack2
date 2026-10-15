@@ -47,6 +47,14 @@ pub fn part_base() -> String {
 }
 const PARTS_PER_FILE: usize = 4;
 const PART_RETRIES: u32 = 3;
+// Size limits for what the CDN sends (Rua uses the same values): a hostile or
+// broken response cannot exhaust memory or disk.
+const MAX_MANIFEST_DOWNLOAD: u64 = 64 * 1024 * 1024;
+const MAX_MANIFEST_PLAIN: u64 = 256 * 1024 * 1024;
+const MAX_PART_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_MANIFEST_ENTRIES: usize = 200_000;
+const MAX_PARTS_PER_FILE: usize = 4096;
 
 static CDN: Lazy<reqwest::blocking::Client> = Lazy::new(|| {
     reqwest::blocking::Client::builder()
@@ -129,9 +137,12 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn parse(hash: &str, compressed: &[u8]) -> Result<Manifest> {
-        let json = zlib_decompress(compressed).map_err(|e| anyhow!("manifest decompress: {}", e))?;
+        let json = zlib_decompress_max(compressed, MAX_MANIFEST_PLAIN).map_err(|e| anyhow!("manifest decompress: {}", e))?;
         let v: serde_json::Value = serde_json::from_slice(&json)?;
         let files = v["files"].as_object().ok_or_else(|| anyhow!("manifest has no files"))?;
+        if files.len() > MAX_MANIFEST_ENTRIES {
+            return Err(anyhow!("manifest lists {} files (limit {})", files.len(), MAX_MANIFEST_ENTRIES));
+        }
         let mut entries = Vec::with_capacity(files.len());
         for (key, f) in files {
             let objects: Vec<String> = f["objects"]
@@ -141,7 +152,12 @@ impl Manifest {
             if objects.is_empty() {
                 continue;
             }
+            let fsize = f["fsize"].as_f64().unwrap_or(0.0) as u64;
             let raw_path = decode_path(key);
+            if objects.len() > MAX_PARTS_PER_FILE || fsize > MAX_FILE_BYTES || raw_path.chars().count() > crate::common::MAX_ENTRY_PATH_LEN {
+                log::warn!("[PATCH] skipping oversized manifest entry: {}", raw_path);
+                continue;
+            }
             // Never let a manifest entry point outside the install folder.
             if let Err(e) = crate::common::safe_join(Path::new(""), &raw_path) {
                 log::warn!("[PATCH] skipping manifest entry: {}", e);
@@ -149,7 +165,7 @@ impl Manifest {
             }
             entries.push(ManifestEntry {
                 path: raw_path.replace('\\', std::path::MAIN_SEPARATOR_STR),
-                fsize: f["fsize"].as_f64().unwrap_or(0.0) as u64,
+                fsize,
                 mtime: f["mtime"].as_f64().unwrap_or(0.0) as u64,
                 is_dir: objects[0] == "__DIR__",
                 objects_fsize: f["objects_fsize"]
@@ -180,9 +196,17 @@ pub fn remote_manifest_hash(session: Option<&mut NexonSession>) -> Result<String
         anyhow!("Log in first — the current game manifest is only available with a Nexon session.")
     })?;
     let info = fetch_manifest(session)?;
-    if let Ok(body) = CDN.get(&info.manifest_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text()) {
-        if is_hash(body.trim()) {
-            return Ok(body.trim().to_string());
+    // The hash names the manifest every part is checked against, so it must come
+    // over HTTPS from a Nexon host (Rua's SecureManifestUrl): an http:// spoof
+    // could otherwise steer the whole update.
+    let secure = secure_manifest_url(&info.manifest_url)?;
+    if let Ok(resp) = CDN.get(&secure).send().and_then(|r| r.error_for_status()) {
+        if is_nexon_https(resp.url()) {
+            if let Ok(body) = resp.text() {
+                if is_hash(body.trim()) {
+                    return Ok(body.trim().to_string());
+                }
+            }
         }
     }
     // Some branch URLs point straight at the manifest blob; its name is the hash.
@@ -194,6 +218,35 @@ pub fn remote_manifest_hash(session: Option<&mut NexonSession>) -> Result<String
         .ok_or_else(|| anyhow!("Could not determine manifest hash from {}", info.manifest_url))
 }
 
+/// True for an `https://` URL on nexon.net / nexon.com (or a subdomain), default port.
+fn is_nexon_https(u: &reqwest::Url) -> bool {
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    u.scheme() == "https"
+        && u.username().is_empty()
+        && u.port().is_none()
+        && ["nexon.net", "nexon.com"].iter().any(|d| host == *d || host.ends_with(&format!(".{}", d)))
+}
+
+/// Branch `manifestUrl` rewritten to HTTPS; refused unless it is a Nexon host.
+fn secure_manifest_url(url: &str) -> Result<String> {
+    let mut u = reqwest::Url::parse(url.trim())
+        .map_err(|_| anyhow!("Nexon returned an invalid manifest address: {}", url))?;
+    if u.scheme() == "http" {
+        let _ = u.set_scheme("https");
+        // http://host:80 would otherwise keep port 80 under https.
+        if u.port() == Some(80) {
+            let _ = u.set_port(None);
+        }
+    }
+    if !is_nexon_https(&u) {
+        return Err(anyhow!(
+            "Secure game updating is unavailable: Nexon returned a manifest address that is not an HTTPS Nexon server ({}).",
+            url
+        ));
+    }
+    Ok(u.to_string())
+}
+
 /// Load manifest `hash` from patchdata, downloading (and caching) it if missing.
 pub fn load_manifest(roots: &GameRoots, hash: &str) -> Result<Manifest> {
     let cached = roots.patchdata.join(hash);
@@ -202,11 +255,8 @@ pub fn load_manifest(roots: &GameRoots, hash: &str) -> Result<Manifest> {
             return Ok(m);
         }
     }
-    let mut bytes = Vec::new();
-    CDN.get(format!("{}{}", cdn_base(), hash))
-        .send()?
-        .error_for_status()?
-        .read_to_end(&mut bytes)?;
+    let resp = CDN.get(format!("{}{}", cdn_base(), hash)).send()?.error_for_status()?;
+    let bytes = read_max(resp, MAX_MANIFEST_DOWNLOAD)?;
     let m = Manifest::parse(hash, &bytes)?;
     if std::fs::create_dir_all(&roots.patchdata).is_ok() {
         let _ = std::fs::write(&cached, &bytes);
@@ -579,6 +629,7 @@ fn patch_file(
     progress: &(dyn Fn(usize) + Sync),
 ) -> Result<()> {
     let dest = crate::common::safe_join(root, &e.path)?;
+    refuse_links(root, &dest)?;
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -656,9 +707,8 @@ fn fetch_part(obj: &str, limiter: &Limiter) -> Result<Vec<u8>> {
         }
         let _permit = limiter.acquire();
         let res = (|| -> Result<Vec<u8>> {
-            let mut raw = Vec::new();
-            CDN.get(&url).send()?.error_for_status()?.read_to_end(&mut raw)?;
-            let data = zlib_decompress(&raw).map_err(|e| anyhow!("decompress {}: {}", obj, e))?;
+            let raw = read_max(CDN.get(&url).send()?.error_for_status()?, MAX_PART_BYTES)?;
+            let data = zlib_decompress_max(&raw, MAX_PART_BYTES).map_err(|e| anyhow!("decompress {}: {}", obj, e))?;
             // Part names are the SHA1 of the decompressed bytes — reject corrupt downloads.
             if !sha1_hex(&data).eq_ignore_ascii_case(obj) {
                 return Err(anyhow!("checksum mismatch for part {}", obj));
@@ -803,16 +853,67 @@ fn write_hash(roots: &GameRoots, hash: &str) {
 }
 
 pub fn zlib_decompress(data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    match flate2::read::ZlibDecoder::new(data).read_to_end(&mut out) {
-        Ok(_) => Ok(out),
-        Err(_) if data.len() > 2 => {
-            out.clear();
-            flate2::read::DeflateDecoder::new(&data[2..]).read_to_end(&mut out)?;
-            Ok(out)
-        }
-        Err(e) => Err(e),
+    zlib_decompress_max(data, MAX_MANIFEST_PLAIN)
+}
+
+/// zlib (or raw deflate after a 2-byte header) decompression that fails once the
+/// output passes `max` bytes, so a small download can't expand without bound.
+pub fn zlib_decompress_max(data: &[u8], max: u64) -> std::io::Result<Vec<u8>> {
+    match read_max(flate2::read::ZlibDecoder::new(data), max) {
+        Ok(out) => Ok(out),
+        // Too large is final; any other zlib error may be a raw deflate stream.
+        Err(e) if is_over_limit(&e) || data.len() <= 2 => Err(e),
+        Err(_) => read_max(flate2::read::DeflateDecoder::new(&data[2..]), max),
     }
+}
+
+#[derive(Debug)]
+struct OverLimit(u64);
+impl std::fmt::Display for OverLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "data exceeds its {}-byte limit", self.0)
+    }
+}
+impl std::error::Error for OverLimit {}
+
+fn is_over_limit(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<OverLimit>())
+}
+
+/// Read all of `r`, failing with an [`OverLimit`] error once it passes `max` bytes.
+fn read_max(r: impl Read, max: u64) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    r.take(max + 1).read_to_end(&mut out)?;
+    if out.len() as u64 > max {
+        return Err(std::io::Error::other(OverLimit(max)));
+    }
+    Ok(out)
+}
+
+/// Refuse a target reached through a junction or symlink below `root`: a planted
+/// link must not redirect game file writes outside the game folder.
+fn refuse_links(root: &Path, dest: &Path) -> Result<()> {
+    let rel = dest.strip_prefix(root).map_err(|_| anyhow!("{} is outside {}", dest.display(), root.display()))?;
+    let mut cur = root.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        let meta = match std::fs::symlink_metadata(&cur) {
+            Ok(m) => m,
+            Err(_) => break, // not created yet: nothing below it exists either
+        };
+        #[cfg(windows)]
+        let link = {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        };
+        #[cfg(not(windows))]
+        let link = meta.file_type().is_symlink();
+        if link {
+            return Err(anyhow!("The game folder contains a link at {}. Remove it before updating.", cur.display()));
+        }
+    }
+    Ok(())
 }
 
 /// base64 → UTF-16LE → strip BOM and trailing control chars/spaces.
@@ -883,6 +984,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_url_forced_to_nexon_https() {
+        assert_eq!(
+            secure_manifest_url("http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash").unwrap(),
+            "https://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash"
+        );
+        assert!(secure_manifest_url("http://download2.nexon.net:80/x").unwrap().starts_with("https://download2.nexon.net/"));
+        assert!(secure_manifest_url("https://evil.example/nexon.net").is_err());
+        assert!(secure_manifest_url("https://nexon.net.evil.example/x").is_err());
+        assert!(secure_manifest_url("https://download2.nexon.net:8443/x").is_err());
+        assert!(secure_manifest_url("ftp://download2.nexon.net/x").is_err());
+    }
+
+    #[test]
     fn fetch_part_rejects_bad_names_without_panicking() {
         let limiter = Limiter::new(1);
         for bad in ["", "a", "é", "éa0", "../x", "zz"] {
@@ -944,6 +1058,39 @@ mod tests {
         assert_eq!(v.need.len(), 1);
         assert_eq!(v.patched, 1);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn decompress_stops_at_limit() {
+        use flate2::{write::ZlibEncoder, Compression};
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let small = enc.finish().unwrap();
+        assert_eq!(zlib_decompress_max(&small, 1 << 20).unwrap().len(), 1 << 20);
+        let err = zlib_decompress_max(&small, 1000).unwrap_err();
+        assert!(is_over_limit(&err), "{}", err);
+        assert!(read_max(&b"12345"[..], 4).is_err());
+        assert_eq!(read_max(&b"1234"[..], 4).unwrap(), b"1234");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_writes_through_junctions() {
+        let base = std::env::temp_dir().join(format!("mabi_link_test_{}", std::process::id()));
+        let root = base.join("game");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(refuse_links(&root, &root.join("data").join("a.it")).is_ok());
+        let link = root.join("data");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"]).arg(&link).arg(&outside)
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        if made {
+            assert!(refuse_links(&root, &link.join("a.it")).is_err());
+        }
+        let _ = std::process::Command::new("cmd").args(["/C", "rmdir"]).arg(&link).output();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

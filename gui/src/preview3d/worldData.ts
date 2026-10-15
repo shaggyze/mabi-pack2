@@ -21,6 +21,8 @@ export interface AssetHost {
     openEntry(e: AssetEntry): void;
     /** DDS bytes for a texture name, searching near `near` first. */
     textureBytes(name: string, near?: AssetEntry): Promise<Uint8Array | null>;
+    /** Bytes for an arbitrary file by path/name, searching near `near` first. */
+    fileBytes(name: string, near?: AssetEntry): Promise<Uint8Array | null>;
     log(msg: string, level?: "info" | "warn" | "error" | "success"): void;
     /** UI language code (en, tw, ja, ko). */
     language(): string;

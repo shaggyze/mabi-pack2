@@ -132,6 +132,7 @@ export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
         layerBtn("props", "wv_btn_props", "wv_tip_props"),
         layerBtn("events", "wv_btn_events", "wv_tip_events"),
         button(t("p3d_btn_reset"), t("p3d_tip_reset"), () => { map?.reset(); world?.reset(); }),
+        button(t("p3d_btn_export_glb") || "Export GLB", t("p3d_tip_export_glb") || "Export scene as a .glb file", () => { world?.exportGLB(); }),
     );
     host.overlay.appendChild(bar);
     showMap();
@@ -147,3 +148,4 @@ export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
         },
     };
 }
+

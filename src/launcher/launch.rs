@@ -361,6 +361,8 @@ pub fn launch_official_with(
         if !client_exe.exists() {
             return Err(anyhow!("Client.exe not found at: {}", client_exe.display()));
         }
+        // Only a Nexon-signed client gets the ticket; held open until it has started.
+        let _verified = super::signature::verify_nexon_client(client_exe)?;
         let passport = auth::prepare_launch(session)?;
         let config = fetch_launch_config_mut(session)?;
         let args = config.build_args(&passport);
@@ -767,10 +769,26 @@ pub fn run_hook_cmd(cmd: &str, working_dir: &Path) -> Result<String> {
         c
     };
     let dir = if working_dir.is_dir() { working_dir.to_path_buf() } else { PathBuf::from(".") };
-    let out = c.current_dir(dir).output().map_err(|e| anyhow!("Hook command failed to start: {}", e))?;
+    let out = c.current_dir(&dir).output().map_err(|e| anyhow!("Hook command failed to start: {}", e))?;
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     log::info!("Hook '{}' exit={}: {}", cmd, out.status, combined.trim());
+    // A hook program that requires administrator rights can't start from an
+    // unelevated cmd (error 740): run it again through the UAC prompt.
+    #[cfg(windows)]
+    if hook_needs_elevation(out.status.code(), &combined) {
+        log::info!("Hook '{}' requires elevation; running it through the UAC prompt", cmd);
+        let code = win::run_elevated_hook(cmd, &dir)?;
+        log::info!("Hook '{}' (elevated) exit={}", cmd, code);
+        return Ok(format!("{}(ran elevated, exit code {})", combined, code));
+    }
     Ok(combined)
+}
+
+/// True if a hook's cmd run failed because its program needs elevation
+/// (ERROR_ELEVATION_REQUIRED = 740, or cmd's English message for it).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn hook_needs_elevation(code: Option<i32>, output: &str) -> bool {
+    code == Some(740) || (code != Some(0) && output.to_ascii_lowercase().contains("requires elevation"))
 }
 
 // ── Pipe protocol (shared, testable) ─────────────────────────────────────────
@@ -1303,6 +1321,33 @@ mod win {
         Ok(Handle(sei.hProcess))
     }
 
+    /// Run `cmd` through `cmd.exe /C` with the "runas" verb (UAC prompt) and wait
+    /// for it; returns its exit code.
+    pub(super) fn run_elevated_hook(cmd: &str, dir: &Path) -> Result<u32> {
+        use winapi::um::processthreadsapi::GetExitCodeProcess;
+        use winapi::um::shellapi::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+        let verb = wide("runas");
+        let file = wide("cmd.exe");
+        let params = wide(&format!("/C {}", cmd));
+        let dir = wide(&dir.to_string_lossy());
+        let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = verb.as_ptr();
+        sei.lpFile = file.as_ptr();
+        sei.lpParameters = params.as_ptr();
+        sei.lpDirectory = dir.as_ptr();
+        sei.nShow = 1; // SW_SHOWNORMAL: the user sees what was elevated
+        if unsafe { ShellExecuteExW(&mut sei) } == 0 || sei.hProcess.is_null() {
+            return Err(anyhow!("Hook could not start elevated: {}", std::io::Error::last_os_error()));
+        }
+        let process = Handle(sei.hProcess);
+        unsafe { WaitForSingleObject(process.raw(), INFINITE) };
+        let mut code: DWORD = 0;
+        unsafe { GetExitCodeProcess(process.raw(), &mut code) };
+        Ok(code)
+    }
+
     /// Serves the Nexon SDK pipe to the game process only: frames are
     /// [i32 LE length][UTF-8 JSON]. One overlapped, first-instance pipe instance
     /// (user-only DACL, remote clients rejected), reconnected for each client.
@@ -1519,6 +1564,14 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn hook_elevation_detection() {
+        assert!(super::hook_needs_elevation(Some(740), ""));
+        assert!(super::hook_needs_elevation(Some(1), "The requested operation requires elevation.\r\n"));
+        assert!(!super::hook_needs_elevation(Some(0), "requires elevation"));
+        assert!(!super::hook_needs_elevation(Some(1), "file not found"));
+    }
 
     #[test]
     fn trim_log_keeps_tail_on_line_boundary() {

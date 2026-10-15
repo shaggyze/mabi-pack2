@@ -29,20 +29,21 @@
       </div>
       <nav class="nav-links">
         <button class="nav-item active" data-tab="dashboard" id="tab-dashboard" data-tooltip="tab_dashboard">
-          <span class="nav-icon">📊</span>
-          <span class="nav-text" id="tab-dashboard-text" data-i18n="tab_dashboard">Dashboard</span>
+          <span class="nav-icon">&#128202;</span>
+            <span class="nav-text" id="tab-dashboard-text" data-i18n="tab_dashboard">Dashboard</span>
         </button>
         <button class="nav-item" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
           <span class="nav-icon">🔓</span>
           <span class="nav-text" id="tab-extract-text" data-i18n="tab_extract">Extract</span>
         </button>
         <button class="nav-item" data-tab="pack" id="tab-pack" data-tooltip="tab_pack">
-          <span class="nav-icon">📦</span>
-          <span class="nav-text" id="tab-pack-text" data-i18n="tab_pack">Pack</span>
+          <span class="nav-icon">&#128230;</span>
+            <span class="nav-text" id="tab-pack-text" data-i18n="tab_pack">Pack</span>
         </button>
+        <button class="nav-item" data-tab="database" id="tab-database" data-tooltip="tab_database"><span class="nav-icon">&#128269;</span><span class="nav-text" id="tab-database-text">Database</span></button>
         <button class="nav-item" data-tab="list" id="tab-list" data-tooltip="tab_list">
-          <span class="nav-icon">🔍</span>
-          <span class="nav-text" id="tab-list-text" data-i18n="tab_list">List</span>
+          <span class="nav-icon">&#128194;</span>
+            <span class="nav-text" id="tab-list-text" data-i18n="tab_list">List</span>
         </button>
         <button class="nav-item" data-tab="differ" id="tab-differ" data-tooltip="tab_differ">
           <span class="nav-icon">🔀</span>
@@ -61,16 +62,16 @@
           <span class="nav-text" id="tab-features-text" data-i18n="tab_features">Features</span>
         </button>
         <button class="nav-item" data-tab="patcher" id="tab-patcher" data-tooltip="tab_patcher">
-          <span class="nav-icon">🛠️</span>
-          <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
+          <span class="nav-icon">&#128296;</span>
+            <span class="nav-text" id="tab-patcher-text" data-i18n="tab_patcher">Patcher</span>
         </button>
         <button class="nav-item" data-tab="launcher" id="tab-launcher" data-tooltip="tab_launcher">
-          <span class="nav-icon">🚀</span>
-          <span class="nav-text" id="tab-launcher-text" data-i18n="tab_launcher">Launcher</span>
+          <span class="nav-icon">&#128640;</span>
+            <span class="nav-text" id="tab-launcher-text" data-i18n="tab_launcher">Launcher</span>
         </button>
         <button class="nav-item" data-tab="settings" id="tab-settings" data-tooltip="tab_settings">
-          <span class="nav-icon">⚙️</span>
-          <span class="nav-text" id="tab-settings-text" data-i18n="tab_settings">Settings</span>
+          <span class="nav-icon">&#9881;</span>
+            <span class="nav-text" id="tab-settings-text" data-i18n="tab_settings">Settings</span>
         </button>
       </nav>
       <div class="sidebar-footer">
@@ -245,112 +246,49 @@
         </div>
       </div>
 
-      <!-- Launcher Tab -->
+      <!-- Launcher Tab: client profile, server, sign-in status, launch (Hyddwn layout) -->
       <div id="launcher" class="tab-content">
         <div class="launcher-panel">
-          <div class="card">
+          <div class="card launcher-main-card">
             <div class="card-header">
               <span id="launcher-title-text">Nexon NA Launcher</span>
+            </div>
+            <div class="launcher-field">
+              <label for="launcher-page-profile-select" data-i18n="launcher_client_profile">Client Profile</label>
+              <div class="input-row">
+                <select id="launcher-page-profile-select" class="form-input">
+                  <option value="" data-i18n="launcher_no_profiles">— No profiles saved —</option>
+                </select>
+                <button class="tab-btn" id="btn-launcher-manage-profiles" data-i18n="btn_launcher_profiles">Profiles</button>
+              </div>
+              <div id="launcher-profile-badge" class="launcher-field-hint"></div>
+            </div>
+            <div class="launcher-field">
+              <label for="launcher-server-select" data-i18n="launcher_server_label">Server</label>
+              <div class="input-row">
+                <select id="launcher-server-select" class="form-input"></select>
+                <button class="tab-btn" id="btn-launcher-manage-servers" data-i18n="btn_launcher_servers">Servers</button>
+              </div>
             </div>
             <div class="launcher-status-bar">
               <span id="launcher-status-dot" class="status-dot"></span>
               <span id="launcher-status-text" data-i18n="launcher_status_idle">Not logged in</span>
+              <span id="launcher-session-card" class="launcher-session-inline hidden">
+                · v<span id="launcher-version-value">—</span>
+                · <span id="launcher-maintenance-label-text" data-i18n="launcher_maintenance_short">Maintenance:</span> <span id="launcher-maintenance-value">—</span>
+                · <button class="link-btn" id="btn-launcher-logout"><span id="btn-launcher-logout-text">Log out</span></button>
+              </span>
             </div>
-          </div>
-
-          <!-- Profile quick-select -->
-          <div class="card" id="launcher-profile-quick-card">
-            <div class="card-header" id="launcher-profile-quick-header-text" data-i18n="launcher_profile_header">Profile</div>
-            <div class="input-row" style="gap:6px">
-              <select id="launcher-page-profile-select" class="form-input" style="flex:1">
-                <option value="" data-i18n="launcher_no_profiles">— No profiles saved —</option>
-              </select>
-              <button class="tab-btn" id="btn-launcher-manage-profiles" style="font-size:11px;white-space:nowrap" data-i18n="btn_manage">Manage</button>
-            </div>
-            <div id="launcher-profile-badge" style="font-size:11px;margin-top:6px;color:var(--text-muted)"></div>
-          </div>
-
-          <!-- Login form (hidden for custom-server profiles) -->
-          <div class="card" id="launcher-login-card">
-            <div class="card-header" id="launcher-login-header-text">Login</div>
-            <div class="form-group">
-              <label id="launcher-email-label-text">Nexon Email</label>
-              <input type="email" id="launcher-email" class="form-input" placeholder="you@example.com" autocomplete="username" />
-            </div>
-            <div class="form-group">
-              <label id="launcher-password-label-text">Password</label>
-              <input type="password" id="launcher-password" class="form-input" placeholder="••••••••" autocomplete="current-password" />
-            </div>
-                          <div class="form-group" id="launcher-verification-group" style="display:none;">
-                <label id="launcher-verification-label-text" data-i18n="launcher_verification_label">Verify Code</label>
-                <input type="text" id="launcher-verification" class="form-input" placeholder="Email Verification Code" data-i18n-placeholder="launcher_verification_placeholder" />
-              </div>
-              <div class="form-group form-row">
-              <label class="checkbox-label">
-                <input type="checkbox" id="launcher-remember" />
-                <span id="launcher-remember-text">Remember me</span>
-              </label>
-            </div>
-            <div class="form-actions">
-              <button class="tab-btn primary" id="btn-launcher-login">
-                <span id="btn-launcher-login-text">Login</span>
+            <div id="launcher-login-card" class="launcher-login-row">
+              <button class="tab-btn" id="btn-launcher-login">
+                <span id="btn-launcher-login-text" data-i18n="btn_launcher_login_nexon">Log in with Nexon</span>
               </button>
-              <div class="menu-btn" id="launcher-import-menu">
-                <button class="tab-btn menu-btn-toggle" id="btn-launcher-import-toggle" aria-haspopup="menu" aria-expanded="false">
-                  <span data-i18n="btn_launcher_import_menu">Import session</span> ▾
-                </button>
-                <div class="menu-btn-list" role="menu">
-                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-session" data-tooltip="tooltip_import_session">
-                    <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
-                  </button>
-                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-browser" data-i18n="btn_launcher_import_browser">Import from browser</button>
-                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-kanan" data-i18n="btn_launcher_import_kanan" data-tooltip="tooltip_import_kanan">Import from Kanan</button>
-                  <button class="menu-btn-item" role="menuitem" id="btn-launcher-import-hyddwn" data-i18n="btn_launcher_import_hyddwn">Import from Hyddwn Launcher</button>
-                </div>
-              </div>
+              <span id="launcher-login-hint" class="launcher-field-hint" data-i18n="launcher_login_hint">Sign in through Nexon's own login window.</span>
             </div>
-          </div>
-
-          <!-- Session info (shown after login) -->
-          <div class="card hidden" id="launcher-session-card">
-            <div class="card-header" id="launcher-session-header-text">Session</div>
-            <div class="launcher-session-row">
-              <span id="launcher-session-label-text">Session token:</span>
-              <span id="launcher-session-preview" class="launcher-token-preview">—</span>
-            </div>
-            <div class="launcher-session-row">
-              <span id="launcher-version-label-text">Game version:</span>
-              <span id="launcher-version-value">—</span>
-            </div>
-            <div class="launcher-session-row">
-              <span id="launcher-maintenance-label-text">Maintenance:</span>
-              <span id="launcher-maintenance-value">—</span>
-            </div>
-            <div class="form-actions">
-              <button class="tab-btn" id="btn-launcher-logout">
-                <span id="btn-launcher-logout-text">Log out</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Launch section -->
-          <div class="card" id="launcher-launch-card">
-            <div class="card-header" id="launcher-launch-header-text">Launch Game</div>
-            <div class="form-group">
-              <label id="launcher-client-label-text">Mabinogi Folder</label>
-              <div class="input-row">
-                <input type="text" id="launcher-client-dir" class="form-input" placeholder="C:\Nexon\Library\mabinogi\appdata" />
-                <button class="tab-btn" id="btn-launcher-browse" data-tooltip="tooltip_browse">BROWSE</button>
-                <button class="tab-btn" id="btn-launcher-installs" data-i18n="btn_check_installs">Check all installs</button>
-              </div>
-            </div>
-            <div id="launcher-installs-panel" class="installs-panel hidden"></div>
-            <div class="form-actions">
-              <button class="tab-btn primary" id="btn-launcher-launch">
-                <span id="btn-launcher-launch-text">Launch Mabinogi</span>
-              </button>
-              <button class="tab-btn" id="btn-profile-save-after-launch" data-i18n="btn_profile_save_after_launch">Save to Profile</button>
-            </div>
+            <input type="hidden" id="launcher-client-dir" />
+            <button class="tab-btn primary launcher-launch-big" id="btn-launcher-launch">
+              <span id="btn-launcher-launch-text">Launch Mabinogi</span>
+            </button>
             <div id="launcher-launch-result" class="hidden"></div>
           </div>
         </div>
@@ -389,9 +327,7 @@
         <div class="form-group">
             <label class="checkbox-label"><input type="checkbox" id="extract-auto-png"> <span id="label_settings_auto_png">Auto-convert .dds to .png on extract</span></label>
         </div>
-        <div class="form-group">
-            <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="extract-full-sequence"> <span id="label-list-full-sequence">Full .it Sequence Set</span></label>
-        </div>
+        
         <button id="extract-run" class="run-btn" data-tooltip="tooltip_extract_run">UNPACK</button>
       </div>
 
@@ -440,15 +376,43 @@
       </div>
 
       <!-- List Tab -->
+      <div id="database" class="tab-content">
+        <div class="card" style="display:flex;flex-direction:column;height:100%;">
+          <h2>Database Search</h2>
+          <div class="form-group" style="display:flex;gap:8px;">
+            <select id="db-search-type" class="form-input" style="width:180px;">
+              <option value="id">ID</option>
+              <option value="feature">Feature</option>
+              <option value="raw">Raw Data</option>
+              <option value="name" selected>Name</option>
+              <option value="internal">Internal Name</option>
+              <option value="description">Description</option>
+              <option value="tags">Tags</option>
+              <option value="xml">XML</option>
+            </select>
+            <input type="search" id="db-search-input" class="form-input" placeholder="Search database..." style="flex:1;" />
+          </div>
+          <div id="db-search-results" style="flex:1;overflow-y:auto;margin-top:8px;"></div>
+        </div>
+      </div>
       <div id="list" class="tab-content">
         <div class="form-group input-row">
           <input type="text" id="list-input" placeholder="Archive path..." />
           <button class="tab-btn" id="btn-browse-list" data-tooltip="tooltip_browse">BROWSE</button>
         </div>
 
-        <div class="form-group">
-            <input type="text" id="file-search-filter" placeholder="Search files..." />
-        </div>
+        <div class="form-group" style="display:flex;gap:8px;">
+            <input type="text" id="file-search-filter" class="form-input" placeholder="Search files..." style="flex:1;" />
+            <select id="file-type-filter" class="form-input" style="width:130px;">
+              <option value="">All Types</option>
+              <option value=".pmg">.pmg (Models)</option>
+              <option value=".dds">.dds (Textures)</option>
+              <option value=".rgn">.rgn (Regions)</option>
+              <option value=".xml">.xml (Data)</option>
+              <option value=".frm">.frm (UI)</option>
+              <option value="audio">Audio (.wav/.mp3)</option>
+            </select>
+          </div>
 
         <div class="form-group">
             <label class="checkbox-label" data-tooltip="tooltip_full_seq"><input type="checkbox" id="list-full-sequence"> <span id="label-list-full-sequence">Full .it Sequence Set</span></label>
@@ -831,21 +795,30 @@
           <div class="settings-section">
             <h4 style="margin:0 0 10px 0;" data-i18n="set_login_auth">Login & Auth</h4>
             <div class="sys-stat">
-              <span id="label-legacy-auth" data-i18n="label_legacy_auth">Use legacy direct API login (Hyddwn) instead of WebView</span>
-              <label class="switch"><input type="checkbox" id="launcher-legacy-auth"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span id="label-autoclose-login" data-i18n="label_autoclose_login">Auto-close WebView login window on success</span>
-              <label class="switch"><input type="checkbox" id="launcher-autoclose-login" checked><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat" style="margin-top: 8px;">
               <span id="label-reset-login" data-i18n="label_reset_login">Clear WebView Login Cache (Fixes stuck 'Stay Logged In')</span>
-              <button class="btn btn-secondary" id="btn-reset-login-cache" style="padding:4px 12px; font-size:12px;" data-i18n="btn_reset_login_cache">Reset Cache</button>
+              <button class="tab-btn" id="btn-reset-login-cache" style="padding:4px 12px; font-size:12px;" data-i18n="btn_reset_login_cache">Reset Cache</button>
             </div>
+              <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
+              <h4 style="margin:0 0 10px 0;" data-i18n="set_login_import">Session Import</h4>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <button class="tab-btn" id="btn-launcher-import-session" data-tooltip="tooltip_import_session">
+                  <span id="btn-launcher-import-session-text">Import from Nexon Launcher</span>
+                </button>
+                <button class="tab-btn" id="btn-launcher-import-browser" data-i18n="btn_launcher_import_browser">Import from browser</button>
+                <button class="tab-btn" id="btn-launcher-import-kanan" data-i18n="btn_launcher_import_kanan" data-tooltip="tooltip_import_kanan">Import from Kanan</button>
+                <button class="tab-btn" id="btn-launcher-import-hyddwn" data-i18n="btn_launcher_import_hyddwn">Import from Hyddwn Launcher</button>
+              </div>
             <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
             <!-- Profile manager (moved from Launcher tab) -->
             <div class="card" id="launcher-profile-card" style="margin-bottom:12px;">
               <div class="card-header" id="launcher-profiles-header-text" data-i18n="launcher_profiles_header">Profiles</div>
+              <div class="profile-selector-row">
+                <select id="launcher-profile-select" class="form-input profile-select">
+                  <option value="" data-i18n="launcher_no_profiles">— No profiles saved —</option>
+                </select>
+                <button class="tab-btn icon-btn" id="btn-profile-new" data-tooltip="tooltip_profile_new">+</button>
+                <button class="tab-btn icon-btn" id="btn-profile-delete" data-tooltip="tooltip_profile_delete">🗑</button>
+              </div>
               <!-- Detect from installed launchers -->
               <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
                 <button class="tab-btn" id="btn-profile-detect" data-i18n="btn_profile_detect">Detect from installed launchers</button>
@@ -856,13 +829,12 @@
                 <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text-muted)" data-i18n="launcher_detected_header">DETECTED LAUNCHERS</div>
                 <div id="detected-profiles-list"></div>
               </div>
-              <div class="profile-selector-row">
-                <select id="launcher-profile-select" class="form-input profile-select">
-                  <option value="" data-i18n="launcher_no_profiles">— No profiles saved —</option>
-                </select>
-                <button class="tab-btn icon-btn" id="btn-profile-new" data-tooltip="tooltip_profile_new">+</button>
-                <button class="tab-btn icon-btn" id="btn-profile-delete" data-tooltip="tooltip_profile_delete">🗑</button>
+              <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
+              <h4 style="margin:0 0 10px 0;" data-i18n="set_launcher_discovery">Game Discovery</h4>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <button class="tab-btn" id="btn-launcher-installs" data-i18n="btn_check_installs">Check all installs</button>
               </div>
+              <div id="launcher-installs-panel" class="installs-panel hidden"></div>
               <div id="launcher-profile-editor" class="hidden">
                 <div class="form-group">
                   <label id="launcher-profile-name-label-text" data-i18n="launcher_profile_name_label">Profile Name</label>
@@ -879,24 +851,6 @@
                     <button class="tab-btn" id="btn-profile-browse" data-tooltip="tooltip_browse">BROWSE</button>
                   </div>
                 </div>
-                <div id="launcher-profile-server-fields" style="display:none">
-                  <div style="font-size:11px;font-weight:600;margin:8px 0 4px;color:var(--text-muted)" data-i18n="launcher_custom_server_header">CUSTOM SERVER</div>
-                  <div style="display:grid;grid-template-columns:1fr 80px 1fr 80px;gap:6px;align-items:center;">
-                    <input type="text" id="launcher-profile-login-ip" class="form-input" placeholder="Login IP" data-i18n-placeholder="ph_login_ip" />
-                    <input type="number" id="launcher-profile-login-port" class="form-input" placeholder="Port" min="1" max="65535" data-i18n-placeholder="ph_port" />
-                    <input type="text" id="launcher-profile-chat-ip" class="form-input" placeholder="Chat IP" data-i18n-placeholder="ph_chat_ip" />
-                    <input type="number" id="launcher-profile-chat-port" class="form-input" placeholder="Port" min="1" max="65535" data-i18n-placeholder="ph_port" />
-                  </div>
-                  <div style="display:grid;grid-template-columns:auto;gap:4px;margin-top:4px;font-size:11px;color:var(--text-muted)">
-                    <span><span data-i18n="ph_login_ip_port">Login IP / Port</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span data-i18n="ph_chat_ip_port">Chat IP / Port</span></span>
-                  </div>
-                </div>
-                <div class="form-group form-row" style="margin-top:6px">
-                  <label class="checkbox-label">
-                    <input type="checkbox" id="launcher-profile-custom-server" />
-                    <span data-i18n="label_use_custom_server">Use custom server</span>
-                  </label>
-                </div>
                 <div class="form-group form-row">
                   <label class="checkbox-label">
                     <input type="checkbox" id="launcher-profile-autologin" />
@@ -908,6 +862,13 @@
                   <button class="tab-btn" id="btn-profile-cancel" data-i18n="btn_profile_cancel">Cancel</button>
                 </div>
               </div>
+            </div>
+            <!-- Launcher servers (Server dropdown on the Launcher tab) -->
+            <div class="card" id="launcher-servers-card" style="margin-bottom:12px;">
+              <div class="card-header" data-i18n="launcher_servers_header">Servers</div>
+              <p class="launcher-field-hint" style="margin:0 0 8px 0" data-i18n="launcher_servers_hint">Private servers for the Server dropdown. Official Nexon NA is always listed.</p>
+              <div id="server-profiles-list" class="server-profiles-list"></div>
+              <button class="tab-btn" id="btn-server-add" style="margin-top:8px;" data-i18n="btn_server_add">+ Add Server</button>
             </div>
             <!-- Update check -->
             <div class="sys-stat" style="margin-top:8px;">
@@ -1195,11 +1156,55 @@
       </div>
     </div>
   </div>
+
+  <!-- Server edit modal (Settings > Launcher > Servers) -->
+  <div id="server-profile-modal" class="conflict-overlay hidden">
+    <div class="conflict-modal" role="dialog" aria-modal="true" style="padding:16px 18px;min-width:380px">
+      <h3 id="server-modal-title" style="margin:0" data-i18n="server_modal_title">Server</h3>
+      <div class="form-group" style="margin-top:12px">
+        <label for="server-modal-name" data-i18n="server_modal_name">Server Name</label>
+        <input type="text" id="server-modal-name" class="form-input">
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <div class="form-group" style="flex:1;">
+          <label for="server-modal-login" data-i18n="server_modal_login_ip">Login IP</label>
+          <input type="text" id="server-modal-login" class="form-input" placeholder="127.0.0.1">
+        </div>
+        <div class="form-group" style="width:100px;">
+          <label for="server-modal-login-port" data-i18n="server_modal_login_port">Login Port</label>
+          <input type="number" id="server-modal-login-port" class="form-input" placeholder="11000" min="1" max="65535">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <div class="form-group" style="flex:1;">
+          <label for="server-modal-chatip" data-i18n="server_modal_chat_ip">Chat IP</label>
+          <input type="text" id="server-modal-chatip" class="form-input" placeholder="127.0.0.1">
+        </div>
+        <div class="form-group" style="width:100px;">
+          <label for="server-modal-chatport" data-i18n="server_modal_chat_port">Chat Port</label>
+          <input type="number" id="server-modal-chatport" class="form-input" placeholder="8002" min="1" max="65535">
+        </div>
+      </div>
+      <div class="form-actions" style="justify-content:flex-end;margin-top:16px;">
+        <button class="tab-btn" id="server-modal-cancel" data-i18n="btn_profile_cancel">Cancel</button>
+        <button class="tab-btn primary" id="server-modal-save" data-i18n="btn_server_save">Save</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
 >
 >
 >
+
+
+
+
+
+
+
+
+
 
 
 

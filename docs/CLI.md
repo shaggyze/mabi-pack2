@@ -221,14 +221,14 @@ if you know you need to.
 Log in with email and password, or check (and refresh) the stored session.
 
 ```
-mabi-patcher login [--profile NAME] [-u EMAIL -p PASSWORD] [-c DIR]
+mabi-patcher login [--profile NAME] [-u EMAIL --password-stdin] [-c DIR]
 ```
 
 | Option | Description |
 |---|---|
 | `--profile NAME` | Profile to save to or check. |
 | `-u`, `--email EMAIL` | Account email. Alias `--username`. Falls back to `MABI_EMAIL`, but only when a password is also available. |
-| `-p`, `--password PASSWORD` | Account password. Falls back to `MABI_PASSWORD`. |
+| `--password-stdin` | Read the account password from the first line of stdin. Falls back to `MABI_PASSWORD`. `-p PASSWORD` is refused: other programs can read a command line. Nexon currently requires a CAPTCHA for email/password login, so log in once with the GUI. |
 | `-c`, `--client DIR` | Save this game folder (or `Client.exe` path) on the profile. |
 
 Behaviour:
@@ -365,7 +365,7 @@ are printed at the end. A permission error prints
 Log in if needed and launch the game. See [LAUNCH.md](LAUNCH.md).
 
 ```
-mabi-patcher launch [--profile NAME] [-c PATH] [-u EMAIL -p PASSWORD] [--wait | --no-wait] [--version] [--manifest]
+mabi-patcher launch [--profile NAME] [-c PATH] [-u EMAIL --password-stdin] [--wait | --no-wait] [--version] [--manifest]
 ```
 
 | Option | Description |
@@ -373,7 +373,7 @@ mabi-patcher launch [--profile NAME] [-c PATH] [-u EMAIL -p PASSWORD] [--wait | 
 | `--profile NAME` | Profile to use. |
 | `-c`, `--client PATH` | Game folder or `Client.exe`. Alias `--game-path`. |
 | `-u`, `--username EMAIL` | Log in with this account first (alias `--email`; falls back to `MABI_EMAIL` when a password is available). The session is saved like `login` does. Without it, the profile's session is used. |
-| `-p`, `--password PASSWORD` | Password for `-u`. Falls back to `MABI_PASSWORD`. |
+| `--password-stdin` | Read the password for `-u` from stdin. Falls back to `MABI_PASSWORD`. |
 | `--wait` | Wait until the game exits. This is the default. Cannot be combined with `--no-wait`. |
 | `--no-wait` | Return once the game has started and taken its login ticket. |
 | `--version` | Print `Latest Mabinogi version: N` and exit without launching. |
@@ -446,7 +446,7 @@ mabi-patcher news [--product-id N]
 | Variable | Used by | Meaning |
 |---|---|---|
 | `MABI_EMAIL` | `login`, `login-otp`, `launch` | Account email when `-u` is not given. For `login` and `launch` it is only used when a password is also available. |
-| `MABI_PASSWORD` | `login`, `launch` | Account password when `-p` is not given. |
+| `MABI_PASSWORD` | `login`, `launch` | Account password when `--password-stdin` is not given. |
 | `MABI_KANAN_PASSWORD` | `import-kanan` | Kanan master password (skips the prompt). |
 | `MABI_WINE` / `WINE` | `launch` on Linux | Wine runner (for example `wine64`, a Proton `wine` binary or a script). Default `wine`. |
 | `MABI_WINE_EXE` | `launch` on Linux | Path to the Windows `mabi-patcher.exe`. Default: next to the Linux binary. |

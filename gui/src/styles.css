@@ -876,6 +876,28 @@ input:checked + .slider:before { transform: translateX(20px); }
 .launcher-launch-result.success { background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3); color: #4ade80; }
 .launcher-launch-result.error { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: #f87171; }
 .profile-selector-row { display: flex; align-items: center; gap: 6px; }
+.launcher-main-card { display: flex; flex-direction: column; gap: 12px; }
+.launcher-field { display: flex; flex-direction: column; gap: 4px; }
+.launcher-field > label { font-size: 11px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase; color: var(--text-muted); }
+.launcher-field .input-row { gap: 6px; }
+.launcher-field .input-row select { flex: 1; min-width: 0; }
+.launcher-field .input-row .tab-btn { flex-shrink: 0; white-space: nowrap; }
+.launcher-field-hint { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.launcher-status-bar { flex-wrap: wrap; opacity: 1; }
+.launcher-session-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.launcher-session-inline.hidden { display: none; }
+.launcher-login-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent-cyan); cursor: pointer; font: inherit; text-decoration: underline; }
+.link-btn:hover { opacity: .8; }
+.launcher-launch-big { align-self: flex-start; min-width: 200px; padding: 12px 28px; font-size: 15px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; }
+/* Settings > Launcher: buttons size to their label */
+#stab-launcher .btn, #stab-launcher .tab-btn:not(.icon-btn) { width: auto; align-self: flex-start; }
+#stab-launcher div[style*="flex-direction:column"] { align-items: flex-start; }
+.server-profiles-list { display: flex; flex-direction: column; gap: 6px; }
+.server-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border-glass); border-radius: 6px; font-size: 12px; }
+.server-row .server-name { font-weight: 600; }
+.server-row .server-addr { flex: 1; min-width: 0; color: var(--text-muted); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-row .tab-btn { padding: 2px 8px; font-size: 11px; }
 .profile-select { flex: 1; min-width: 0; }
 .profile-selector-row .tab-btn { flex-shrink: 0; padding: 4px 8px; font-size: 13px; }
 #launcher-profile-editor { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.08); }
@@ -1192,3 +1214,12 @@ button.run-btn {
     padding: 8px 12px; font-size: 0.8rem; border-radius: 3px; cursor: pointer;
 }
 .menu-btn-item:hover, .menu-btn-item:focus-visible { background: color-mix(in srgb, var(--accent-cyan) 15%, transparent); color: var(--accent-cyan); outline: none; }
+
+@keyframes flash-red {
+    0%, 100% { border-color: var(--border-glass); box-shadow: none; }
+    50% { border-color: #ff3333; box-shadow: 0 0 8px #ff3333; }
+}
+.error-flash {
+    animation: flash-red 0.3s ease-in-out 3;
+}
+

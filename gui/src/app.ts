@@ -75,6 +75,15 @@ interface ThemeOverrides {
     font_size?: number;
 }
 
+interface LauncherServer {
+    id: string;
+    name: string;
+    login_ip: string;
+    login_port: number;
+    chat_ip?: string;
+    chat_port?: number;
+}
+
 interface Config {
     theme: string;
     locale: string;
@@ -115,6 +124,10 @@ interface Config {
     patcher_focus_on_start: boolean;
     patcher_max_workers: number;
     patcher_run_elevated: boolean;
+    /** Private servers for the Launcher tab's Server dropdown (official NA is implicit). */
+    launcher_servers?: LauncherServer[];
+    /** Selected launcher server id; empty = official Nexon servers. */
+    launcher_server_id?: string;
     /** Wildcard paths (`*`, `?`) the patcher never touches — keeps local mods safe. */
     patcher_ignore_list?: string[];
     launch_use_nexon_launcher: boolean;
@@ -467,6 +480,8 @@ class App {
             ["setup3dPreviewResize", () => this.setup3dPreviewResize()],
             ["setupForms", () => this.setupForms()],
             ["setupNews", () => this.setupNews()],
+            ["setupDatabaseTab", () => this.setupDatabaseTab()],
+            ["applyUrlParams", () => this.applyUrlParams()],
         ];
         for (const [name, step] of steps) {
             try { step(); } catch (e) { console.error(`[INIT] ${name} failed`, e); this.log(`[INIT] ${name} failed: ${e}`, "error"); }
@@ -635,19 +650,9 @@ class App {
         // Translate span elements with -text suffix IDs (launcher/features/jobs tabs)
         const textMap: [string, string][] = [
             ["launcher-title-text", "launcher_title"],
-            ["launcher-login-header-text", "launcher_login_header"],
-            ["launcher-email-label-text", "launcher_email_label"],
-            ["launcher-password-label-text", "launcher_password_label"],
-            ["launcher-remember-text", "launcher_remember_me"],
-            ["btn-launcher-login-text", "btn_launcher_login"],
+            ["btn-launcher-login-text", "btn_launcher_login_nexon"],
             ["btn-launcher-logout-text", "btn_launcher_logout"],
             ["btn-launcher-import-session-text", "btn_launcher_import_session"],
-            ["launcher-session-header-text", "launcher_session_header"],
-            ["launcher-session-label-text", "launcher_session_token_label"],
-            ["launcher-version-label-text", "launcher_version_label"],
-            ["launcher-maintenance-label-text", "launcher_maintenance_label"],
-            ["launcher-launch-header-text", "launcher_launch_header"],
-            ["launcher-client-label-text", "launcher_client_label"],
             ["btn-launcher-launch-text", "btn_launcher_launch"],
             ["features-title-text", "features_title"],
             ["features-archive-label-text", "features_archive_label"],
@@ -663,6 +668,10 @@ class App {
             const el = document.getElementById(elemId);
             if (el) el.textContent = this.t(key);
         });
+
+        // Server dropdown labels and the launcher title/status follow the language too.
+        this.renderServers();
+        this.applyServerToUI();
 
         // Browse buttons
         document.querySelectorAll<HTMLElement>('[data-tooltip="tooltip_browse"]').forEach(el => {
@@ -1776,6 +1785,7 @@ class App {
             launchBtn.addEventListener("click", () => {
                 const el = document.getElementById("launcher-client-dir") as HTMLInputElement | null;
                 if (el) el.value = f.client_dir;
+                this.showLaunchFolder();
                 this.log(this.t("log_installs_selected_launch", [f.client_dir]));
                 document.querySelector('.nav-item[data-tab="launcher"]')?.dispatchEvent(new Event('click'));
             });
@@ -3326,7 +3336,6 @@ class App {
 
     private launcherSession: { access_token: string; g_access_token: string; session_token: string; hashed_user_id: string; tpa?: boolean; [k: string]: any } | null = null;
     /** Pending MFA challenge from an email/password login (submit the code with launcher_login_otp). */
-    private pendingMfaKey: string | null = null;
     /** Legacy localStorage key of the full session (secrets): only read once to migrate
      *  it into the profile store, then removed. The session now lives in memory. */
     private readonly LAUNCHER_SESSION_KEY = "nexon_session";
@@ -3440,23 +3449,24 @@ class App {
         document.getElementById("btn-profile-delete")?.addEventListener("click", () => this.deleteActiveProfile());
         document.getElementById("btn-profile-save")?.addEventListener("click", () => this.saveProfileEditor());
         document.getElementById("btn-profile-cancel")?.addEventListener("click", () => this.closeProfileEditor());
-        document.getElementById("btn-profile-save-after-launch")?.addEventListener("click", () => this.saveCurrentSettingsToProfile());
 
-        // Custom server toggle in profile editor
-        document.getElementById("launcher-profile-custom-server")?.addEventListener("change", (e) => {
-            const checked = (e.target as HTMLInputElement).checked;
-            const serverFields = document.getElementById("launcher-profile-server-fields");
-            if (serverFields) serverFields.style.display = checked ? "block" : "none";
+        // Server dropdown (Launcher tab) and server list (Settings > Launcher)
+        document.getElementById("launcher-server-select")?.addEventListener("change", (e) => {
+            const sel = e.target as HTMLSelectElement;
+            if (sel.value === App.NEW_SERVER_OPTION) {
+                sel.value = this.config.launcher_server_id || "";
+                this.openServerManager(true);
+                return;
+            }
+            this.selectServer(sel.value);
         });
+        document.getElementById("btn-launcher-manage-servers")?.addEventListener("click", () => this.openServerManager(false));
+        document.getElementById("btn-server-add")?.addEventListener("click", () => this.openServerModal(null));
+        document.getElementById("server-modal-cancel")?.addEventListener("click", () => this.closeServerModal());
+        document.getElementById("server-modal-save")?.addEventListener("click", () => this.saveServerModal());
+        this.renderServers();
 
         // Browse buttons
-        document.getElementById("btn-launcher-browse")?.addEventListener("click", async () => {
-            const { open } = await import("./platform/dialog");
-            const dir = await open({ directory: true });
-            if (dir && !Array.isArray(dir)) {
-                (document.getElementById("launcher-client-dir") as HTMLInputElement).value = dir as string;
-            }
-        });
         document.getElementById("btn-profile-browse")?.addEventListener("click", async () => {
             const { open } = await import("./platform/dialog");
             const dir = await open({ directory: true });
@@ -3513,7 +3523,13 @@ class App {
 
             // Prefer stored active_id, fall back to previously selected, then first profile
             const activeId = storedActiveId || this.activeProfileId || this.launcherProfiles[0]?.id || "";
-            const active = this.launcherProfiles.find(p => p.id === activeId) || this.launcherProfiles[0];
+            let active = this.launcherProfiles.find(p => p.id === activeId) || this.launcherProfiles[0];
+            // An official profile that was never signed in can't launch: start on one that
+            // is signed in instead (the user can still pick any profile).
+            const signedIn = (p: any) => p?.is_official !== false && p.session_valid && !this.profileSessionExpired(p);
+            if (active && active.is_official !== false && !active.has_session) {
+                active = this.launcherProfiles.find(signedIn) || active;
+            }
             if (active) this.activeProfileId = active.id;
 
             this.renderProfileSelect();
@@ -3523,7 +3539,9 @@ class App {
                 this.applyProfileToUI(active);
                 if (await this.handleExpiredAutologin(active)) {
                     // expired: re-login prompt shown instead of a doomed autologin
-                } else if (active.auto_login && active.session_valid) {
+                } else if (this.launcherSession) {
+                    // already signed in this run (e.g. reload right after a login)
+                } else if (!(await this.restoreProfileSession(active)) && active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
                 }
             } else {
@@ -3578,11 +3596,16 @@ class App {
     /** Profile list entry: name, email, type, session badge and session time left. */
     private profileOptionLabel(p: any): string {
         const expired = this.profileSessionExpired(p);
-        const sessionBadge = p.session_valid && !expired ? " ✓" : p.has_session ? " ⚠" : "";
         const typeBadge = p.profile_type && p.profile_type !== "nexon" ? ` [${p.profile_type}]` : "";
         const emailPart = p.email ? ` (${p.email})` : "";
-        const left = p.has_session ? this.formatExpiry(p.session_expires_at) : "";
-        return `${p.name}${emailPart}${typeBadge}${sessionBadge}${left ? ` · ${left}` : ""}`;
+        // Custom servers don't use a Nexon session: no sign-in state for them.
+        if (p.is_official === false) return `${p.name}${emailPart}${typeBadge}`;
+        const signedIn = p.session_valid && !expired;
+        const state = signedIn ? `✓ ${this.t("launcher_profile_state_ok")}`
+            : p.has_session ? `⚠ ${this.t("launcher_profile_state_expired")}`
+            : this.t("launcher_profile_state_none");
+        const left = signedIn ? this.formatExpiry(p.session_expires_at) : "";
+        return `${p.name}${emailPart}${typeBadge} · ${state}${left ? ` (${left})` : ""}`;
     }
 
     /** Session time left until `expiresAt` (unix seconds): "29d 4h", "2h 15m", "45m",
@@ -3669,49 +3692,222 @@ class App {
     }
 
     private applyProfileToUI(profile: any) {
-        if (profile.client_dir) {
-            (document.getElementById("launcher-client-dir") as HTMLInputElement).value = profile.client_dir;
+        (document.getElementById("launcher-client-dir") as HTMLInputElement).value = profile.client_dir || "";
+        // A profile made for a private server (older versions, Hyddwn import) picks that server.
+        if (profile.is_official === false && profile.login_ip) {
+            const srv = this.ensureServer(profile.name, profile.login_ip, profile.login_port, profile.chat_ip, profile.chat_port);
+            this.selectServer(srv.id);
+        } else {
+            this.applyServerToUI();
         }
-        if (profile.email) {
-            (document.getElementById("launcher-email") as HTMLInputElement).value = profile.email;
-            // Clear password when switching profiles so user gets a clean login form
-            (document.getElementById("launcher-password") as HTMLInputElement).value = "";
-        }
-        // Track active profile server settings for launch
-        this.activeProfileLoginIp = profile.login_ip || "";
-        this.activeProfileLoginPort = profile.login_port || 0;
-        this.activeProfileIsOfficial = profile.is_official !== false;
-        // Re-apply login state now that activeProfileIsOfficial is set
-        this.updateLauncherUI(!!this.launcherSession);
+        this.showLaunchFolder();
+    }
 
-        const isCustom = !this.activeProfileIsOfficial;
-        // Show login card only for official profiles; custom servers launch directly
-        const loginCard = document.getElementById("launcher-login-card");
-        const sessionCard = document.getElementById("launcher-session-card");
-        if (loginCard) loginCard.style.display = isCustom ? "none" : "";
-        if (sessionCard && isCustom) sessionCard.style.display = "none";
-
-        // Update badge on launcher page
+    /** Game folder of the selected profile, under the Client Profile dropdown. */
+    private showLaunchFolder() {
         const badge = document.getElementById("launcher-profile-badge");
-        if (badge) {
-            if (isCustom) {
-                badge.textContent = this.t("launcher_badge_custom", [`${profile.login_ip}:${profile.login_port || 11000}`, profile.client_dir || this.t("launcher_no_game_dir")]);
-            } else {
-                const dir = profile.client_dir ? ` — ${profile.client_dir}` : "";
-                badge.textContent = this.t("launcher_badge_official") + dir;
+        if (!badge) return;
+        const dir = (document.getElementById("launcher-client-dir") as HTMLInputElement | null)?.value || "";
+        badge.textContent = dir || this.t("launcher_no_game_dir");
+        badge.title = dir;
+    }
+
+    // ── Launcher servers ──────────────────────────────────────────────────────
+    static readonly NEW_SERVER_OPTION = "__new_server__";
+    private editingServerId: string | null = null;
+
+    private launcherServers(): LauncherServer[] {
+        if (!Array.isArray(this.config.launcher_servers)) this.config.launcher_servers = [];
+        return this.config.launcher_servers;
+    }
+
+    private activeServer(): LauncherServer | null {
+        const id = this.config.launcher_server_id || "";
+        return id ? this.launcherServers().find(s => s.id === id) ?? null : null;
+    }
+
+    /** The saved server with this login address, created (and saved) when missing. */
+    private ensureServer(name: string, ip: string, port?: number, chatIp?: string, chatPort?: number): LauncherServer {
+        const p = port || 11000;
+        const found = this.launcherServers().find(s => s.login_ip === ip && (s.login_port || 11000) === p);
+        if (found) return found;
+        const srv: LauncherServer = { id: `srv-${Date.now().toString(36)}`, name: name || ip, login_ip: ip, login_port: p, chat_ip: chatIp || "", chat_port: chatPort || 0 };
+        this.launcherServers().push(srv);
+        void this.saveConfig();
+        this.renderServers();
+        return srv;
+    }
+
+    private selectServer(id: string) {
+        const known = !id || this.launcherServers().some(s => s.id === id);
+        this.config.launcher_server_id = known ? id : "";
+        void this.saveConfig();
+        const sel = document.getElementById("launcher-server-select") as HTMLSelectElement | null;
+        if (sel) sel.value = this.config.launcher_server_id || "";
+        this.applyServerToUI();
+    }
+
+    /** Official server: Nexon sign-in shown. Private server: no sign-in, launch connects to its login address. */
+    private applyServerToUI() {
+        const srv = this.activeServer();
+        this.activeProfileIsOfficial = !srv;
+        this.activeProfileLoginIp = srv?.login_ip || "";
+        this.activeProfileLoginPort = srv?.login_port || 0;
+        const title = document.getElementById("launcher-title-text");
+        if (title) title.textContent = srv ? srv.name : this.t("launcher_title");
+        if (srv) {
+            document.getElementById("launcher-login-card")?.classList.add("hidden");
+            document.getElementById("launcher-session-card")?.classList.add("hidden");
+            const dot = document.getElementById("launcher-status-dot");
+            if (dot) dot.style.background = "var(--accent-cyan)";
+            const st = document.getElementById("launcher-status-text");
+            if (st) st.textContent = this.t("launcher_server_ready", [`${srv.login_ip}:${srv.login_port || 11000}`]);
+        } else {
+            this.updateLauncherUI(!!this.launcherSession);
+        }
+    }
+
+    /** Fill the Server dropdown and the Settings > Launcher server list. */
+    private renderServers() {
+        const servers = this.launcherServers();
+        const sel = document.getElementById("launcher-server-select") as HTMLSelectElement | null;
+        if (sel) {
+            sel.innerHTML = "";
+            const official = document.createElement("option");
+            official.value = "";
+            official.textContent = this.t("launcher_server_official");
+            sel.appendChild(official);
+            for (const s of servers) {
+                const opt = document.createElement("option");
+                opt.value = s.id;
+                opt.textContent = `${s.name} (${s.login_ip}:${s.login_port || 11000})`;
+                sel.appendChild(opt);
+            }
+            const add = document.createElement("option");
+            add.value = App.NEW_SERVER_OPTION;
+            add.textContent = this.t("launcher_server_new_option");
+            sel.appendChild(add);
+            sel.value = this.activeServer()?.id || "";
+        }
+        const list = document.getElementById("server-profiles-list");
+        if (list) {
+            list.innerHTML = "";
+            if (servers.length === 0) list.appendChild(elText("div", "launcher-field-hint", this.t("launcher_servers_none")));
+            for (const s of servers) {
+                const row = document.createElement("div");
+                row.className = "server-row";
+                row.appendChild(elText("span", "server-name", s.name));
+                row.appendChild(elText("span", "server-addr", `${s.login_ip}:${s.login_port || 11000}`));
+                const edit = elText("button", "tab-btn", this.t("btn_server_edit"));
+                edit.addEventListener("click", () => this.openServerModal(s.id));
+                const del = elText("button", "tab-btn", this.t("btn_server_delete"));
+                del.addEventListener("click", () => this.deleteServer(s.id));
+                row.appendChild(edit);
+                row.appendChild(del);
+                list.appendChild(row);
             }
         }
     }
 
+    /** Settings > Launcher, scrolled to the server list; `add` also opens a blank server. */
+    private openServerManager(add: boolean) {
+        document.getElementById("tab-settings")?.click();
+        setTimeout(() => {
+            (document.querySelector("[data-stab='launcher']") as HTMLElement)?.click();
+            document.getElementById("launcher-servers-card")?.scrollIntoView({ block: "start" });
+            if (add) this.openServerModal(null);
+        }, 50);
+    }
+
+    private openServerModal(id: string | null) {
+        this.editingServerId = id;
+        const s = id ? this.launcherServers().find(x => x.id === id) : null;
+        const val = (elId: string, v: string) => { (document.getElementById(elId) as HTMLInputElement).value = v; };
+        val("server-modal-name", s?.name || "");
+        val("server-modal-login", s?.login_ip || "");
+        val("server-modal-login-port", s?.login_port ? String(s.login_port) : "");
+        val("server-modal-chatip", s?.chat_ip || "");
+        val("server-modal-chatport", s?.chat_port ? String(s.chat_port) : "");
+        document.getElementById("server-profile-modal")?.classList.remove("hidden");
+        (document.getElementById("server-modal-name") as HTMLInputElement).focus();
+    }
+
+    private closeServerModal() {
+        this.editingServerId = null;
+        document.getElementById("server-profile-modal")?.classList.add("hidden");
+    }
+
+    private async saveServerModal() {
+        const get = (elId: string) => (document.getElementById(elId) as HTMLInputElement).value.trim();
+        const ip = get("server-modal-login");
+        if (!ip) { (document.getElementById("server-modal-login") as HTMLInputElement).focus(); return; }
+        const port = (n: string) => { const v = parseInt(n, 10); return v > 0 && v < 65536 ? v : 0; };
+        const data = {
+            name: get("server-modal-name") || ip,
+            login_ip: ip,
+            login_port: port(get("server-modal-login-port")) || 11000,
+            chat_ip: get("server-modal-chatip"),
+            chat_port: port(get("server-modal-chatport")),
+        };
+        const servers = this.launcherServers();
+        const existing = this.editingServerId ? servers.find(s => s.id === this.editingServerId) : null;
+        if (existing) Object.assign(existing, data);
+        else servers.push({ id: `srv-${Date.now().toString(36)}`, ...data });
+        await this.saveConfig();
+        this.closeServerModal();
+        this.renderServers();
+        this.applyServerToUI();
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_server_saved", [data.name])}`, "info");
+    }
+
+    private async deleteServer(id: string) {
+        const s = this.launcherServers().find(x => x.id === id);
+        if (!s) return;
+        if (!(await ask(this.t("launcher_server_delete_confirm", [s.name]), { title: this.t("btn_server_delete"), kind: "warning" }))) return;
+        this.config.launcher_servers = this.launcherServers().filter(x => x.id !== id);
+        if (this.config.launcher_server_id === id) this.config.launcher_server_id = "";
+        await this.saveConfig();
+        this.renderServers();
+        this.applyServerToUI();
+    }
+
     private async selectProfile(id: string) {
+        const switched = id !== this.activeProfileId;
         this.activeProfileId = id;
         const profile = this.launcherProfiles.find(p => p.id === id);
         if (!profile) return;
+        // Another account: never launch with the previous profile's session.
+        if (switched && this.launcherSession) {
+            this.launcherSession = null;
+            this.updateLauncherUI(false);
+            this.setLauncherStatus(this.t("launcher_status_idle"), "idle");
+        }
         this.applyProfileToUI(profile);
         try { await invoke("launcher_set_active_profile", { id }); } catch {}
         if (await this.handleExpiredAutologin(profile)) return;
+        if (await this.restoreProfileSession(profile)) return;
         if (profile.auto_login && profile.session_valid) {
             await this.autologinProfile(id);
+        }
+    }
+
+    /** Use the session stored on an official profile (checked, and refreshed when
+     *  Nexon allows it, by the backend). Works for browser/SSO logins too, which
+     *  autologin can't renew. True when the profile is now signed in. */
+    private async restoreProfileSession(profile: any): Promise<boolean> {
+        if (profile?.is_official === false || !profile?.session_valid || this.profileSessionExpired(profile)) return false;
+        try {
+            const r = await invoke("launcher_restore_session", { id: profile.id }) as { session: any; expiresIn?: number };
+            if (!r?.session) return false;
+            this.launcherSession = r.session;
+            if (r.expiresIn) this.noteProfileExpiry(profile.id, r.expiresIn);
+            this.updateLauncherUI(true);
+            this.setLauncherStatus(this.t("launcher_status_ok"), "ok");
+            this.fetchLauncherVersion();
+            return true;
+        } catch (e) {
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_login_failed", [String(e)])}`, "warn");
+            return false;
         }
     }
 
@@ -3752,9 +3948,6 @@ class App {
             (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value =
                 (document.getElementById("launcher-client-dir") as HTMLInputElement)?.value || "";
             (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = false;
-            (document.getElementById("launcher-profile-custom-server") as HTMLInputElement).checked = false;
-            const sf = document.getElementById("launcher-profile-server-fields");
-            if (sf) sf.style.display = "none";
         } else {
             const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
             if (profile) {
@@ -3762,16 +3955,6 @@ class App {
                 (document.getElementById("launcher-profile-email") as HTMLInputElement).value = profile.email || "";
                 (document.getElementById("launcher-profile-client-dir") as HTMLInputElement).value = profile.client_dir || "";
                 (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked = !!profile.auto_login;
-                const hasCustom = !!(profile.login_ip || profile.login_port);
-                (document.getElementById("launcher-profile-custom-server") as HTMLInputElement).checked = hasCustom;
-                const sf = document.getElementById("launcher-profile-server-fields");
-                if (sf) sf.style.display = hasCustom ? "block" : "none";
-                if (hasCustom) {
-                    (document.getElementById("launcher-profile-login-ip") as HTMLInputElement).value = profile.login_ip || "";
-                    (document.getElementById("launcher-profile-login-port") as HTMLInputElement).value = String(profile.login_port || "");
-                    (document.getElementById("launcher-profile-chat-ip") as HTMLInputElement).value = profile.chat_ip || "";
-                    (document.getElementById("launcher-profile-chat-port") as HTMLInputElement).value = String(profile.chat_port || "");
-                }
             }
         }
     }
@@ -3787,13 +3970,14 @@ class App {
         const autoLogin = (document.getElementById("launcher-profile-autologin") as HTMLInputElement).checked;
         const emailEl = document.getElementById("launcher-profile-email") as HTMLInputElement;
         const email = emailEl?.value.trim() ||
-            (document.getElementById("launcher-email") as HTMLInputElement)?.value.trim() ||
             this.launcherProfiles.find(p => p.id === this.activeProfileId)?.email || "";
-        const useCustom = (document.getElementById("launcher-profile-custom-server") as HTMLInputElement)?.checked;
-        const loginIp = useCustom ? (document.getElementById("launcher-profile-login-ip") as HTMLInputElement)?.value.trim() || null : null;
-        const loginPort = useCustom ? (parseInt((document.getElementById("launcher-profile-login-port") as HTMLInputElement)?.value) || null) : null;
-        const chatIp = useCustom ? (document.getElementById("launcher-profile-chat-ip") as HTMLInputElement)?.value.trim() || null : null;
-        const chatPort = useCustom ? (parseInt((document.getElementById("launcher-profile-chat-port") as HTMLInputElement)?.value) || null) : null;
+        // Servers live in the Server list now; an edited profile keeps what it stored.
+        const prev = this.profileEditorMode === "edit" ? this.launcherProfiles.find(p => p.id === this.activeProfileId) : null;
+        const useCustom = prev?.is_official === false;
+        const loginIp = prev?.login_ip || null;
+        const loginPort = prev?.login_port || null;
+        const chatIp = prev?.chat_ip || null;
+        const chatPort = prev?.chat_port || null;
 
         if (!name) { this.setLauncherStatus(this.t("launcher_profile_name_required"), "error"); return; }
 
@@ -3802,7 +3986,7 @@ class App {
         try {
             const newId = await invoke("launcher_save_profile", {
                 id, name, email, clientDir, autoLogin,
-                profileType: useCustom ? "hyddwn" : "nexon",
+                profileType: prev?.profile_type || "nexon",
                 loginIp, loginPort, chatIp, chatPort,
                 isOfficial: !useCustom,
             }) as string;
@@ -3917,103 +4101,33 @@ class App {
         }
     }
 
-    private async saveCurrentSettingsToProfile() {
-        const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
-        if (this.activeProfileId && this.launcherSession) {
-            try {
-                const profile = this.launcherProfiles.find(p => p.id === this.activeProfileId);
-                await invoke("launcher_save_profile", {
-                    id: this.activeProfileId,
-                    name: profile?.name || "Profile",
-                    email: profile?.email || "",
-                    clientDir,
-                    autoLogin: profile?.auto_login || false,
-                });
-                if (this.launcherSession.session_token) {
-                    await invoke("launcher_update_profile_session", {
-                        id: this.activeProfileId,
-                        sessionToken: this.launcherSession.session_token,
-                        expiresIn: 86400,
-                    });
-                }
-                await this.loadProfiles();
-                this.setLauncherStatus(this.t("launcher_saved_to_profile"), "ok");
-                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_saved_session")}`, "info");
-            } catch (e: any) {
-                this.setLauncherStatus(this.t("features_save_failed", [String(e)]), "error");
-                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_save_to_profile_failed", [String(e)])}`, "error");
-            }
-        } else {
-            // No active profile — open editor to create one
-            this.openProfileEditor("new");
-        }
-    }
-
     private async launcherDoLogin() {
-        const emailEl = document.getElementById("launcher-email") as HTMLInputElement;
-        const pwEl = document.getElementById("launcher-password") as HTMLInputElement;
-        const rememberEl = document.getElementById("launcher-remember") as HTMLInputElement;
-        const email = emailEl.value.trim();
-        const password = pwEl.value;
-        if (!email || !password) { this.setLauncherStatus(this.t("launcher_email_pw_required"), "error"); return; }
-
+        // Nexon's own login page in a window (as Rua and the NXL launcher do): the direct
+        // API login now always demands a CAPTCHA token (code 20048), so it is not offered.
         const btn = document.getElementById("btn-launcher-login") as HTMLButtonElement;
         btn.disabled = true;
         this.setLauncherStatus(this.t("launcher_logging_in"), "busy");
 
         try {
-            let result: any;
-            if ((this.config as any).launcher_legacy_auth) {
-                // Email/password. 206 → emailed/authenticator code via launcher_login_otp.
-                const vcodeEl = document.getElementById("launcher-verification") as HTMLInputElement;
-                const code = vcodeEl ? vcodeEl.value.trim() : "";
-                if (this.pendingMfaKey && code) {
-                    result = await invoke("launcher_login_otp", {
-                        mfaKey: this.pendingMfaKey, otp: code, profileId: this.activeProfileId || null, email,
-                    }) as any;
-                    this.pendingMfaKey = null;
-                    if (vcodeEl) vcodeEl.value = "";
-                } else {
-                    if (!email || !password) { this.setLauncherStatus(this.t("launcher_email_pw_required"), "error"); btn.disabled = false; return; }
-                    result = await invoke("launcher_login", {
-                        username: email, password, remember: rememberEl.checked, profileId: this.activeProfileId || null,
-                    }) as any;
-                }
-                if (result.mfa_required) {
-                    this.pendingMfaKey = result.mfa_key;
-                    const group = document.getElementById("launcher-verification-group");
-                    if (group) group.style.display = "block";
-                    vcodeEl?.focus();
-                    this.setLauncherStatus(this.t("launcher_enter_mfa_code", [String(result.mfa_type || "email")]), "busy");
-                    this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_mfa_requested")}`, "info");
-                    return;
-                }
-                if (result.captcha_required) {
-                    this.setLauncherStatus(this.t("launcher_captcha_required"), "error");
-                    this.log(`[Launcher] ${result.message}`, "warn");
-                    return;
-                }
-            } else {
-                // Browser / SSO login: NxLSession or TpaSession → exchange.
-                this.setLauncherStatus(this.t("launcher_login_popup"), "busy");
-                result = await invoke("nexon_login_webview", { profileId: this.activeProfileId || null }) as any;
-            }
+            this.setLauncherStatus(this.t("launcher_login_popup"), "busy");
+            const result = await invoke("nexon_login_webview", {
+                profileId: this.activeProfileId || null,
+                title: this.t("login_window_title"),
+                verifyTitle: this.t("login_window_verify"),
+            }) as any;
             this.launcherSession = result.session;
-            if (rememberEl.checked) {
-                // Save session to active profile (the backend store; never localStorage)
-                if (this.activeProfileId && result.session.session_token) {
-                    await invoke("launcher_save_profile_session", {
-                        id: this.activeProfileId,
-                        session: result.session,
-                        expiresIn: result.expiresIn || 86400,
-                    }).catch(() => {});
-                    await this.loadProfiles();
-                }
+            // Always keep the session on the selected profile (backend store; never localStorage).
+            if (this.activeProfileId && result.session.session_token) {
+                await invoke("launcher_save_profile_session", {
+                    id: this.activeProfileId,
+                    session: result.session,
+                    expiresIn: result.expiresIn || 86400,
+                }).catch(() => {});
+                await this.loadProfiles();
             }
-            pwEl.value = "";
             this.updateLauncherUI(true);
             this.setLauncherStatus(this.t("launcher_status_ok"), "ok");
-            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_logged_in_as", [email])}`, "info");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_logged_in_as", [this.activeProfileName() || "?"])}`, "info");
             this.fetchLauncherVersion();
         } catch (e: any) {
             this.setLauncherStatus(this.t("launcher_login_failed", [String(e)]), "error");
@@ -4153,12 +4267,7 @@ class App {
         if (!again) return;
         this.launcherDoLogout();
         document.querySelector('.nav-item[data-tab="launcher"]')?.dispatchEvent(new Event('click'));
-        if ((this.config as any).launcher_legacy_auth) {
-            (document.getElementById("launcher-password") as HTMLInputElement | null)?.focus();
-            this.setLauncherStatus(this.t("launcher_relogin_enter_pw"), "idle");
-        } else {
-            await this.launcherDoLogin();
-        }
+        await this.launcherDoLogin();
     }
 
     private async launcherDoLaunch() {
@@ -4178,6 +4287,18 @@ class App {
         }
         const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
         if (!clientDir) { this.setLauncherStatus(this.t("launcher_folder_required"), "error"); return; }
+
+        // Client.exe runs as administrator; from a non-elevated mabi-patcher the ticket
+        // hand-off never reaches it and the game stops at "Failed to Init NXALauncher".
+        if (!isCustomServer && !(await invoke("is_ran_as_admin") as boolean)) {
+            const restart = await ask(this.t("launcher_admin_launch_prompt"), { title: this.t("launcher_admin_launch_title"), kind: "warning" });
+            if (restart) {
+                this.config.patcher_run_elevated = true;
+                await this.saveConfig();
+                await invoke("request_elevation");
+            }
+            return;
+        }
 
         const btn = document.getElementById("btn-launcher-launch") as HTMLButtonElement;
         btn.disabled = true;
@@ -4281,20 +4402,10 @@ class App {
     }
 
     private updateLauncherUI(loggedIn: boolean) {
-        const group = document.getElementById("launcher-verification-group");
-        if (group) { group.style.display = (this.config as any).launcher_legacy_auth ? "block" : "none"; }
-        
-        // Only touch login/session cards if we're in official-server mode
-        const isCustom = !this.activeProfileIsOfficial;
-        if (!isCustom) {
-            document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
-            document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
-        }
-        if (loggedIn && this.launcherSession) {
-            const token = this.launcherSession.session_token;
-            const preview = token ? token.substring(0, 12) + "…" : "—";
-            (document.getElementById("launcher-session-preview") as HTMLElement).textContent = preview;
-        }
+        // A private server needs no Nexon sign-in: applyServerToUI owns the status line then.
+        if (!this.activeProfileIsOfficial) return;
+        document.getElementById("launcher-login-card")?.classList.toggle("hidden", loggedIn);
+        document.getElementById("launcher-session-card")?.classList.toggle("hidden", !loggedIn);
         const dot = document.getElementById("launcher-status-dot");
         if (dot) dot.style.background = loggedIn ? "var(--green, #4ade80)" : "var(--yellow, #facc15)";
         const statusText = document.getElementById("launcher-status-text");
@@ -5594,6 +5705,21 @@ class App {
         return null;
     }
 
+    private async fileBytes(name: string, src: PreviewSource): Promise<Uint8Array | null> {
+        const want = name.toLowerCase();
+        if (src.entry) {
+            const hits = this.loadedEntries.filter(e => e.name.toLowerCase() === want || e.name.toLowerCase().endsWith(`/${want}`) || e.name.toLowerCase().endsWith(`\\${want}`));
+            if (!hits?.length) return null;
+            const hit = hits.find(e => e.source_archive === src.entry!.source_archive) ?? hits[hits.length - 1];
+            return this.entryBytes(hit);
+        }
+        if (src.loosePath) {
+            const path = await invoke<string | null>("find_loose_texture", { modelPath: src.loosePath, texture: name });
+            return path ? new Uint8Array(await invoke<ArrayBuffer>("read_loose_bytes", { path })) : null;
+        }
+        return null;
+    }
+
     /** Lower-case `.dds` file name → entries, rebuilt when the loaded entry list changes. */
     private textureIndexFor(): Map<string, AggregateEntry[]> {
         if (this.textureIndex && this.textureIndexSource === this.loadedEntries) return this.textureIndex;
@@ -5638,6 +5764,7 @@ class App {
                     accent: hex("--accent-cyan", 0x00d2ff),
                     background: hex("--bg-surface", 0x0d0d1a),
                     textureBytes: n => this.textureBytes(n, src),
+                    fileBytes: n => this.fileBytes(n, src),
                     textureScope: src.entry?.source_archive ?? src.loosePath ?? "",
                     assets: src.entry ? this.assetHost() : undefined,
                     entry: src.entry,
@@ -5672,6 +5799,7 @@ class App {
             bytes: e => this.entryBytes(e as AggregateEntry),
             openEntry: e => { void this.previewAssetEntry(e as AggregateEntry); },
             textureBytes: (name, near) => this.textureBytes(name, near ? { entry: near as AggregateEntry } : {}),
+            fileBytes: (name, near) => this.fileBytes(name, near ? { entry: near as AggregateEntry } : {}),
             log: (msg, level) => this.log(msg, level),
             language: () => this.config.locale || "en",
         };
@@ -6486,6 +6614,114 @@ class App {
         const m = Math.floor(s / 60);
         const rem = s % 60;
         return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+    }
+
+    private setupDatabaseTab() {
+        const searchInput = document.getElementById("db-search-input") as HTMLInputElement;
+        const typeSelect = document.getElementById("db-search-type") as HTMLSelectElement;
+        const resultsDiv = document.getElementById("db-search-results");
+        if (!searchInput || !typeSelect || !resultsDiv) return;
+
+        let dbCache: any = null;
+
+        const performSearch = async () => {
+            const query = searchInput.value.toLowerCase().trim();
+            const type = typeSelect.value;
+            if (!query) {
+                resultsDiv.innerHTML = "";
+                return;
+            }
+
+            if (!dbCache) {
+                resultsDiv.innerHTML = "Loading databases...";
+                try {
+                    const itemsRes = await fetch("/mabipatcher/mabi-files/db/items.json");
+                    const items = itemsRes.ok ? await itemsRes.json() : [];
+                    const raceRes = await fetch("/mabipatcher/mabi-files/db/race.json");
+                    const races = raceRes.ok ? await raceRes.json() : [];
+                    dbCache = { items, races };
+                } catch (e) {
+                    resultsDiv.innerHTML = "Error loading databases: " + String(e);
+                    return;
+                }
+            }
+
+            resultsDiv.innerHTML = "Searching...";
+            let hits: any[] = [];
+            
+            for (const item of dbCache.items) {
+                if (hits.length > 50) break;
+                let match = false;
+                if (type === "id" && String(item.ID) === query) match = true;
+                else if (type === "name" && item.Text_Name1 && item.Text_Name1.toLowerCase().includes(query)) match = true;
+                else if (type === "feature" && item.Feature && item.Feature.toLowerCase().includes(query)) match = true;
+                else if (type === "internal" && item.XMLName && item.XMLName.toLowerCase().includes(query)) match = true;
+                else if (type === "description" && item.Text_Desc1 && item.Text_Desc1.toLowerCase().includes(query)) match = true;
+                
+                if (match) hits.push({ ...item, _source: "Item" });
+            }
+
+            for (const race of dbCache.races) {
+                if (hits.length > 50) break;
+                let match = false;
+                if (type === "id" && String(race.ID) === query) match = true;
+                else if (type === "name" && race.name && race.name.toLowerCase().includes(query)) match = true;
+                
+                if (match) hits.push({ ...race, _source: "Race" });
+            }
+
+            if (hits.length === 0) {
+                resultsDiv.innerHTML = "No results found.";
+                return;
+            }
+
+            let html = "<ul style='list-style:none;padding:0;'>";
+            for (const h of hits) {
+                html += "<li style='padding:8px;border-bottom:1px solid #333;'><strong>[" + h._source + "] ID: " + h.ID + "</strong> - " + (h.Text_Name1 || h.name || h.XMLName || "Unknown") + "<div style='font-size:0.8em;color:#aaa;'>" + (h.Text_Desc1 || "") + "</div></li>";
+            }
+            html += "</ul>";
+            resultsDiv.innerHTML = html;
+        };
+
+        searchInput.addEventListener("input", () => {
+            clearTimeout((searchInput as any)._timeout);
+            (searchInput as any)._timeout = setTimeout(performSearch, 300);
+        });
+        typeSelect.addEventListener("change", performSearch);
+    }
+
+    private applyUrlParams() {
+        const params = new URLSearchParams(window.location.search);
+        const path = window.location.pathname;
+        if (path.includes("/database")) {
+            document.getElementById("tab-database")?.click();
+        }
+        
+        const itemId = params.get("itemid");
+        const race = params.get("race");
+        const classId = params.get("classid");
+        const vfsPath = params.get("path");
+        
+        if (itemId || race || classId) {
+            document.getElementById("tab-database")?.click();
+            const searchInput = document.getElementById("db-search-input") as HTMLInputElement;
+            const typeSelect = document.getElementById("db-search-type") as HTMLSelectElement;
+            if (searchInput && typeSelect) {
+                if (itemId) { searchInput.value = itemId; typeSelect.value = "id"; }
+                else if (race) { searchInput.value = race; typeSelect.value = "name"; }
+                else if (classId) { searchInput.value = classId; typeSelect.value = "feature"; }
+                searchInput.dispatchEvent(new Event("input"));
+            }
+        }
+        
+        if (vfsPath) {
+            document.getElementById("tab-list")?.click();
+            const fileFilter = document.getElementById("file-search-filter") as HTMLInputElement;
+            if (fileFilter) {
+                fileFilter.value = vfsPath;
+                fileFilter.dispatchEvent(new Event("input"));
+            }
+        }
     }
 
     private setupEventListen() {
