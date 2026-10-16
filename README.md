@@ -215,6 +215,18 @@ mabi-patcher pack -i ./source -o ./data_00001.it -k '<header-salt>'
 
 See the [CLI reference](docs/CLI.md#pack) for all commands and flags.
 
+### Windows ZIP packing helper
+
+Extract the release ZIP, create a `data` folder beside `mabi-patcher.exe`,
+and put the files to pack inside it. Run `pack-data.bat` and enter an archive
+name such as `mymod`.
+
+The helper looks for the newest `data_#####.it` template in the standard
+Nexon package folder. If none is found, enter your package folder or an
+original `.it` file, or leave the prompt blank to use the helper's manual
+header and entries salts with payload encryption. Existing output files
+are not overwritten. Packing errors appear in the console or `log.txt`.
+
 ### Log in, patch and launch
 
 ```sh
