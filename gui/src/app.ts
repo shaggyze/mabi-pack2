@@ -567,6 +567,7 @@ class App {
         const ids = [
             "tab_dashboard", "tab_extract", "tab_pack", "tab_list", "tab_differ", "tab_settings",
             "label_archive", "label_target", "label_salt", "label_filters", "label_source", "label_output", "label_pack_salt",
+            "label_pack_template", "label_pack_template_help", "label_pack_entries_salt", "label_pack_encrypt_files",
             "label_original", "label_modified", "label_out_patch", "label_differ_salt", "set_visuals", "label_lang", "label_theme",
             "label_region_key", "label_region_key_read", "label_region_key_write", "set_startup", "label_startup_extract", "label_startup_switch",
             "set_shell", "label_assoc_it", "label_assoc_pack", "label_settings_assoc_it_full",
@@ -4641,6 +4642,20 @@ class App {
             const path = await save({ filters: [{ name: this.t("dlg_filter_mabi_archive"), extensions: ["it"] }] });
             if (path) (document.getElementById("pack-output") as HTMLInputElement).value = path;
         });
+        const updatePackTemplate = () => {
+            const useTemplate = !!(document.getElementById("pack-template") as HTMLInputElement).value.trim();
+            for (const id of ["pack-key", "pack-entries-key", "pack-encrypt-files", "pack-formats", "pack-iv"]) {
+                (document.getElementById(id) as HTMLInputElement).disabled = useTemplate;
+            }
+        };
+        document.getElementById("pack-template")?.addEventListener("input", updatePackTemplate);
+        document.getElementById("btn-browse-pack-template")?.addEventListener("click", async () => {
+            const path = await open({ filters: [{ name: "Original Mabinogi Archive", extensions: ["it"] }] });
+            if (path && !Array.isArray(path)) {
+                (document.getElementById("pack-template") as HTMLInputElement).value = path;
+                updatePackTemplate();
+            }
+        });
         document.getElementById("btn-browse-list")?.addEventListener("click", async () => {
             const isFullSeq = (document.getElementById("list-full-sequence") as HTMLInputElement).checked;
             const path = isFullSeq
@@ -4999,13 +5014,24 @@ class App {
         const input = (document.getElementById("pack-input") as HTMLInputElement).value;
         const output = (document.getElementById("pack-output") as HTMLInputElement).value;
         const key = (document.getElementById("pack-key") as HTMLInputElement).value;
+        const template = (document.getElementById("pack-template") as HTMLInputElement).value.trim();
+        const entriesKey = (document.getElementById("pack-entries-key") as HTMLInputElement).value;
+        const encryptFiles = (document.getElementById("pack-encrypt-files") as HTMLInputElement).checked;
         const formatsStr = (document.getElementById("pack-formats") as HTMLInputElement).value;
         const formats = formatsStr.split(',').map(f => f.trim()).filter(f => f.length > 0);
         const ivVal = parseInt((document.getElementById("pack-iv") as HTMLInputElement).value) || 0;
 
-        if (!input || !output || !key) {
+        if (!input || !output || (!key && !template)) {
             await message(this.t("msg_pack_missing_fields"), { title: this.t("dlg_missing_fields"), kind: "error" });
             return;
+        }
+
+        let confirmNativeName = false;
+        if (/(?:^|[\\/])data_\d{5}\.it$/.test(output)) {
+            confirmNativeName = await ask(this.t("pack_native_warning"), {
+                title: this.t("pack_validation_title"), kind: "warning"
+            });
+            if (!confirmNativeName) return;
         }
 
         this._taskStartTime = Date.now();
@@ -5029,7 +5055,10 @@ class App {
                 key,
                 formats,
                 iv: ivVal,
-                pathPrefix
+                pathPrefix,
+                options: template
+                    ? { template_archive: template, confirm_native_name: confirmNativeName }
+                    : { entries_key: entriesKey || null, encrypt_files: encryptFiles, confirm_native_name: confirmNativeName }
             });
             this.log(this.t("pack_success", [output]), "success");
             this.addActivity(this.t("pack_success", [output]));
@@ -5037,6 +5066,9 @@ class App {
             this._taskStartTime = null;
             this.updateProgress(0, "");
             this.log(this.t("msg_error_fmt", [String(e)]), "error");
+            await message(`${e}\n\n${this.t("pack_resubmit")}`, {
+                title: this.t("pack_validation_title"), kind: "error"
+            });
         }
     }
 

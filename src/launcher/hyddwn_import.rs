@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn pairs_profiles_with_credentials_by_guid() {
         let clients: Vec<ClientProfile> = serde_json::from_str(
-            r#"[{"Name":"Main","Location":"C:\\Nexon\\Client.exe","Guid":"a"},
+            r#"[{"Name":"Main","Location":"C:\\Game\\Client.exe","Guid":"a"},
                 {"Name":"NoCreds","Location":"","Guid":"b"}]"#,
         )
         .unwrap();
@@ -116,6 +116,6 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].profile_name, "Main");
         assert_eq!(out[0].account.username, "me@x.com");
-        assert_eq!(out[0].account.client_path, r"C:\Nexon\Client.exe");
+        assert_eq!(out[0].account.client_path, r"C:\Game\Client.exe");
     }
 }

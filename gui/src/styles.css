@@ -479,6 +479,23 @@ body {
 
 .tab-content.active { display: flex; flex-direction: column; }
 
+#pack {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pack-fields {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#pack-run {
+  flex-shrink: 0;
+  min-height: 40px;
+  margin-top: 12px;
+}
+
 .form-group { margin-bottom: 20px; }
 label { display: block; color: var(--accent-cyan); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
 

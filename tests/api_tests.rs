@@ -3,7 +3,7 @@
 //! Fast (no real archives, no network):
 //!   cargo test --test api_tests
 //!
-//! Slow (need .it/.pack files under .gemini/testing):
+//! Slow (need .it/.pack files under the `MABI_TEST_CORPUS` folder):
 //!   cargo test --test api_tests -- --ignored
 //!
 //! Each test binds its own port to avoid collisions between tests running
@@ -16,8 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const UOTIARA: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing\uotiara_00001.it";
 const KNOWN_SALT: &str = "})wWb4?-sVGHNoPKpc";
 
 /// Start the API server on loopback at `port` and wait until it accepts
@@ -302,15 +300,20 @@ fn test_webui_static_serving() {
 #[test]
 #[ignore]
 fn test_list_endpoint_against_real_archive() {
-    if !std::path::Path::new(UOTIARA).exists() {
-        eprintln!("skipping: {} not present", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!("skipping: {} not present", archive);
         return;
     }
     let stop = start_server(17409);
     let client = reqwest::blocking::Client::new();
     let resp: serde_json::Value = client
         .post("http://127.0.0.1:17409/api/v1/list")
-        .json(&serde_json::json!({ "archive": UOTIARA, "key": KNOWN_SALT }))
+        .json(&serde_json::json!({ "archive": archive, "key": KNOWN_SALT }))
         .send()
         .expect("request failed")
         .json()
@@ -323,8 +326,13 @@ fn test_list_endpoint_against_real_archive() {
 #[test]
 #[ignore]
 fn test_extract_and_pack_roundtrip_via_api() {
-    if !std::path::Path::new(UOTIARA).exists() {
-        eprintln!("skipping: {} not present", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!("skipping: {} not present", archive);
         return;
     }
     let stop = start_server(17410);
@@ -344,7 +352,7 @@ fn test_extract_and_pack_roundtrip_via_api() {
     let extract_resp: serde_json::Value = client
         .post("http://127.0.0.1:17410/api/v1/extract")
         .json(&serde_json::json!({
-            "archive": UOTIARA,
+            "archive": archive,
             "output": extract_dir.to_string_lossy(),
             "key": KNOWN_SALT,
             "filters": ["features.xml.compiled"],
@@ -383,8 +391,13 @@ fn test_extract_and_pack_roundtrip_via_api() {
 #[test]
 #[ignore]
 fn test_preview_features_compiled_decompiles_to_text() {
-    if !std::path::Path::new(UOTIARA).exists() {
-        eprintln!("skipping: {} not present", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!("skipping: {} not present", archive);
         return;
     }
     let stop = start_server(17413);
@@ -395,7 +408,7 @@ fn test_preview_features_compiled_decompiles_to_text() {
     // via list rather than assuming it's stored bare at the archive root.
     let list_resp: serde_json::Value = client
         .post("http://127.0.0.1:17413/api/v1/list")
-        .json(&serde_json::json!({ "archive": UOTIARA, "key": KNOWN_SALT }))
+        .json(&serde_json::json!({ "archive": archive, "key": KNOWN_SALT }))
         .send()
         .expect("request failed")
         .json()
@@ -405,7 +418,7 @@ fn test_preview_features_compiled_decompiles_to_text() {
         .filter_map(|e| e["name"].as_str())
         .find(|n| n.to_lowercase().ends_with("features.xml.compiled"));
     let Some(entry_name) = entry_name else {
-        eprintln!("skipping: no features.xml.compiled entry found in {}", UOTIARA);
+        eprintln!("skipping: no features.xml.compiled entry found in {}", archive);
         stop_server(stop);
         return;
     };
@@ -413,7 +426,7 @@ fn test_preview_features_compiled_decompiles_to_text() {
     let resp: serde_json::Value = client
         .post("http://127.0.0.1:17413/api/v1/preview")
         .json(&serde_json::json!({
-            "archive": UOTIARA,
+            "archive": archive,
             "entry_name": entry_name,
             "key": KNOWN_SALT,
         }))
@@ -431,8 +444,13 @@ fn test_preview_features_compiled_decompiles_to_text() {
 #[test]
 #[ignore]
 fn test_preview_pmg_entry_if_present() {
-    if !std::path::Path::new(UOTIARA).exists() {
-        eprintln!("skipping: {} not present", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!("skipping: {} not present", archive);
         return;
     }
     let stop = start_server(17414);
@@ -440,7 +458,7 @@ fn test_preview_pmg_entry_if_present() {
 
     let list_resp: serde_json::Value = client
         .post("http://127.0.0.1:17414/api/v1/list")
-        .json(&serde_json::json!({ "archive": UOTIARA, "key": KNOWN_SALT }))
+        .json(&serde_json::json!({ "archive": archive, "key": KNOWN_SALT }))
         .send()
         .expect("request failed")
         .json()
@@ -451,14 +469,14 @@ fn test_preview_pmg_entry_if_present() {
         .find(|n| n.to_lowercase().ends_with(".pmg"));
 
     let Some(entry_name) = pmg_entry else {
-        eprintln!("skipping: no .pmg entry found in {}", UOTIARA);
+        eprintln!("skipping: no .pmg entry found in {}", archive);
         stop_server(stop);
         return;
     };
 
     let resp: serde_json::Value = client
         .post("http://127.0.0.1:17414/api/v1/preview")
-        .json(&serde_json::json!({ "archive": UOTIARA, "entry_name": entry_name, "key": KNOWN_SALT }))
+        .json(&serde_json::json!({ "archive": archive, "entry_name": entry_name, "key": KNOWN_SALT }))
         .send()
         .expect("request failed")
         .json()

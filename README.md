@@ -165,12 +165,62 @@ mabi-patcher convert -i old.pack -o new.it
 mabi-patcher mod template > mymod.mod
 ```
 
+### Packing `.it` archives
+
+`pack` creates a modern `.it` archive unless the output ends in `.pack`.
+For `.it`, these are all packing arguments:
+
+| Argument | Meaning |
+|---|---|
+| `-i`, `--input FOLDER` | Required source folder. |
+| `-o`, `--output PATH` | Required output archive path. |
+| `-k`, `--key SALT` | Header salt; also used for the entries table unless `--entries-key` is set. Required unless `--template` is used. |
+| `--entries-key SALT` | Optional separate salt for the entries table. Conflicts with `--template`. |
+| `--template ORIGINAL.IT` | Read metadata, salts, cipher, IV, version, path style and per-file settings from an existing archive. Cannot be combined with `--entries-key` or `--encrypt-files`. |
+| `--encrypt-files` | Encrypt payloads as well as metadata. Off by default; conflicts with `--template`. |
+| `--confirm-native-name` | Confirm output named `data_#####.it`; these names can conflict with game updates or load order. |
+| `--iv 0\|1` | Initial vector; default `0`. Template settings override it. |
+| `-f`, `--compress-format EXTENSION` | Add a compressed filename suffix. Repeatable. Default compressed suffixes: `.txt`, `.xml`, `.dds`, `.pmg`, `.set`, `.raw`. Matching ignores case. |
+| `--wrap-data` | Prefix source entries with `data\`. Use when source folder is not already rooted under `data`. |
+
+The `.it` output basename must start with a lowercase ASCII letter, contain
+only ASCII letters, digits, `_` or `-`, use a lowercase `.it` extension, and
+sort after `data` (case-insensitive). All packed entries must be under `data`
+and at least one file must be present there. Entry paths also must be safe
+relative paths accepted by the game, and must not exceed 260 characters.
+
+```sh
+# Valid: source contains data/ and uses one salt for both metadata tables
+mabi-patcher pack -i ./source -o ./mymod.it -k '<header-salt>'
+
+# Valid: separate metadata salts, encrypted payloads, extra compressed suffix
+mabi-patcher pack -i ./source -o ./mymod.it -k '<header-salt>' \
+  --entries-key '<entries-salt>' --encrypt-files -f .lua
+
+# Valid: clone packing settings from a read-only original archive
+mabi-patcher pack -i ./source -o ./mymod.it --template ./original.it
+
+# Valid: add data/ to entries from a source without that folder
+mabi-patcher pack -i ./loose-files -o ./mymod.it -k '<header-salt>' --wrap-data
+
+# Invalid: neither a salt nor a template was given
+mabi-patcher pack -i ./source -o ./mymod.it
+
+# Invalid: template conflicts with manual payload encryption
+mabi-patcher pack -i ./source -o ./mymod.it --template ./original.it --encrypt-files
+
+# Invalid: native archive name needs explicit confirmation
+mabi-patcher pack -i ./source -o ./data_00001.it -k '<header-salt>'
+```
+
+See the [CLI reference](docs/CLI.md#pack) for all commands and flags.
+
 ### Log in, patch and launch
 
 ```sh
 # Log in once. The password is read from MABI_PASSWORD so it stays out of your shell history.
 export MABI_PASSWORD='<your password>'
-mabi-patcher login -u you@example.com --profile Main -c "C:\Nexon\Library\mabinogi"
+mabi-patcher login -u you@example.com --profile Main -c "PATH_TO_GAME_FOLDER"
 
 # If Nexon asks for a two-factor code, login prints the command to finish:
 mabi-patcher login-otp -u you@example.com --mfa-key <KEY> --otp <CODE>
@@ -188,8 +238,8 @@ mabi-patcher import-cookies --profile Main
 ```sh
 mabi-patcher update --scan-only                 # list what needs updating
 mabi-patcher update --only '<path from the scan>'  # patch only these paths (or --select list.txt)
-mabi-patcher check-update --all-folders         # every Mabinogi install found on this PC
-mabi-patcher update --folder 'D:\Mabinogi' --folder 'E:\Mabinogi'
+mabi-patcher check-update --all-folders         # every Mabinogi install found on this system
+mabi-patcher update --folder "PATH_TO_GAME_FOLDER" --folder "PATH_TO_SECOND_GAME_FOLDER"
 mabi-patcher news
 ```
 

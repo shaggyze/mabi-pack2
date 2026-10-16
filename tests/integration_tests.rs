@@ -3,7 +3,7 @@
 //! Fast (no real archives):
 //!   cargo test --test integration_tests
 //!
-//! Slow (need .it/.pack files under .gemini/testing):
+//! Slow (need .it/.pack files under the `MABI_TEST_CORPUS` folder):
 //!   cargo test --test integration_tests -- --ignored
 //!
 //! All tests that open real archives are marked `#[ignore]` so the default
@@ -17,15 +17,6 @@ use std::path::Path;
 // Test corpus paths
 // --------------------------------------------------------------------------
 
-const UOTIARA: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing\uotiara_00001.it";
-const DATA_00003: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing\data_00003.it";
-const TEST_PACK: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing\test.pack";
-#[allow(dead_code)]
-const REPACK_TEST: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing\repack_test_2.it";
 const KNOWN_SALT: &str = "})wWb4?-sVGHNoPKpc";
 
 // --------------------------------------------------------------------------
@@ -168,14 +159,19 @@ fn test_get_preview_ext() {
 #[test]
 #[ignore]
 fn test_list_uotiara() {
-    if !Path::new(UOTIARA).exists() {
-        eprintln!("Skipping: archive not found at {}", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("Skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !Path::new(&archive).exists() {
+        eprintln!("Skipping: archive not found at {}", archive);
         return;
     }
 
     let salts = mabi_pack2::load_salts();
     let result = mabi_pack2::common_ext::run_list_with_key_search_data(
-        UOTIARA,
+        &archive,
         Some(KNOWN_SALT.to_string()),
         &salts,
         None,
@@ -205,14 +201,19 @@ fn test_list_uotiara() {
 #[test]
 #[ignore]
 fn test_list_data_00003() {
-    if !Path::new(DATA_00003).exists() {
-        eprintln!("Skipping: archive not found at {}", DATA_00003);
+    let Some(archive) = common::test_corpus_file("data_00003.it") else {
+        eprintln!("Skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !Path::new(&archive).exists() {
+        eprintln!("Skipping: archive not found at {}", archive);
         return;
     }
 
     let salts = mabi_pack2::load_salts();
     let result = mabi_pack2::common_ext::run_list_with_key_search_data(
-        DATA_00003,
+        &archive,
         None,
         &salts,
         None,
@@ -233,13 +234,18 @@ fn test_list_data_00003() {
 #[test]
 #[ignore]
 fn test_list_test_pack() {
-    if !Path::new(TEST_PACK).exists() {
-        eprintln!("Skipping: archive not found at {}", TEST_PACK);
+    let Some(archive) = common::test_corpus_file("test.pack") else {
+        eprintln!("Skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !Path::new(&archive).exists() {
+        eprintln!("Skipping: archive not found at {}", archive);
         return;
     }
 
     let result = mabi_pack2::common_ext::run_list_with_key_search_data(
-        TEST_PACK,
+        &archive,
         None,
         &[], // no salts needed for unencrypted .pack
         None,
@@ -350,15 +356,20 @@ fn test_pack_roundtrip_pack_v1() {
 #[test]
 #[ignore]
 fn test_extract_single_entry() {
-    if !Path::new(UOTIARA).exists() {
-        eprintln!("Skipping: archive not found at {}", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("Skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !Path::new(&archive).exists() {
+        eprintln!("Skipping: archive not found at {}", archive);
         return;
     }
 
     // Step 1: find a real XML entry name.
     let salts = mabi_pack2::load_salts();
     let list_result = mabi_pack2::common_ext::run_list_with_key_search_data(
-        UOTIARA,
+        &archive,
         Some(KNOWN_SALT.to_string()),
         &salts,
         None,
@@ -374,7 +385,7 @@ fn test_extract_single_entry() {
 
     // Step 2: extract it.
     let result = mabi_pack2::common_ext::get_entry_data(
-        UOTIARA,
+        &archive,
         &entry_name,
         Some(KNOWN_SALT.to_string()),
     );
@@ -468,8 +479,13 @@ fn test_double_decrypt_flag_guard() {
 #[test]
 #[ignore]
 fn test_concurrent_convert_no_stomp() {
-    if !Path::new(UOTIARA).exists() {
-        eprintln!("Skipping: archive not found at {}", UOTIARA);
+    let Some(archive) = common::test_corpus_file("uotiara_00001.it") else {
+        eprintln!("Skipping: set MABI_TEST_CORPUS to a folder containing test archives");
+        return;
+    };
+    let archive = archive.to_string_lossy().into_owned();
+    if !Path::new(&archive).exists() {
+        eprintln!("Skipping: archive not found at {}", archive);
         return;
     }
 
@@ -479,12 +495,12 @@ fn test_concurrent_convert_no_stomp() {
     let _ = std::fs::remove_file(&out2);
 
     let (uotiara1, out1_str, salt1) = (
-        UOTIARA.to_string(),
+        archive.clone(),
         out1.to_str().unwrap().to_string(),
         KNOWN_SALT.to_string(),
     );
     let (uotiara2, out2_str, salt2) = (
-        UOTIARA.to_string(),
+        archive,
         out2.to_str().unwrap().to_string(),
         KNOWN_SALT.to_string(),
     );

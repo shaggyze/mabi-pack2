@@ -13,5 +13,6 @@ pub fn cleanup(path: &std::path::Path) {
     let _ = std::fs::remove_dir_all(path);
 }
 
-pub const TEST_CORPUS: &str =
-    r"C:\Users\Shaggy\Documents\GitHub\mabi-pack2\.gemini\testing";
+pub fn test_corpus_file(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("MABI_TEST_CORPUS").map(|root| std::path::PathBuf::from(root).join(name))
+}

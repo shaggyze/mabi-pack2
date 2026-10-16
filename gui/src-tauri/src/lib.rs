@@ -1664,9 +1664,19 @@ fn detect_data_prefix(path: String) -> Option<String> {
 
 #[tauri::command]
 
-async fn create_archive(app: tauri::AppHandle, input: String, output: String, key: String, formats: Vec<String>, iv: Option<u32>, path_prefix: Option<String>) -> Result<(), String> {
+async fn create_archive(app: tauri::AppHandle, input: String, output: String, key: String, formats: Vec<String>, iv: Option<u32>, path_prefix: Option<String>, options: Option<pack::PackOptions>) -> Result<(), String> {
 
     let config = get_config(app.clone());
+    let options = options.unwrap_or_default();
+    let (input, path_prefix) = if output.to_lowercase().ends_with(".pack") {
+        (input, path_prefix)
+    } else {
+        pack::resolve_gui_pack_source(&input, path_prefix)
+    };
+    if !output.to_lowercase().ends_with(".pack") {
+        pack::validate_pack_request(&input, &output, path_prefix.as_deref(), options.confirm_native_name)
+            .map_err(|e| { log::error!("[GUI] Packing validation failed: {}", e); e.to_string() })?;
+    }
 
     let prefix = path_prefix.as_deref();
 
@@ -1710,7 +1720,7 @@ async fn create_archive(app: tauri::AppHandle, input: String, output: String, ke
 
     } else {
 
-        pack::run_pack(&input, &output, &key, fmts, config.auto_convert_dds, actual_iv, prefix, Some(&cb)).map_err(|e: anyhow::Error| {
+        pack::run_pack_with_options(&input, &output, &key, fmts, config.auto_convert_dds, actual_iv, prefix, &options, Some(&cb)).map_err(|e: anyhow::Error| {
 
             log::error!("[GUI] .it creation failed: {}", e);
 
@@ -7519,8 +7529,5 @@ pub fn run() {
         });
 
 }
-
-
-
 
 
