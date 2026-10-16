@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Opt in with: git config core.hooksPath .githooks
+# Git never runs repository hooks until a clone opts in.
+exec "$(git rev-parse --show-toplevel)/scripts/precommit-check.sh"

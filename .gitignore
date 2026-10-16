@@ -19,7 +19,7 @@ out.txt
 output.csv
 /state/
 
-# Local agent, editor and hook files
+# Local agent and editor files
 CLAUDE.md
 GEMINI.md
 .claude/
@@ -30,20 +30,16 @@ GEMINI.md
 .windsurf/
 .idea/
 .vscode/
-.githooks/
 /.github/copilot-instructions.md
 /.private_backup_diff/
 skills-lock.json
 
-# Scratch and local tooling
+# Scratch
 *.bak*
 *_bak
 __pycache__/
 test_*.rs
 /examples/
-/scripts/
-/set-version.bat
-/gui/test_locales*.mjs
 
 # Mobile icons: the desktop build uses only the icons tauri.conf.json lists.
 /gui/src-tauri/icons/android/

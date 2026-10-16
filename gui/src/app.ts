@@ -100,6 +100,8 @@ interface Config {
     auto_convert_png: boolean;
     auto_convert_dds: boolean;
     fetch_remote_salts: boolean;
+    app_update_check: boolean;
+    app_auto_update: boolean;
     auto_convert_features: boolean;
     auto_convert_pmg: boolean;
     list_full_sequence: boolean;
@@ -254,6 +256,8 @@ class App {
         auto_convert_png: false,
         auto_convert_dds: false,
         fetch_remote_salts: true,
+        app_update_check: true,
+        app_auto_update: false,
         auto_convert_features: false,
         auto_convert_pmg: false,
         list_full_sequence: false,
@@ -491,6 +495,7 @@ class App {
             ["setupForms", () => this.setupForms()],
             ["setupNews", () => this.setupNews()],
             ["setupDatabaseTab", () => this.setupDatabaseTab()],
+            ["setupAppUpdate", () => this.setupAppUpdate()],
             ["applyUrlParams", () => this.applyUrlParams()],
         ];
         for (const [name, step] of steps) {
@@ -554,6 +559,7 @@ class App {
             this.runPatcher(this.config.patcher_game_path, false);
         }
         this.log(this.t("engineInit"), "success");
+        if (this.config.app_update_check) this.checkAppUpdate(true);
     }
 
     private t(key: string, args: string[] = []): string {
@@ -770,6 +776,8 @@ class App {
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
             { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
+            { id: "settings-app-update-check", prop: "app_update_check" },
+            { id: "settings-app-auto-update", prop: "app_auto_update" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -872,7 +880,8 @@ class App {
         const targets = [document.documentElement.style, document.body.style];
         const managed = ['--bg-deep', '--bg-sidebar', '--bg-input', '--bg-terminal', '--bg-surface',
             '--accent-cyan', '--accent-blue', '--accent-neon', '--text-primary', '--text-muted',
-            '--border-glass', '--grad-body', '--ui-font'];
+            '--border-glass', '--grad-body', '--ui-font', '--text-input', '--text-muted-input',
+            '--text-sidebar', '--text-muted-sidebar'];
         // Clear first so the theme's own values can be read as defaults below.
         for (const s of targets) for (const p of managed) s.removeProperty(p);
 
@@ -923,15 +932,23 @@ class App {
             const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
             return (hi + 0.05) / (lo + 0.05);
         };
-        const backgrounds = [vars['--bg-deep'] ?? this.getCssVar('--bg-deep'), vars['--bg-sidebar'] ?? this.getCssVar('--bg-sidebar')];
-        const readable = (prop: string, min: number, light: string, dark: string) => {
-            const color = vars[prop] ?? this.getCssVar(prop);
-            if (!color || backgrounds.every(bg => contrast(color, bg) >= min)) return;
-            const worst = (c: string) => Math.min(...backgrounds.map(bg => contrast(c, bg)));
-            vars[prop] = worst(light) >= worst(dark) ? light : dark;
+        // Text below WCAG contrast 4.5 (body) or 3.0 (muted labels) against its
+        // background switches to white or near-black. The page (--bg-deep), the
+        // sidebar (--bg-sidebar) and inputs/lists (--bg-input) can differ, so each
+        // gets its own text pair; CSS points the sidebar and inputs at theirs.
+        const readable = (prop: string, from: string, bgProp: string, min: number, light: string, dark: string) => {
+            const bg = vars[bgProp] ?? this.getCssVar(bgProp);
+            const color = vars[from] ?? this.getCssVar(from);
+            if (!bg || !color || contrast(color, bg) >= min) return;
+            vars[prop] = contrast(light, bg) >= contrast(dark, bg) ? light : dark;
         };
-        readable('--text-primary', 4.5, '#ffffff', '#111111');
-        readable('--text-muted', 3.0, '#e8e8e8', '#333333');
+        // Page text first: the sidebar and input pairs start from its result.
+        readable('--text-primary', '--text-primary', '--bg-deep', 4.5, '#ffffff', '#111111');
+        readable('--text-muted', '--text-muted', '--bg-deep', 3.0, '#e8e8e8', '#333333');
+        readable('--text-sidebar', '--text-primary', '--bg-sidebar', 4.5, '#ffffff', '#111111');
+        readable('--text-muted-sidebar', '--text-muted', '--bg-sidebar', 3.0, '#e8e8e8', '#444444');
+        readable('--text-input', '--text-primary', '--bg-input', 4.5, '#ffffff', '#111111');
+        readable('--text-muted-input', '--text-muted', '--bg-input', 3.0, '#e8e8e8', '#444444');
 
         for (const s of targets) for (const [p, v] of Object.entries(vars)) s.setProperty(p, v);
 
@@ -4724,6 +4741,11 @@ class App {
         // Settings
         document.getElementById("settings-theme")?.addEventListener("change", (e) => {
             this.config.theme = (e.target as HTMLSelectElement).value;
+            // Color overrides were painted over the old theme and would hide the new
+            // one. Only the font settings carry over; saved custom themes stay
+            // loadable from the customizer.
+            const o = this.config.theme_overrides ?? {};
+            this.config.theme_overrides = { font_size: o.font_size, font_family: o.font_family };
             this.applyTheme();
             this.saveConfig();
         });
@@ -4781,6 +4803,8 @@ class App {
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
             { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
+            { id: "settings-app-update-check", prop: "app_update_check" },
+            { id: "settings-app-auto-update", prop: "app_auto_update" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -6683,6 +6707,62 @@ class App {
         return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
     }
 
+    private setupAppUpdate() {
+        document.getElementById("btn-app-update-check")?.addEventListener("click", () => this.checkAppUpdate(false));
+        document.getElementById("btn-app-update-install")?.addEventListener("click", () => this.installAppUpdate());
+    }
+
+    /** Compares this exe with the latest GitHub release. At startup a failure is
+     *  logged quietly and a newer version installs itself when app_auto_update is on. */
+    private async checkAppUpdate(atStartup: boolean) {
+        const status = document.getElementById("app-update-status");
+        const install = document.getElementById("btn-app-update-install") as HTMLButtonElement | null;
+        const tag = this.t("log_tag_update");
+        if (status) status.textContent = this.t("app_update_checking");
+        try {
+            const info = await invoke<{ current: string; latest: string; newer: boolean; page_url: string }>("check_app_update");
+            if (!info.newer) {
+                const msg = this.t("app_update_current", [info.current]);
+                if (status) status.textContent = msg;
+                if (!atStartup) this.log(`${tag} ${msg}`, "info");
+                return;
+            }
+            const msg = this.t("app_update_available", [info.latest, info.current]);
+            if (status) status.textContent = msg;
+            if (install) {
+                install.textContent = this.t("btn_app_update_install", [info.latest]);
+                install.style.display = "";
+            }
+            this.log(`${tag} ${msg}`, "warn");
+            if (atStartup && this.config.app_auto_update) await this.installAppUpdate();
+        } catch (e) {
+            const msg = this.t("app_update_check_failed", [String(e)]);
+            if (status) status.textContent = msg;
+            this.log(`${tag} ${msg}`, atStartup ? "info" : "error");
+        }
+    }
+
+    /** Downloads the latest mabi-patcher.exe over this one and restarts into it. */
+    private async installAppUpdate() {
+        const status = document.getElementById("app-update-status");
+        const install = document.getElementById("btn-app-update-install") as HTMLButtonElement | null;
+        const tag = this.t("log_tag_update");
+        if (install) install.disabled = true;
+        if (status) status.textContent = this.t("app_update_downloading");
+        this.log(`${tag} ${this.t("app_update_downloading")}`, "info");
+        try {
+            const version = await invoke<string>("install_app_update");
+            const msg = this.t("app_update_installed", [version]);
+            if (status) status.textContent = msg;
+            this.log(`${tag} ${msg}`, "success");
+        } catch (e) {
+            const msg = this.t("app_update_failed", [String(e)]);
+            if (status) status.textContent = msg;
+            this.log(`${tag} ${msg}`, "error");
+            if (install) install.disabled = false;
+        }
+    }
+
     private setupDatabaseTab() {
         const searchInput = document.getElementById("db-search-input") as HTMLInputElement;
         const typeSelect = document.getElementById("db-search-type") as HTMLSelectElement;
@@ -6695,12 +6775,12 @@ class App {
             const query = searchInput.value.toLowerCase().trim();
             const type = typeSelect.value;
             if (!query) {
-                resultsDiv.innerHTML = "";
+                resultsDiv.replaceChildren();
                 return;
             }
 
             if (!dbCache) {
-                resultsDiv.innerHTML = "Loading databases...";
+                resultsDiv.textContent = this.t("db_loading");
                 try {
                     const itemsRes = await fetch("/mabipatcher/mabi-files/db/items.json");
                     const items = itemsRes.ok ? await itemsRes.json() : [];
@@ -6708,12 +6788,12 @@ class App {
                     const races = raceRes.ok ? await raceRes.json() : [];
                     dbCache = { items, races };
                 } catch (e) {
-                    resultsDiv.innerHTML = "Error loading databases: " + String(e);
+                    resultsDiv.textContent = this.t("db_load_error", [String(e)]);
                     return;
                 }
             }
 
-            resultsDiv.innerHTML = "Searching...";
+            resultsDiv.textContent = this.t("db_searching");
             let hits: any[] = [];
             
             for (const item of dbCache.items) {
@@ -6738,16 +6818,24 @@ class App {
             }
 
             if (hits.length === 0) {
-                resultsDiv.innerHTML = "No results found.";
+                resultsDiv.textContent = this.t("db_no_results");
                 return;
             }
 
-            let html = "<ul style='list-style:none;padding:0;'>";
+            // Built with DOM nodes: item names and descriptions come from game data.
+            const ul = document.createElement("ul");
+            ul.className = "db-results";
             for (const h of hits) {
-                html += "<li style='padding:8px;border-bottom:1px solid #333;'><strong>[" + h._source + "] ID: " + h.ID + "</strong> - " + (h.Text_Name1 || h.name || h.XMLName || "Unknown") + "<div style='font-size:0.8em;color:#aaa;'>" + (h.Text_Desc1 || "") + "</div></li>";
+                const li = document.createElement("li");
+                const head = document.createElement("strong");
+                head.textContent = `[${this.t(h._source === "Item" ? "db_source_item" : "db_source_race")}] ID: ${h.ID}`;
+                const desc = document.createElement("div");
+                desc.className = "db-result-desc";
+                desc.textContent = h.Text_Desc1 || "";
+                li.append(head, ` - ${h.Text_Name1 || h.name || h.XMLName || this.t("db_unknown")}`, desc);
+                ul.appendChild(li);
             }
-            html += "</ul>";
-            resultsDiv.innerHTML = html;
+            resultsDiv.replaceChildren(ul);
         };
 
         searchInput.addEventListener("input", () => {

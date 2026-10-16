@@ -40,7 +40,7 @@
           <span class="nav-icon">&#128230;</span>
             <span class="nav-text" id="tab-pack-text" data-i18n="tab_pack">Pack</span>
         </button>
-        <button class="nav-item" data-tab="database" id="tab-database" data-tooltip="tab_database"><span class="nav-icon">&#128269;</span><span class="nav-text" id="tab-database-text">Database</span></button>
+        <button class="nav-item" data-tab="database" id="tab-database" data-tooltip="tab_database"><span class="nav-icon">&#128269;</span><span class="nav-text" id="tab-database-text" data-i18n="tab_database">Database</span></button>
         <button class="nav-item" data-tab="list" id="tab-list" data-tooltip="tab_list">
           <span class="nav-icon">&#128194;</span>
             <span class="nav-text" id="tab-list-text" data-i18n="tab_list">List</span>
@@ -395,19 +395,19 @@
       <!-- List Tab -->
       <div id="database" class="tab-content">
         <div class="card" style="display:flex;flex-direction:column;height:100%;">
-          <h2>Database Search</h2>
+          <h2 data-i18n="db_title">Database Search</h2>
           <div class="form-group" style="display:flex;gap:8px;">
             <select id="db-search-type" class="form-input" style="width:180px;">
-              <option value="id">ID</option>
-              <option value="feature">Feature</option>
-              <option value="raw">Raw Data</option>
-              <option value="name" selected>Name</option>
-              <option value="internal">Internal Name</option>
-              <option value="description">Description</option>
-              <option value="tags">Tags</option>
-              <option value="xml">XML</option>
+              <option value="id" data-i18n="db_type_id">ID</option>
+              <option value="feature" data-i18n="db_type_feature">Feature</option>
+              <option value="raw" data-i18n="db_type_raw">Raw Data</option>
+              <option value="name" selected data-i18n="db_type_name">Name</option>
+              <option value="internal" data-i18n="db_type_internal">Internal Name</option>
+              <option value="description" data-i18n="db_type_description">Description</option>
+              <option value="tags" data-i18n="db_type_tags">Tags</option>
+              <option value="xml" data-i18n="db_type_xml">XML</option>
             </select>
-            <input type="search" id="db-search-input" class="form-input" placeholder="Search database..." style="flex:1;" />
+            <input type="search" id="db-search-input" class="form-input" placeholder="Search database..." data-i18n-placeholder="db_search_placeholder" style="flex:1;" />
           </div>
           <div id="db-search-results" style="flex:1;overflow-y:auto;margin-top:8px;"></div>
         </div>
@@ -482,14 +482,14 @@
         <div class="input-row" style="margin-top: 10px;">
             <button id="extractSelected" class="run-btn" data-tooltip="tooltip_extract_sel">EXTRACT SELECTED</button>
             <button id="extractAll" class="run-btn" data-tooltip="tooltip_extract_all">EXTRACT ALL</button>
-            <button id="ctxConvIt" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_it">TO .IT</button>
-            <button id="ctxConvPack" class="tab-btn" style="flex: 0; white-space:nowrap" data-tooltip="tooltip_conv_pack">TO .PACK</button>
+            <button id="ctxConvIt" class="tab-btn" data-tooltip="tooltip_conv_it">TO .IT</button>
+            <button id="ctxConvPack" class="tab-btn" data-tooltip="tooltip_conv_pack">TO .PACK</button>
         </div>
 
         <!-- VFS edit toolbar -->
         <div class="input-row vfs-toolbar hidden" id="vfs-toolbar" style="margin-top: 6px; gap: 6px;">
             <span id="vfs-pending-badge" class="vfs-badge">0 changes</span>
-            <button id="btn-vfs-merge" class="tab-btn" style="flex:0; white-space:nowrap" data-tooltip="tooltip_vfs_merge" data-i18n="btn_vfs_merge">MERGE .IT</button>
+            <button id="btn-vfs-merge" class="tab-btn" data-tooltip="tooltip_vfs_merge" data-i18n="btn_vfs_merge">MERGE .IT</button>
             <button id="btn-vfs-apply" class="run-btn" data-tooltip="tooltip_vfs_apply" data-i18n="btn_vfs_apply">APPLY CHANGES</button>
             <button id="btn-vfs-reset" class="tab-btn" style="color:var(--accent-warn,#f90)" data-tooltip="tooltip_vfs_reset" data-i18n="btn_vfs_reset">RESET</button>
         </div>
@@ -705,6 +705,19 @@
             <div class="sys-stat" data-tooltip="tooltip_fetch_remote_salts">
               <span data-i18n="label_settings_fetch_remote_salts">Download the salt list at startup</span>
               <label class="switch"><input type="checkbox" id="settings-fetch-remote-salts"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" data-tooltip="tooltip_app_update_check">
+              <span data-i18n="label_app_update_check">Check for mabi-patcher updates at startup</span>
+              <label class="switch"><input type="checkbox" id="settings-app-update-check"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" data-tooltip="tooltip_app_auto_update">
+              <span data-i18n="label_app_auto_update">Install mabi-patcher updates automatically</span>
+              <label class="switch"><input type="checkbox" id="settings-app-auto-update"><span class="slider"></span></label>
+            </div>
+            <div class="form-actions" style="margin-bottom:16px;">
+              <button class="tab-btn btn-sm" id="btn-app-update-check" data-i18n="btn_app_update_check" data-tooltip="tooltip_btn_app_update_check">Check for updates</button>
+              <button class="tab-btn btn-sm primary" id="btn-app-update-install" data-tooltip="tooltip_btn_app_update_install" style="display:none;"></button>
+              <span id="app-update-status" class="launcher-field-hint"></span>
             </div>
             <div class="form-group">
               <label id="label_log">Log Level:</label>

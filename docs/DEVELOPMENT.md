@@ -5,11 +5,10 @@ the current code.
 
 Sources: `Cargo.toml`, `build.rs`, `build.bat`, `build-all.bat`,
 `build-linux.sh`, `Dockerfile`, `.github/workflows/cli.yml`, `tests/`,
-`gui/src-tauri/tauri.conf.json`.
+`scripts/`, `.githooks/`, `gui/src-tauri/tauri.conf.json`.
 
-The repository holds only what is needed to build and test. Editor and agent
-settings, git hooks and helper scripts stay local and are listed in
-`.gitignore`.
+The repository holds what is needed to build, test and release. Editor and
+agent settings stay local and are listed in `.gitignore`.
 
 ---
 
@@ -99,8 +98,24 @@ Run these and fix every failure before committing:
 | Lint (errors only) | `cargo clippy --release --bins --lib` |
 | Library tests | `cargo test --release --lib` |
 | Integration tests | `cargo test --release --tests` |
-| GUI type check (when files under `gui/` changed) | `npx --no-install tsc --noEmit` in `gui/` |
+| Translation keys (when files under `gui/` changed) | `node scripts/check-locales.mjs` |
+| GUI type check (same condition) | `npx --no-install tsc --noEmit` in `gui/` |
 | GUI crate check (same condition) | `cargo check` in `gui/src-tauri` |
+
+`scripts/precommit-check.sh` runs all of these. To run it on every commit:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Git runs no hook from `.githooks/` until a clone sets this. Set
+`SKIP_GUI_CHECK=1` to skip the GUI steps on a machine without
+`gui/node_modules`.
+
+`scripts/check-locales.mjs` fails when a key is missing from one of the 4
+locales (en, tw, ja, ko), or when `gui/index.html` (`data-i18n`,
+`data-i18n-placeholder`) or `gui/src/app.ts` (`this.t("key")`) uses a key
+that `en` lacks.
 
 ---
 
@@ -139,7 +154,9 @@ CI does not build the GUI.
 
 ## Version number
 
-Change it in every file that holds the number, then rebuild:
+`scripts\set-version.bat 2.0.8` (Windows) or `scripts/set-version.sh 2.0.8`
+changes every file that holds the number. Without a version they print the
+current one. Rebuild afterwards. The files are:
 
 | File | Field |
 |---|---|

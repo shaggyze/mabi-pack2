@@ -228,6 +228,12 @@ struct Config {
 
     fetch_remote_salts: bool,
 
+    #[serde(default = "default_true")]
+    app_update_check: bool,
+
+    #[serde(default)]
+    app_auto_update: bool,
+
     list_full_sequence: bool,
 
     pack_wrap_data: bool,
@@ -412,6 +418,8 @@ impl Default for Config {
             auto_convert_dds: false,
 
             fetch_remote_salts: true,
+            app_update_check: true,
+            app_auto_update: false,
 
             list_full_sequence: false,
 
@@ -7282,27 +7290,201 @@ fn repair_game_files(game_path: String) -> Result<serde_json::Value, String> {
 
 
 
+// ── mabi-patcher self-update ─────────────────────────────────────────────────
+// GitHub answers /releases/latest with a redirect to /releases/tag/vX.Y.Z, so the
+// newest version is read from that Location header (no API rate limit). The exe
+// comes from /releases/latest/download/mabi-patcher.exe and lands beside the
+// running exe as <name>.new.exe. It must start with "MZ" and print the expected
+// version for --version before it replaces anything. Windows lets a running exe
+// be renamed, so the old exe becomes <name>.old (deleted on the next start), the
+// new one takes its name, and the app restarts into it.
+const UPDATE_LATEST_URL: &str = "https://github.com/shaggyze/mabi-pack2/releases/latest";
+const UPDATE_EXE_URL: &str = "https://github.com/shaggyze/mabi-pack2/releases/latest/download/mabi-patcher.exe";
+const UPDATE_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+#[derive(serde::Serialize)]
+struct AppUpdateInfo {
+    current: String,
+    latest: String,
+    newer: bool,
+    page_url: String,
+}
+
+/// "v2.0.8" or "2.0.8-beta.1" -> (2, 0, 8). Missing parts count as 0.
+fn parse_app_version(v: &str) -> Option<(u64, u64, u64)> {
+    let core = v.trim().trim_start_matches(|c| c == 'v' || c == 'V').split(|c| c == '-' || c == '+').next()?;
+    let mut parts = core.split('.').map(|p| p.parse::<u64>());
+    let major = parts.next()?.ok()?;
+    let minor = parts.next().unwrap_or(Ok(0)).ok()?;
+    let patch = parts.next().unwrap_or(Ok(0)).ok()?;
+    Some((major, minor, patch))
+}
+
+fn fetch_app_update_info(current: &str) -> Result<AppUpdateInfo, String> {
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("mabi-patcher/", env!("CARGO_PKG_VERSION")))
+        .build();
+    let resp = match agent.get(UPDATE_LATEST_URL).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return Err(e.to_string()),
+    };
+    let location = resp.header("location").ok_or_else(|| format!("GitHub sent HTTP {} with no redirect", resp.status()))?;
+    let tag = location.rsplit("/tag/").next().filter(|t| *t != location).ok_or_else(|| format!("unexpected redirect: {}", location))?;
+    let latest = tag.trim_start_matches(|c| c == 'v' || c == 'V').to_string();
+    let newer = match (parse_app_version(&latest), parse_app_version(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    };
+    let page_url = if location.starts_with("http") { location.to_string() } else { format!("https://github.com{}", location) };
+    Ok(AppUpdateInfo { current: current.to_string(), latest, newer, page_url })
+}
+
+#[tauri::command]
+async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || fetch_app_update_info(&current))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Deletes the exe left behind by the last update. Called once at startup. The
+/// old process may still be exiting, so it retries for 10 seconds.
+fn cleanup_old_app_exe() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let old = exe.with_extension("old");
+    if !old.exists() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..10 {
+            if std::fs::remove_file(&old).is_ok() {
+                log::info!("[UPDATE] Removed {}", old.display());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        log::warn!("[UPDATE] Could not remove {}", old.display());
+    });
+}
+
+fn download_and_swap_app(current: &str) -> Result<(String, std::path::PathBuf), String> {
+    let info = fetch_app_update_info(current)?;
+    if !info.newer {
+        return Err(format!("{} is already the latest version", current));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("exe has no folder")?.to_path_buf();
+    let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("mabi-patcher").to_string();
+    let new_path = dir.join(format!("{}.new.exe", stem));
+    let old_path = exe.with_extension("old");
+
+    log::info!("[UPDATE] Downloading {} -> {}", UPDATE_EXE_URL, new_path.display());
+    let resp = ureq::get(UPDATE_EXE_URL)
+        .timeout(std::time::Duration::from_secs(300))
+        .call()
+        .map_err(|e| format!("download failed: {}", e))?;
+    let write = (|| -> Result<u64, String> {
+        let mut file = std::fs::File::create(&new_path)
+            .map_err(|e| format!("cannot write to {} ({}). Run as administrator or update with the installer.", dir.display(), e))?;
+        let mut reader = std::io::Read::take(resp.into_reader(), UPDATE_MAX_BYTES + 1);
+        let n = std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
+        if n > UPDATE_MAX_BYTES {
+            return Err("download is larger than 200 MB".into());
+        }
+        Ok(n)
+    })();
+    let fail = |msg: String| -> String {
+        let _ = std::fs::remove_file(&new_path);
+        msg
+    };
+    let size = write.map_err(fail)?;
+
+    let head = std::fs::read(&new_path).map(|b| b.get(..2).map(|h| h == b"MZ").unwrap_or(false)).unwrap_or(false);
+    if size < 1024 * 1024 || !head {
+        return Err(fail(format!("downloaded file is not a Windows exe ({} bytes)", size)));
+    }
+
+    let mut cmd = std::process::Command::new(&new_path);
+    cmd.arg("--version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().map_err(|e| fail(format!("downloaded exe does not run: {}", e)))?;
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    if !printed.contains(&info.latest) {
+        return Err(fail(format!("downloaded exe reports \"{}\", expected {}", printed.trim(), info.latest)));
+    }
+
+    let _ = std::fs::remove_file(&old_path);
+    std::fs::rename(&exe, &old_path).map_err(|e| fail(format!("cannot replace {} ({}). Run as administrator or update with the installer.", exe.display(), e)))?;
+    if let Err(e) = std::fs::rename(&new_path, &exe) {
+        let _ = std::fs::rename(&old_path, &exe);
+        return Err(fail(format!("cannot move the new exe into place: {}", e)));
+    }
+    log::info!("[UPDATE] Installed mabi-patcher {} ({} bytes)", info.latest, size);
+    Ok((info.latest, exe))
+}
+
+/// Downloads the latest mabi-patcher.exe, swaps it in and restarts the app.
+#[tauri::command]
+async fn install_app_update(app: tauri::AppHandle) -> Result<String, String> {
+    let current = app.package_info().version.to_string();
+    // The exe path comes from before the swap: after a rename Windows may report
+    // the running image under its new .old name.
+    let (latest, exe) = tauri::async_runtime::spawn_blocking(move || download_and_swap_app(&current))
+        .await
+        .map_err(|e| e.to_string())??;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        match std::process::Command::new(&exe).spawn() {
+            Ok(_) => handle.exit(0),
+            Err(e) => log::error!("[UPDATE] Restart failed, start {} by hand: {}", exe.display(), e),
+        }
+    });
+    Ok(latest)
+}
+
 // ── Elevated drag-and-drop (WM_DROPFILES) ────────────────────────────────────
-// Windows (UIPI) never delivers an OLE drop from a non-admin Explorer to an admin
-// window, so tauri://drag-drop never fires while elevated. The legacy WM_DROPFILES
-// path can be opened with ChangeWindowMessageFilterEx: accept files on the main
-// window, subclass its WndProc, and re-emit drops as the same tauri://drag-drop event.
+// Windows (UIPI) blocks an OLE drop from a non-admin Explorer into an admin
+// process. OLE delivers a drop to the first window under the cursor that holds
+// an OleDropTargetInterface property: the WebView2 windows (wry's and
+// Chromium's) and the frame (tao). While one exists, the drop just fails.
+// When elevated, the app removes those registrations so OLE falls back to
+// WM_DROPFILES on the frame, which ChangeWindowMessageFilterEx lets through.
+// The subclassed WndProc re-emits the drop as the usual tauri://drag-drop
+// event. Chromium registers again when it recreates a window, so the removal
+// repeats every 2 seconds. The page uses no HTML5 drag-and-drop, so nothing
+// inside the page depends on the removed targets.
 #[cfg(windows)]
 mod elevated_drop {
     use tauri::{Emitter, Manager};
-    use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM, DWORD}; // Cleaned up the DWORD import path here
+    use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, LRESULT, TRUE, UINT, WPARAM};
     use winapi::shared::windef::{HWND, POINT};
+    use winapi::um::ole2::RevokeDragDrop;
+    use winapi::um::processthreadsapi::GetCurrentProcessId;
     use winapi::um::shellapi::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
     use winapi::um::winuser::{
-        CallWindowProcW, ChangeWindowMessageFilterEx, SetWindowLongPtrW, GWLP_WNDPROC,
-        WM_COPYDATA, WM_DROPFILES, WNDPROC, // Removed MSGFLT_ALLOW from here since it's defined below
+        CallWindowProcW, ChangeWindowMessageFilterEx, EnumChildWindows, GetPropW,
+        GetWindowThreadProcessId, RemovePropW, SetWindowLongPtrW, GWLP_WNDPROC,
+        WM_COPYDATA, WM_DROPFILES, WNDPROC,
     };
 
     const WM_COPYGLOBALDATA: UINT = 0x0049;
-    const MSGFLT_ALLOW: DWORD = 1; // Explicitly defined using the cleanly imported DWORD type
-    
+    const MSGFLT_ALLOW: DWORD = 1;
+    const STRIP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
     static OLD_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
     static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if msg == WM_DROPFILES {
@@ -7331,6 +7513,42 @@ mod elevated_drop {
         CallWindowProcW(old, hwnd, msg, wp, lp)
     }
 
+    /// Removes the OLE drop target from one window. Windows of this process are
+    /// revoked through OLE. The WebView2 windows belong to msedgewebview2.exe,
+    /// so only their properties can be removed from here.
+    unsafe fn strip(hwnd: HWND, removed: &mut usize) {
+        let target = wide("OleDropTargetInterface");
+        if GetPropW(hwnd, target.as_ptr()).is_null() {
+            return;
+        }
+        let mut pid: DWORD = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() {
+            RevokeDragDrop(hwnd);
+        } else {
+            RemovePropW(hwnd, target.as_ptr());
+            RemovePropW(hwnd, wide("OleEndPointID").as_ptr());
+        }
+        *removed += 1;
+    }
+
+    unsafe extern "system" fn strip_child(hwnd: HWND, lp: LPARAM) -> BOOL {
+        strip(hwnd, &mut *(lp as *mut usize));
+        TRUE
+    }
+
+    /// Strips every drop target in the frame's window tree and returns the count.
+    /// Runs on the main thread, which registered this process's targets.
+    fn strip_all(frame: isize) -> usize {
+        let mut removed = 0usize;
+        unsafe {
+            let hwnd = frame as HWND;
+            strip(hwnd, &mut removed);
+            EnumChildWindows(hwnd, Some(strip_child), &mut removed as *mut usize as LPARAM);
+        }
+        removed
+    }
+
     /// Enable WM_DROPFILES on the main window. Call once, only when elevated.
     pub fn install(app: &tauri::AppHandle) -> Result<(), String> {
         let win = app.get_webview_window("main").ok_or("no main window")?;
@@ -7347,6 +7565,20 @@ mod elevated_drop {
             OLD_PROC.store(old, std::sync::atomic::Ordering::Relaxed);
             DragAcceptFiles(hwnd, 1);
         }
+        let frame = hwnd as isize;
+        let handle = app.clone();
+        std::thread::spawn(move || loop {
+            let queued = handle.run_on_main_thread(move || {
+                let n = strip_all(frame);
+                if n > 0 {
+                    log::info!("[DROP] Removed {} OLE drop target(s); elevated drops use WM_DROPFILES", n);
+                }
+            });
+            if queued.is_err() {
+                break;
+            }
+            std::thread::sleep(STRIP_INTERVAL);
+        });
         Ok(())
     }
 }
@@ -7370,6 +7602,8 @@ pub fn run() {
             let config = get_config(handle.clone());
 
             init_logging(&handle, &config.log_level);
+
+            cleanup_old_app_exe();
 
             // Salts load once here: built-in list and salts.txt now, the remote list
             // in the background. The page re-reads them on "salts-updated".
@@ -7465,6 +7699,8 @@ pub fn run() {
         })
 
         .invoke_handler(tauri::generate_handler![
+            check_app_update,
+            install_app_update,
 
             get_app_version,
 

@@ -80,7 +80,11 @@ Models from the UoTiara mod pack, rendered by the GUI's preview. These models' t
 
 ## Download and build
 
-Prebuilt binaries are not published from this repository yet. You can download the CLI built by CI from the **Actions** tab (`CLI build` workflow) on GitHub, or build it yourself.
+Each [release](https://github.com/shaggyze/mabi-pack2/releases/latest) carries `mabi-patcher.exe` (portable desktop app and CLI), the NSIS and MSI installers and `mabi-pack2_batches.zip`. The newest exe is always at <https://github.com/shaggyze/mabi-pack2/releases/latest/download/mabi-patcher.exe>.
+
+The desktop app checks for a newer release at startup and shows it in the log and in Settings › Engine. **Update to X** there downloads the new exe, checks that it runs and reports the expected version, replaces the running exe and restarts. **Install mabi-patcher updates automatically** does this at startup without a click. Both settings can be turned off. Replacing an exe under `Program Files` needs the app to run as administrator; otherwise use the installer.
+
+The CI build of the Linux CLI is on the **Actions** tab (`CLI build` workflow).
 
 ### Windows (desktop app + CLI)
 

@@ -11,6 +11,12 @@
   --accent-warn: #ffaa00;
   --text-primary: #d6deeb;
   --text-muted: #5f7e97;
+  /* Text on --bg-input and --bg-sidebar. app.ts overrides these when a custom
+     background would make --text-primary or --text-muted unreadable there. */
+  --text-input: var(--text-primary);
+  --text-muted-input: var(--text-muted);
+  --text-sidebar: var(--text-primary);
+  --text-muted-sidebar: var(--text-muted);
   --border-glass: rgba(127, 219, 202, 0.3);
   --grad-body: var(--bg-deep);
   --ui-font: 'Segoe UI', Inter, system-ui, sans-serif;
@@ -499,7 +505,8 @@ body {
 .form-group { margin-bottom: 20px; }
 label { display: block; color: var(--accent-cyan); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
 
-input[type="text"], input[type="number"], select, textarea {
+input[type="text"], input[type="number"], input[type="search"], input[type="password"],
+input:not([type]), select, textarea {
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border-glass);
@@ -510,7 +517,7 @@ input[type="text"], input[type="number"], select, textarea {
 }
 
 select option {
-  background-color: var(--bg-sidebar);
+  background-color: var(--bg-input);
   color: var(--text-primary);
 }
 
@@ -524,6 +531,21 @@ input:focus, select:focus { border-color: var(--accent-blue); outline: none; box
 .resize-handle-v::after { content: ''; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: var(--border-glass); border-radius: 1px; transition: background 0.15s; }
 .resize-handle-v:hover::after, .resize-handle-v.dragging::after { background: var(--accent-cyan); }
 .preview-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* Everything drawn on --bg-input reads its text colors from the input pair. */
+input[type="text"], input[type="number"], input[type="search"], input[type="password"],
+input:not([type]), select, textarea, .results-box, .preview-box,
+.patcher-scan-panel, .installs-panel {
+  --text-primary: var(--text-input);
+  --text-muted: var(--text-muted-input);
+  color: var(--text-input);
+}
+.sidebar {
+  --text-primary: var(--text-sidebar);
+  --text-muted: var(--text-muted-sidebar);
+  color: var(--text-sidebar);
+}
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--accent-cyan); }
 
 .results-box, .preview-box {
   background: var(--bg-input);
@@ -1179,9 +1201,11 @@ input:checked + .slider:before { transform: translateX(20px); }
 
 button.tab-btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    height: var(--btn-h); min-width: 0; padding: 0 14px;
+    height: var(--btn-h); padding: 0 14px;
     font-size: 0.76rem; letter-spacing: 0.06em; line-height: 1;
     border-radius: 4px; flex: 0 0 auto;
+    /* A label never clips: a row wraps before a button shrinks below its text. */
+    min-width: max-content; white-space: nowrap;
 }
 button.tab-btn.primary {
     background: var(--accent-cyan); color: #000; border-color: var(--accent-cyan);
@@ -1240,3 +1264,8 @@ button.run-btn {
     animation: flash-red 0.3s ease-in-out 3;
 }
 
+
+/* Database tab results */
+.db-results { list-style: none; padding: 0; margin: 0; }
+.db-results li { padding: 8px; border-bottom: 1px solid var(--border-glass); }
+.db-result-desc { font-size: 0.8em; color: var(--text-muted); }
