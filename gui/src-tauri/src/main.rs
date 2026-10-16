@@ -239,18 +239,7 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         // Fast elevation check: if the user wants to run elevated, elevate instantly before loading WebView2 GUI
-        // Same lookup as the GUI's get_config_path: portable config.json next to
-        // the exe first, else the app config dir (%APPDATA%\<identifier>).
-        let appdata = env::var("APPDATA").unwrap_or_default();
-        let config_path = Path::new(&appdata)
-            .join("com.shaggyze.mabi-patcher")
-            .join("config.json");
-        let portable_config = env::current_exe().ok().map(|p| p.with_file_name("config.json"));
-
-        let target_config = match portable_config {
-            Some(p) if p.exists() => p,
-            _ => config_path,
-        };
+        let target_config = config_file_path();
         
         if target_config.exists() {
             if let Ok(config_str) = std::fs::read_to_string(&target_config) {
@@ -285,7 +274,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Same lookup as the GUI's get_config_path: portable config.json next to
+/// the exe first, else the app config dir (%APPDATA%\<identifier>).
+fn config_file_path() -> std::path::PathBuf {
+    let appdata = env::var("APPDATA").unwrap_or_default();
+    let config_path = Path::new(&appdata)
+        .join("com.shaggyze.mabi-patcher")
+        .join("config.json");
+    match env::current_exe().ok().map(|p| p.with_file_name("config.json")) {
+        Some(p) if p.exists() => p,
+        _ => config_path,
+    }
+}
+
+/// The GUI setting `fetch_remote_salts` (on when missing or unreadable).
+fn remote_salts_enabled() -> bool {
+    std::fs::read_to_string(config_file_path()).ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v["fetch_remote_salts"].as_bool())
+        .unwrap_or(true)
+}
+
 fn run_cli_logic() -> Result<()> {
+    mabi_pack2::init_salts_blocking(remote_salts_enabled());
     // Check for implicit file argument (drag and drop / double click)
     let args: Vec<String> = env::args().collect();
     if args.len() == 2 {

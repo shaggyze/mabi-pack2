@@ -99,6 +99,7 @@ interface Config {
     suppress_admin_warning: boolean;
     auto_convert_png: boolean;
     auto_convert_dds: boolean;
+    fetch_remote_salts: boolean;
     auto_convert_features: boolean;
     auto_convert_pmg: boolean;
     list_full_sequence: boolean;
@@ -252,6 +253,7 @@ class App {
         suppress_admin_warning: false,
         auto_convert_png: false,
         auto_convert_dds: false,
+        fetch_remote_salts: true,
         auto_convert_features: false,
         auto_convert_pmg: false,
         list_full_sequence: false,
@@ -445,6 +447,14 @@ class App {
         }).catch(err => {
             console.error("Failed to fetch salts", err);
             this.engineSalts = ["})wWb4?-sVGHNoPKpc", "@6QeTuOaDgJlZcBm#9", "CuAVPMZx:E96:(Rxdw"];
+        });
+
+        // The backend merges the online salt list after startup; pick it up.
+        listen("salts-updated", async () => {
+            try {
+                this.engineSalts = await invoke("get_all_salts") as string[];
+                this.log(this.t("log_salts_remote_merged", [String(this.engineSalts.length)]));
+            } catch (e) { console.error("Failed to refresh salts", e); }
         });
 
         // 3. Apply Theme Immediately
@@ -758,6 +768,7 @@ class App {
             { id: "settings-assoc-xmlcompiled", prop: "associate_xmlcompiled" },
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
+            { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -897,6 +908,29 @@ class App {
             const pct = o.border_opacity ?? this.rgbaOpacity(themeBorder);
             vars['--border-glass'] = rgba(base, pct / 100);
         }
+
+        // Overrides can pair a background with text of nearly the same color (for
+        // example #282928 text on #960032). Text below WCAG contrast 4.5 (body) or
+        // 3.0 (muted labels) against either background switches to white or near-black.
+        const lum = (c: string) => {
+            const hex = this.cssColorToHex(c);
+            const ch = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+                .map(v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+            return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+        };
+        const contrast = (a: string, b: string) => {
+            const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+            return (hi + 0.05) / (lo + 0.05);
+        };
+        const backgrounds = [vars['--bg-deep'] ?? this.getCssVar('--bg-deep'), vars['--bg-sidebar'] ?? this.getCssVar('--bg-sidebar')];
+        const readable = (prop: string, min: number, light: string, dark: string) => {
+            const color = vars[prop] ?? this.getCssVar(prop);
+            if (!color || backgrounds.every(bg => contrast(color, bg) >= min)) return;
+            const worst = (c: string) => Math.min(...backgrounds.map(bg => contrast(c, bg)));
+            vars[prop] = worst(light) >= worst(dark) ? light : dark;
+        };
+        readable('--text-primary', 4.5, '#ffffff', '#111111');
+        readable('--text-muted', 3.0, '#e8e8e8', '#333333');
 
         for (const s of targets) for (const [p, v] of Object.entries(vars)) s.setProperty(p, v);
 
@@ -4731,6 +4765,7 @@ class App {
             { id: "settings-assoc-xmlcompiled", prop: "associate_xmlcompiled" },
             { id: "settings-auto-png", prop: "auto_convert_png" },
             { id: "settings-auto-dds", prop: "auto_convert_dds" },
+            { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },

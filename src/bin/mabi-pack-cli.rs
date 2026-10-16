@@ -241,6 +241,7 @@ fn main() -> Result<()> {
         || matches.subcommand_matches("list").is_some()
         || matches.subcommand_matches("batch").is_some()
     {
+        mabi_pack2::init_salts_blocking(true);
         all_salts = load_salts();
     }
 

@@ -1979,6 +1979,8 @@ pub fn serve_from_args(args: &[String]) -> Result<()> {
             other => return Err(anyhow::anyhow!("unknown serve argument: {}", other)),
         }
     }
+    // Long-running server: fetch the remote salts in the background.
+    crate::init_salts(true, std::time::Duration::ZERO, None);
     let stop = Arc::new(AtomicBool::new(false));
     {
         use std::io::IsTerminal;

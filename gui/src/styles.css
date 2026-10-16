@@ -108,8 +108,8 @@
 .theme-sunset-light {
   --bg-deep: #fff3e0; --bg-sidebar: #ffffff; --bg-surface: rgba(255, 255, 255, 0.5);
   --bg-input: #ffffff; --bg-terminal: #fff8e1; --accent-cyan: #ef6c00;
-  --accent-blue: #fb8c00; --accent-neon: #ef6c00; --text-primary: #e65100;
-  --text-muted: #f57c00; --border-glass: rgba(239, 108, 0, 0.2);
+  --accent-blue: #fb8c00; --accent-neon: #ef6c00; --text-primary: #bf360c;
+  --text-muted: #c55a00; --border-glass: rgba(239, 108, 0, 0.2);
   --grad-body: linear-gradient(to bottom, #ffffff, #fff3e0);
 }
 

@@ -106,19 +106,27 @@ bytes (`gen_file_key`).
 The salt is a short text secret per game region and era. Every salt must be
 tried until one decrypts a valid header, unless you pass one with `-k`.
 
-`load_salts()` in `src/lib.rs` builds the list:
+`init_salts()` in `src/lib.rs` builds the list once per process:
 
 1. `HARDCODED_SALTS`, a built-in list in `src/lib.rs`, most common first.
 2. `salts.txt` in the **current folder**: one salt per line; blank lines and
-   lines starting with `#` are skipped.
+   lines starting with `#` are skipped. It is read once, at startup.
 3. A remote list at `SALTS_URL` (on the project's website), fetched with a
-   3-second timeout.
+   3-second timeout and merged into the cached list when it arrives.
 
-The first call builds the whole list before it returns, waiting at most 3
-seconds for the remote list. If the remote list is slower than that, it is
-added to the cached list whenever it arrives. Later calls in the same
-process return the cached list. A one-shot CLI run therefore uses the
-built-in list and `salts.txt`, plus the remote list when it answers in time.
+`load_salts()` returns the cached list. Called before `init_salts()`, it
+builds the list from steps 1 and 2 only.
+
+| Caller | Remote list |
+|---|---|
+| GUI | Fetched in the background at startup; nothing waits for it. The page reloads the list when the `salts-updated` event fires. |
+| `mabi-patcher` CLI | Waits at most 3 seconds before the first command. |
+| `mabi-pack-cli` | Waits at most 3 seconds before `list`, `extract` and `batch`. |
+| `serve` (REST API) | Fetched in the background at startup. |
+
+The GUI and the `mabi-patcher` CLI skip the remote list when the setting
+**Settings › Engine › Download the salt list at startup** is off
+(`fetch_remote_salts: false` in `config.json`).
 
 `GET /api/v1/salts` returns the current list.
 

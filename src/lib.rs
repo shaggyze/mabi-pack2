@@ -59,7 +59,7 @@ use std::sync::Mutex;
 
 static CACHED_SALTS: Lazy<Mutex<Option<Vec<String>>>> = Lazy::new(|| Mutex::new(None));
 
-/// How long the first `load_salts` call waits for the remote salt list. A slower
+/// How long `init_salts_blocking` waits for the remote salt list. A slower
 /// response is still merged into the cache when it arrives.
 const REMOTE_SALTS_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -85,41 +85,57 @@ fn fetch_remote_salts() -> Option<String> {
     response.text().ok()
 }
 
-/// Built-in salts, then `salts.txt` in the working directory, then the remote
-/// list. The first call builds the full list synchronously (waiting at most
-/// `REMOTE_SALTS_WAIT` for the network); later calls return the cached list.
-pub fn load_salts() -> Vec<String> {
-    let mut cache = CACHED_SALTS.lock().unwrap();
-    if let Some(ref s) = *cache {
-        return s.clone();
-    }
-
-    let mut salts: Vec<String> = HARDCODED_SALTS.iter().map(|s| s.to_string()).collect();
-    if let Ok(text) = std::fs::read_to_string(Path::new("salts.txt")) {
-        merge_salt_lines(&text, &mut salts);
-    }
-
-    // The fetch runs on its own thread (a blocking reqwest client must not run
-    // inside an async runtime) and is waited for with a bound.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(fetch_remote_salts()); });
-    match rx.recv_timeout(REMOTE_SALTS_WAIT) {
-        Ok(Some(text)) => merge_salt_lines(&text, &mut salts),
-        Ok(None) => {}
-        Err(_) => {
-            // Too slow: merge it into the cache whenever it arrives.
-            std::thread::spawn(move || {
-                if let Ok(Some(text)) = rx.recv() {
-                    if let Some(cached) = CACHED_SALTS.lock().unwrap().as_mut() {
-                        merge_salt_lines(&text, cached);
-                    }
-                }
-            });
+/// Fills the salt cache once per process: built-in salts, then `salts.txt` in
+/// the working directory. Later calls do nothing. With `fetch_remote`, the
+/// remote list is downloaded on its own thread (a blocking reqwest client must
+/// not run inside an async runtime) and merged into the cache when it arrives.
+/// The caller waits for it at most `wait`; `on_remote` gets the new salt count
+/// after a successful merge.
+pub fn init_salts(fetch_remote: bool, wait: std::time::Duration, on_remote: Option<Box<dyn FnOnce(usize) + Send>>) {
+    {
+        let mut cache = CACHED_SALTS.lock().unwrap();
+        if cache.is_some() {
+            return;
         }
+        let mut salts: Vec<String> = HARDCODED_SALTS.iter().map(|s| s.to_string()).collect();
+        if let Ok(text) = std::fs::read_to_string(Path::new("salts.txt")) {
+            merge_salt_lines(&text, &mut salts);
+        }
+        *cache = Some(salts);
     }
+    if !fetch_remote {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(text) = fetch_remote_salts() else { return };
+        let count = {
+            let mut cache = CACHED_SALTS.lock().unwrap();
+            let Some(cached) = cache.as_mut() else { return };
+            merge_salt_lines(&text, cached);
+            cached.len()
+        };
+        let _ = tx.send(());
+        if let Some(cb) = on_remote {
+            cb(count);
+        }
+    });
+    if !wait.is_zero() {
+        let _ = rx.recv_timeout(wait);
+    }
+}
 
-    *cache = Some(salts.clone());
-    salts
+/// `init_salts` that waits at most `REMOTE_SALTS_WAIT` for the remote list,
+/// for short CLI runs that need the full list before their first search.
+pub fn init_salts_blocking(fetch_remote: bool) {
+    init_salts(fetch_remote, REMOTE_SALTS_WAIT, None);
+}
+
+/// The cached salt list. Without an earlier `init_salts` call it holds the
+/// built-in salts and `salts.txt` only.
+pub fn load_salts() -> Vec<String> {
+    init_salts(false, std::time::Duration::ZERO, None);
+    CACHED_SALTS.lock().unwrap().clone().unwrap_or_default()
 }
 
 #[cfg(test)]

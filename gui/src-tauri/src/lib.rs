@@ -224,6 +224,10 @@ struct Config {
 
     auto_convert_dds: bool,
 
+    #[serde(default = "default_true")]
+
+    fetch_remote_salts: bool,
+
     list_full_sequence: bool,
 
     pack_wrap_data: bool,
@@ -406,6 +410,8 @@ impl Default for Config {
             auto_convert_png: false,
 
             auto_convert_dds: false,
+
+            fetch_remote_salts: true,
 
             list_full_sequence: false,
 
@@ -7354,6 +7360,14 @@ pub fn run() {
             let config = get_config(handle.clone());
 
             init_logging(&handle, &config.log_level);
+
+            // Salts load once here: built-in list and salts.txt now, the remote list
+            // in the background. The page re-reads them on "salts-updated".
+            let salt_handle = handle.clone();
+            mabi_pack2::init_salts(config.fetch_remote_salts, std::time::Duration::ZERO, Some(Box::new(move |count| {
+                log::info!("[GUI] Remote salt list merged: {} salts", count);
+                let _ = salt_handle.emit("salts-updated", count);
+            })));
 
             mabi_pack2::launcher::auth::set_product_id(config.product_id);
 
