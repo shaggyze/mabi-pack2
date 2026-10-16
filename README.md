@@ -232,7 +232,7 @@ are not overwritten. Packing errors appear in the console or `log.txt`.
 ```sh
 # Log in once. The password is read from MABI_PASSWORD so it stays out of your shell history.
 export MABI_PASSWORD='<your password>'
-mabi-patcher login -u you@example.com --profile Main -c "PATH_TO_GAME_FOLDER"
+mabi-patcher login -u you@example.com --profile Main -c "C:\Nexon\Library\mabinogi"
 
 # If Nexon asks for a two-factor code, login prints the command to finish:
 mabi-patcher login-otp -u you@example.com --mfa-key <KEY> --otp <CODE>
@@ -251,7 +251,7 @@ mabi-patcher import-cookies --profile Main
 mabi-patcher update --scan-only                 # list what needs updating
 mabi-patcher update --only '<path from the scan>'  # patch only these paths (or --select list.txt)
 mabi-patcher check-update --all-folders         # every Mabinogi install found on this system
-mabi-patcher update --folder "PATH_TO_GAME_FOLDER" --folder "PATH_TO_SECOND_GAME_FOLDER"
+mabi-patcher update --folder 'D:\Mabinogi' --folder 'E:\Mabinogi'
 mabi-patcher news
 ```
 

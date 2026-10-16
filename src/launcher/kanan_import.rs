@@ -610,7 +610,7 @@ mod tests {
         assert!(parse_profiles(&data16, "x").unwrap_err().to_string().contains("Wrong master password"));
     }
 
-    const SAMPLE: &str = r#"{"clientPath":"C:\\Game\\Client.exe","profiles":[
+    const SAMPLE: &str = r#"{"clientPath":"C:\\Nexon\\Mabinogi\\Client.exe","profiles":[
         {"cmdLine":"","launchWithKanan":true,"password":"hunter2","username":"alice@example.com"},
         {"cmdLine":"-x","launchWithKanan":false,"password":"pw2","username":"bob@example.com"}],
         "version":1}"#;
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(accts[0].password, "hunter2");
         assert!(accts[0].launch_with_kanan);
         assert_eq!(accts[1].cmd_line, "-x");
-        assert_eq!(accts[1].client_path, r"C:\Game\Client.exe");
+        assert_eq!(accts[1].client_path, r"C:\Nexon\Mabinogi\Client.exe");
         assert!(!format!("{:?}", accts[0]).contains("hunter2"));
     }
 

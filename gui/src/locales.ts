@@ -269,7 +269,7 @@ export const locales: Record<string, any> = {
     launcher_version_label: "Game version:",
     launcher_maintenance_label: "Maintenance:",
     launcher_client_label: "Mabinogi Folder",
-    launcher_client_placeholder: "Mabinogi installation folder",
+    launcher_client_placeholder: "C:\\Nexon\\Library\\mabinogi\\appdata",
     tooltip_check_update: "Compare local installed version with Nexon's latest build",
     launcher_profiles_header: "Profiles",
     launcher_profile_name_label: "Profile Name",
@@ -1174,7 +1174,7 @@ export const locales: Record<string, any> = {
     launcher_version_label: "遊戲版本：",
     launcher_maintenance_label: "維護中：",
     launcher_client_label: "瑪奇資料夾",
-    launcher_client_placeholder: "瑪奇安裝資料夾",
+    launcher_client_placeholder: "C:\\Nexon\\Library\\mabinogi\\appdata",
     tooltip_check_update: "比較本機安裝版本與 Nexon 最新版本",
     launcher_profiles_header: "個人檔案",
     launcher_profile_name_label: "檔案名稱",
@@ -2080,7 +2080,7 @@ export const locales: Record<string, any> = {
     launcher_version_label: "ゲームバージョン：",
     launcher_maintenance_label: "メンテナンス：",
     launcher_client_label: "マビノギフォルダ",
-    launcher_client_placeholder: "マビノギのインストールフォルダ",
+    launcher_client_placeholder: "C:\\Nexon\\Library\\mabinogi\\appdata",
     tooltip_check_update: "ローカルのインストールバージョンと Nexon の最新ビルドを比較",
     launcher_profiles_header: "プロファイル",
     launcher_profile_name_label: "プロファイル名",
@@ -2986,7 +2986,7 @@ export const locales: Record<string, any> = {
     launcher_version_label: "게임 버전:",
     launcher_maintenance_label: "점검 중:",
     launcher_client_label: "마비노기 폴더",
-    launcher_client_placeholder: "마비노기 설치 폴더",
+    launcher_client_placeholder: "C:\\Nexon\\Library\\mabinogi\\appdata",
     tooltip_check_update: "로컬 설치 버전과 Nexon 최신 빌드 비교",
     launcher_profiles_header: "프로필",
     launcher_profile_name_label: "프로필 이름",
@@ -3624,4 +3624,3 @@ export const locales: Record<string, any> = {
     log_kanan_import_failed: "Kanan 가져오기 실패: {0}",
   }
 };
-
