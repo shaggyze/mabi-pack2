@@ -570,8 +570,10 @@ mod tests {
     #[test]
     #[ignore]
     fn parse_weapon_pmg() {
-        let path = std::env::var_os("MABI_TEST_PMG").expect("Set MABI_TEST_PMG to a PMG file");
-        let data = std::fs::read(path).expect("Failed to read MABI_TEST_PMG");
+        let data = std::fs::read(
+            r"C:\Users\Shaggy\Software\pmg\tmp_weapon_dkknighttwohandsword.pmg",
+        )
+        .unwrap();
         let pmg = PmgFile::parse(&data).unwrap();
         println!("mesh_name: {}", pmg.mesh_name);
         for (i, g) in pmg.groups.iter().enumerate() {

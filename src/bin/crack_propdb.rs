@@ -11,10 +11,14 @@
 //
 // Usage:
 //   cargo run --release --bin crack_propdb -- <path-to-PropDB.xml>
+// Default path points at the uotiara source PropDB if no arg is given.
 
 use std::fs;
 use mabi_pack2::encryption::{self, Snow2Mode};
 use miniz_oxide::inflate::{decompress_to_vec_zlib, decompress_to_vec};
+
+const DEFAULT_PROPDB: &str =
+    r"C:\Users\Shaggy\Documents\GitHub\uotiara\Tiara's Moonshine Mod\data\db\PropDB.xml";
 
 /// Minimal standard-alphabet base64 decoder (tolerates whitespace/newlines).
 fn b64_decode(input: &[u8]) -> Vec<u8> {
@@ -76,10 +80,7 @@ fn try_inflate(full: &[u8], off: usize) -> Option<(String, Vec<u8>)> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("Usage: crack_propdb <path-to-PropDB.xml>");
-        std::process::exit(2);
-    });
+    let path = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_PROPDB.to_string());
     println!("--- Cracking inner SNOW2 of {} ---", path);
 
     let raw = fs::read(&path).expect("read PropDB.xml");
