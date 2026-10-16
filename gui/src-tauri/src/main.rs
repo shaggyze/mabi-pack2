@@ -218,7 +218,7 @@ fn main() -> Result<()> {
 
     if args.len() > 1 {
         let first_arg = &args[1];
-        let known_cmds = ["extract", "pack", "list", "batch", "--convert", "--extract-all", "--extract-all-near", "--extract-here"];
+        let known_cmds = ["extract", "pack", "list", "batch", "convert", "full-sequence", "mod", "--convert", "--extract-all", "--extract-all-near", "--extract-here"];
 
         let is_explicit_cli = known_cmds.contains(&first_arg.as_str()) || (first_arg.starts_with('-') && !Path::new(first_arg).exists() && first_arg != "--gui" && first_arg != "--full" && first_arg != "--minimized");
 
@@ -347,7 +347,7 @@ fn run_cli_logic() -> Result<()> {
             Command::new("extract")
                 .about("Extract archive")
                 .arg(Arg::new("input").short('i').long("input").value_name("PACK_NAME").required(true))
-                .arg(Arg::new("output").short('o').long("output").value_name("FOLDER").required(true))
+                .arg(Arg::new("output").short('o').long("output").value_name("FOLDER").help("Output folder (default: the archive name, in the current folder)"))
                 .arg(Arg::new("key").short('k').long("key").value_name("KEY_SALT"))
                 .arg(Arg::new("filter").short('f').long("filter").value_name("FILTER").action(ArgAction::Append))
                 .arg(Arg::new("check_additional").short('c').long("check_additional").action(ArgAction::SetTrue))
@@ -371,6 +371,7 @@ fn run_cli_logic() -> Result<()> {
                 .arg(Arg::new("jobs").short('j').long("jobs").value_name("N").default_value("1")
                     .help("Archives to extract in parallel (0 = auto: 2x CPU cores)"))
         )
+        .subcommands(mabi_pack2::archive_cli::commands())
         .arg(Arg::new("convert").long("convert").value_name("FILE"))
         .arg(Arg::new("extract-all-near").long("extract-all-near").value_name("FILE"))
         .arg(Arg::new("extract-here").long("extract-here").value_name("FILE"))
@@ -464,7 +465,9 @@ fn run_cli_logic() -> Result<()> {
 
     if let Some(sub_matches) = matches.subcommand_matches("extract") {
         let input = sub_matches.get_one::<String>("input").unwrap();
-        let output = sub_matches.get_one::<String>("output").unwrap();
+        // Same default as the standalone CLI: a folder named after the archive.
+        let default_out = Path::new(input).file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let output = sub_matches.get_one::<String>("output").unwrap_or(&default_out);
         let key = sub_matches.get_one::<String>("key").cloned();
         info!("[CLI] Subcommand 'extract': Input={}, Output={}", input, output);
         if input.to_lowercase().ends_with(".pack") {
@@ -532,6 +535,10 @@ fn run_cli_logic() -> Result<()> {
             .map(|n| if n == 0 { std::thread::available_parallelism().map(|n| n.get() * 2).unwrap_or(8) } else { n })
             .unwrap_or(1);
         return mabi_pack2::common_ext::run_batch_extract(input, output, key, no_merge, filters, jobs);
+    }
+
+    if let Some((name, sub)) = matches.subcommand().filter(|(n, _)| mabi_pack2::archive_cli::NAMES.contains(n)) {
+        return mabi_pack2::archive_cli::run(name, sub);
     }
 
     warn!("[CLI] No valid subcommand provided. Use --help for usage.");

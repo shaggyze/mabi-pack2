@@ -1,4 +1,5 @@
 pub mod api;
+pub mod archive_cli;
 pub mod area;
 pub mod common;
 pub mod launcher;

@@ -7,8 +7,9 @@ the Nexon launcher and patcher, the REST server and the MCP server.
 mabi-patcher [-v...] <command> [options]
 ```
 
-Sources: `src/bin/mabi-pack-cli.rs` (archive commands, `serve`, `mod`,
-`mcp`), `src/launcher/cli.rs` (launcher commands), `src/launcher/config.rs`
+Sources: `src/bin/mabi-pack-cli.rs` (archive commands, `serve`,
+`mcp`), `src/archive_cli.rs` (`convert`, `full-sequence`, `mod`),
+`src/launcher/cli.rs` (launcher commands), `src/launcher/config.rs`
 (`config`).
 
 ---
@@ -525,14 +526,17 @@ commands:
 - `serve [--host HOST] [-p PORT]`, which runs the REST API and web UI
   without a window (`api::serve_from_args`), with the same rules as the CLI
   `serve`.
-- A small archive CLI with its own flags:
+- The archive commands, with the same flags as above, except where the
+  table notes a difference. `convert`, `full-sequence` and `mod` come from
+  `src/archive_cli.rs`, which both binaries use.
 
 | Command | Notes |
 |---|---|
-| `extract -i ARCHIVE -o FOLDER [-k SALT] [-f REGEX]...` | `-o` is required here. `.pack` input is extracted without filters. |
-| `pack -i FOLDER -o OUTPUT [-k SALT] [--wrap-data] [-f EXT]... [--pack-version N]` | `-k` is required for `.it`. `--pack-version` (default `999`) is the version written into a `.pack` header. `--auto-dds` and `--additional_data` are accepted but have no effect. |
+| `extract -i ARCHIVE [-o FOLDER] [-k SALT] [-f REGEX]...` | `.pack` input is extracted without filters. |
+| `pack -i FOLDER -o OUTPUT ...` | Same `.it` flags as the CLI `pack`, including `--template`, `--entries-key`, `--encrypt-files` and `--confirm-native-name`. `--pack-version` (default `999`) is the version written into a `.pack` header. `--auto-dds` and `--additional_data` are accepted but have no effect. |
 | `list -i ARCHIVE [-k SALT] [-o FILE]` | |
-| `batch ...` | Same flags as the CLI `batch`. |
+| `batch ...` | |
+| `convert`, `full-sequence`, `mod inspect\|template\|list` | |
 | `--convert FILE` | Convert `FILE` from `.it` to `.pack` or the other way, next to the original. |
 | `--extract-here FILE` | Extract `FILE` into a folder named after it. |
 | `--extract-all-near FILE` | Extract every `.it`/`.pack` in `FILE`'s folder. |

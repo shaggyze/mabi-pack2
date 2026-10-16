@@ -13,7 +13,7 @@ use simplelog::{CombinedLogger, WriteLogger, TermLogger, LevelFilter, ConfigBuil
 use log::{debug, info};
 
 // Correct library name from Cargo.toml
-use mabi_pack2::{api, load_salts, extract, list, mod_file, pack};
+use mabi_pack2::{api, archive_cli, load_salts, extract, list, pack};
 use mabi_pack2::launcher::{cli as launcher_cli, launch};
 
 #[cfg(windows)]
@@ -132,20 +132,6 @@ fn main() -> Result<()> {
                 .arg(Arg::new("output").short('o').long("output").value_name("LIST_FILE_NAME").help("Output to file (optional)").required(false))
         )
         .subcommand(
-            Command::new("convert")
-                .about("Convert between .it and .pack formats.")
-                .arg(Arg::new("input").short('i').long("input").value_name("INPUT").help("Source archive path").required(true))
-                .arg(Arg::new("output").short('o').long("output").value_name("OUTPUT").help("Destination archive path").required(true))
-                .arg(Arg::new("key").short('k').long("key").value_name("KEY").help("Key for .it archives").required(false))
-        )
-        .subcommand(
-            Command::new("full-sequence")
-                .about("Extract all archives in a folder in order and pack into one.")
-                .arg(Arg::new("input").short('i').long("input").value_name("FOLDER").help("Folder containing multiple archives").required(true))
-                .arg(Arg::new("output").short('o').long("output").value_name("ALL_DATA.IT").help("Output single archive path").required(true))
-                .arg(Arg::new("key").short('k').long("key").value_name("KEY").help("Specific salt for the final .it").required(false))
-        )
-        .subcommand(
             Command::new("mcp")
                 .about("Run the built-in MCP server on stdio (for Claude and other AI clients)")
         )
@@ -168,24 +154,7 @@ fn main() -> Result<()> {
                         .default_value("127.0.0.1")
                 )
         )
-        .subcommand(
-            Command::new("mod")
-                .about("Work with .mod instruction files")
-                .subcommand(
-                    Command::new("inspect")
-                        .about("Parse and display a .mod file")
-                        .arg(Arg::new("file").short('f').long("file").value_name("MOD_FILE").help(".mod file to inspect").required(true))
-                )
-                .subcommand(
-                    Command::new("template")
-                        .about("Print a blank .mod template to stdout")
-                )
-                .subcommand(
-                    Command::new("list")
-                        .about("List .mod files in a directory")
-                        .arg(Arg::new("dir").short('d').long("dir").value_name("DIR").help("Directory to scan (default: mods/)").default_value("mods"))
-                )
-        )
+        .subcommands(archive_cli::commands())
         .subcommands(launcher_cli::commands())
         .subcommand(
             Command::new("batch")
@@ -314,16 +283,8 @@ fn main() -> Result<()> {
                 None
             )?;
         }
-    } else if let Some(sub_matches) = matches.subcommand_matches("convert") {
-        let input = sub_matches.get_one::<String>("input").unwrap();
-        let output = sub_matches.get_one::<String>("output").unwrap();
-        let key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
-        mabi_pack2::common_ext::convert(input, output, key, true)?;
-    } else if let Some(sub_matches) = matches.subcommand_matches("full-sequence") {
-        let input = sub_matches.get_one::<String>("input").unwrap();
-        let output = sub_matches.get_one::<String>("output").unwrap();
-        let key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
-        mabi_pack2::common_ext::run_full_sequence(input, output, key)?;
+    } else if let Some((name, sub)) = matches.subcommand().filter(|(n, _)| archive_cli::NAMES.contains(n)) {
+        archive_cli::run(name, sub)?;
     } else if let Some(sub_matches) = matches.subcommand_matches("batch") {
         let input = sub_matches.get_one::<String>("input").unwrap();
         let output = sub_matches.get_one::<String>("output").unwrap();
@@ -466,29 +427,6 @@ fn main() -> Result<()> {
             ctrlc_handler(move || { stop2.store(true, std::sync::atomic::Ordering::Relaxed); });
         }
         api::run_server(host, port, stop)?;
-    } else if let Some(sub) = matches.subcommand_matches("mod") {
-        if let Some(ins) = sub.subcommand_matches("inspect") {
-            let path = std::path::Path::new(ins.get_one::<String>("file").unwrap());
-            match mod_file::ModPackage::load(path) {
-                Ok(pkg) => println!("{}", serde_json::to_string_pretty(&pkg).unwrap_or_default()),
-                Err(e)  => { eprintln!("Error: {}", e); std::process::exit(1); }
-            }
-        } else if sub.subcommand_matches("template").is_some() {
-            print!("{}", mod_file::template());
-        } else if let Some(ls) = sub.subcommand_matches("list") {
-            let dir = std::path::Path::new(ls.get_one::<String>("dir").unwrap());
-            let mods = mod_file::scan_mods(dir);
-            if mods.is_empty() {
-                println!("No .mod files found in {}", dir.display());
-            } else {
-                for (path, result) in mods {
-                    match result {
-                        Ok(p)  => println!("[OK]  {}  — {} v{}", path.display(), p.meta.name, p.meta.version.as_deref().unwrap_or("?")),
-                        Err(e) => println!("[ERR] {} — {}", path.display(), e),
-                    }
-                }
-            }
-        }
     } else if let Some((name, sub)) = matches.subcommand().filter(|(n, _)| launcher_cli::NAMES.contains(n)) {
         let code = match launcher_cli::run(name, sub) {
             Ok(code) => code,
