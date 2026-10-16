@@ -1,71 +1,50 @@
-# Rust
-/target
+# The repo tracks source, build files and docs only.
 
-# Tauri
-/gui/src-tauri/target
-/gui/src-tauri/gen
-/gui/dist
-/gui/node_modules
+# Build output
+/target/
+/release/
+/nxl3p-shim/target/
+/gui/node_modules/
+/gui/dist/
+/gui/src-tauri/target/
+/gui/src-tauri/gen/
+*.exe
+*.msi
+*.pdb
 
-# Logs
+# Files the exe writes next to itself
 *.log
 log.txt
 out.txt
-GEMINI.md
+output.csv
+/state/
+
+# Local agent, editor and hook files
 CLAUDE.md
-
-# OS / IDE
-.idea
-.vscode
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Agent / Temp
-.gemini
+GEMINI.md
 .claude/
-.agents
+.gemini/
+.agents/
 .clinerules
-.cursor
-.windsurf
+.cursor/
+.windsurf/
+.idea/
+.vscode/
+.githooks/
+/.github/copilot-instructions.md
+/.private_backup_diff/
 skills-lock.json
 
-# Private, never push
-/.private_backup_diff
-
-# Generated / temp
-output.csv
-*.bak
-*_bak
+# Scratch and local tooling
 *.bak*
-build_log.txt
-*.zip
-
-# Scratch / diagnostics
-examples/
-*test*
-# keep real test sources
-!/tests/
-!/tests/*
-
-# Binaries
-*.exe
-*.pdb
-*.msi
-# nxl3p shim build output
-/nxl3p-shim/target
+*_bak
 __pycache__/
-
-# Local tooling only: the repo holds what is needed to build.
-.githooks/
-.github/copilot-instructions.md
+test_*.rs
+/examples/
 /scripts/
 /set-version.bat
-*.zip
 /gui/test_locales*.mjs
+
 # Mobile icons: the desktop build uses only the icons tauri.conf.json lists.
 /gui/src-tauri/icons/android/
 /gui/src-tauri/icons/ios/

@@ -217,11 +217,16 @@ See the [CLI reference](docs/CLI.md#pack) for all commands and flags.
 
 ### Windows packing helper
 
-`pack-data.bat` ships in the `mabi-pack2_batches.zip` helper bundle, not in
-this repository. It was written by [Root50199](https://github.com/Root50199)
-([#3](https://github.com/shaggyze/mabi-pack2/pull/3)). Put it beside
-`mabi-patcher.exe` 2.0.7 or newer, create a `data` folder there with the files
-to pack, run `pack-data.bat` and enter an archive name such as `mymod`.
+[`mabi-pack2_batches.zip`](mabi-pack2_batches.zip) in the repository root
+holds `mabi-patcher.exe`, `salts.txt` and the helper scripts:
+`pack-data.bat`, `MabiPack-data.bat`, the `MabiExtract*.bat` scripts and
+`Download_latest_mabi-patcher.bat`. The same zip is attached to each release.
+
+`pack-data.bat` was written by [Root50199](https://github.com/Root50199)
+([#3](https://github.com/shaggyze/mabi-pack2/pull/3)). Unzip the bundle, or put
+`pack-data.bat` beside `mabi-patcher.exe` 2.0.7 or newer. Create a `data`
+folder there with the files to pack, run `pack-data.bat` and enter an archive
+name such as `mymod`.
 
 The helper looks for the newest `data_#####.it` template in the standard
 Nexon package folder. If none is found, enter your package folder or an
