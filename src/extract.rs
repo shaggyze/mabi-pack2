@@ -77,6 +77,12 @@ pub fn extract_single_file_to_memory(
             Ok(decompressed)
         }
     } else {
+        if content.len() > ent.original_size as usize
+            && ent.flags & (FLAG_ALL_ENCRYPTED | FLAG_HEAD_ENCRYPTED) != 0 {
+            anyhow::ensure!(content.len() - ent.original_size as usize <= 3,
+                "Invalid uncompressed padding for '{}'", ent.name);
+            content.truncate(ent.original_size as usize);
+        }
         Ok(content)
     }
 }
@@ -129,6 +135,12 @@ fn extract_file<R: Read + Seek>(
             }
         }
     } else {
+        if content.len() > ent.original_size as usize
+            && ent.flags & (FLAG_ALL_ENCRYPTED | FLAG_HEAD_ENCRYPTED) != 0 {
+            anyhow::ensure!(content.len() - ent.original_size as usize <= 3,
+                "Invalid uncompressed padding for '{}'", ent.name);
+            content.truncate(ent.original_size as usize);
+        }
         content
     };
 

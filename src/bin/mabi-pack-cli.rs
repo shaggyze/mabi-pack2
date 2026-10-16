@@ -80,7 +80,11 @@ fn main() -> Result<()> {
                 .about("Create a .it pack")
                 .arg(Arg::new("input").short('i').long("input").value_name("FOLDER").help("Set the input folder to pack").required(true))
                 .arg(Arg::new("output").short('o').long("output").value_name("PACK_NAME").help("Set the output .it file name").required(true))
-                .arg(Arg::new("key").short('k').long("key").value_name("KEY_SALT").help("Set the key for the .it file encryption").required(true))
+                .arg(Arg::new("key").short('k').long("key").value_name("KEY_SALT").help("Header salt (also used for entries unless overridden)").required_unless_present("template"))
+                .arg(Arg::new("entries-key").long("entries-key").value_name("SALT").help("Separate entries-table salt").conflicts_with("template"))
+                .arg(Arg::new("template").long("template").value_name("ORIGINAL.IT").help("Copy salts, cipher, IV and per-file settings from an original .it archive"))
+                .arg(Arg::new("encrypt-files").long("encrypt-files").action(ArgAction::SetTrue).help("Encrypt file payloads as well as metadata").conflicts_with("template"))
+                .arg(Arg::new("confirm-native-name").long("confirm-native-name").action(ArgAction::SetTrue).help("Confirm data_#####.it naming despite possible load order errors and game-update conflicts"))
                 .arg(
                     Arg::new("iv")
                         .long("iv")
@@ -288,17 +292,25 @@ fn main() -> Result<()> {
             info!("[CLI] Creating legacy .pack archive: {}", output);
             mabi_pack2::pack_v1::run_pack_v1(input, output, 1)?;
         } else {
-            let iv = sub_matches.get_one::<String>("iv").and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let iv = sub_matches.get_one::<String>("iv").unwrap().parse::<u32>()?;
             let wrap = sub_matches.get_flag("wrap-data");
             let path_prefix = if wrap { Some("data") } else { None };
-            pack::run_pack(
+            let options = pack::PackOptions {
+                entries_key: sub_matches.get_one::<String>("entries-key").cloned(),
+                template_archive: sub_matches.get_one::<String>("template").cloned(),
+                encrypt_files: if sub_matches.get_flag("encrypt-files") { Some(true) } else { None },
+                confirm_native_name: sub_matches.get_flag("confirm-native-name"),
+            };
+            pack::validate_pack_request(input, output, path_prefix, options.confirm_native_name)?;
+            pack::run_pack_with_options(
                 input,
                 output,
-                sub_matches.get_one::<String>("key").expect("Key required"),
+                sub_matches.get_one::<String>("key").map(String::as_str).unwrap_or(""),
                 sub_matches.get_many::<String>("compress-format").map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
                 false,
                 iv,
                 path_prefix,
+                &options,
                 None
             )?;
         }
@@ -507,5 +519,3 @@ fn ctrlc_handler(f: impl Fn() + Send + 'static) {
         f();
     });
 }
-
-

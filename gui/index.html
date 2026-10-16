@@ -333,6 +333,7 @@
 
       <!-- Pack Tab -->
       <div id="pack" class="tab-content">
+        <div class="pack-fields">
         <div class="form-group">
           <label id="label_source">Source Folder:</label>
           <div class="input-row">
@@ -348,11 +349,26 @@
           </div>
         </div>
         <div class="form-group">
+            <label id="label_pack_template">Original .it template (optional):</label>
+            <div class="input-row">
+                <input type="text" id="pack-template" />
+                <button class="tab-btn" id="btn-browse-pack-template" data-tooltip="tooltip_browse">BROWSE</button>
+            </div>
+            <small id="label_pack_template_help">Copies both salts, cipher/IV and matching files' compression/encryption. Leave blank for manual settings.</small>
+        </div>
+        <div class="form-group">
             <label id="label_pack_salt">Encryption Salt:</label>
             <div class="salt-combo-container">
                 <div class="input-row">
                   <input type="text" id="pack-key" value="})wWb4?-sVGHNoPKpc" autocomplete="off" />
                   <button id="btn-salt-history-pack" class="tab-btn icon-btn" data-tooltip="tooltip_salt_history">▼</button>
+                </div>
+                <div class="form-group">
+                    <label id="label_pack_entries_salt">Entries salt (blank = header salt):</label>
+                    <input type="text" id="pack-entries-key" autocomplete="off" />
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="pack-encrypt-files"> <span id="label_pack_encrypt_files">Encrypt file contents</span></label>
                 </div>
                 <div id="salt-list-pack" class="salt-list-wrapper" style="display:none"></div>
             </div>
@@ -370,6 +386,7 @@
 
         <div class="form-group">
             <label class="checkbox-label"><input type="checkbox" id="pack-auto-dds"> <span id="label_settings_auto_dds">Auto-convert .png to .dds on import</span></label>
+        </div>
         </div>
         <button id="pack-run" class="run-btn" data-tooltip="tooltip_pack_run">CREATE</button>
 
@@ -1200,15 +1217,3 @@
 >
 >
 >
-
-
-
-
-
-
-
-
-
-
-
-

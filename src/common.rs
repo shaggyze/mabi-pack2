@@ -230,6 +230,11 @@ pub fn find_header_only<RUND: Read + Seek>(rd: &mut RUND, fname: &str, skey: &st
 /// Like `read_meta_iv_mode` but decrypts the entries table with a separate salt.
 /// Supports archives where the header salt and entries salt differ.
 pub fn read_meta_iv_mode_two_key<RUND: Read + Seek>(fname: &str, header_skey: &str, entries_skey: &str, rd: &mut RUND, header_offset: u64, iv0: u32, mode: encryption::Snow2Mode) -> Result<(FileHeader, Vec<FileEntry>, u64), Error> {
+    let (header, entries, content_offset, _) = read_meta_layout_two_key(fname, header_skey, entries_skey, rd, header_offset, iv0, mode)?;
+    Ok((header, entries, content_offset))
+}
+
+pub fn read_meta_layout_two_key<RUND: Read + Seek>(fname: &str, header_skey: &str, entries_skey: &str, rd: &mut RUND, header_offset: u64, iv0: u32, mode: encryption::Snow2Mode) -> Result<(FileHeader, Vec<FileEntry>, u64, u64), Error> {
     let header = try_read_and_validate_header_iv(rd, fname, header_skey, header_offset, iv0, mode)?.map(|(h, _)| h).ok_or_else(|| Error::msg("Header validation failed"))?;
     let e_key = encryption::gen_entries_key(fname, entries_skey);
     let e_off_gen = encryption::gen_entries_offset(fname) as u64;
@@ -253,7 +258,7 @@ pub fn read_meta_iv_mode_two_key<RUND: Read + Seek>(fname: &str, header_skey: &s
         }
         if success && !entries.is_empty() && validate_entries(&entries).is_ok() {
             let pos = rd.stream_position().unwrap_or(0);
-            return Ok((header, entries, (pos + 1023) & !1023u64));
+            return Ok((header, entries, (pos + 1023) & !1023u64, off));
         }
     }
     Err(Error::msg("Failed entries"))

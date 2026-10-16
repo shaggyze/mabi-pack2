@@ -206,8 +206,16 @@ fn handle_pack(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         Some(s) => s.to_string(),
         None => return err("'output' is required", 400),
     };
+    let options: crate::pack::PackOptions = match body.get("pack_options") {
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(options) => options,
+            Err(e) => return err(&format!("Invalid 'pack_options': {}", e), 400),
+        },
+        None => crate::pack::PackOptions::default(),
+    };
     let key = match body["key"].as_str() {
         Some(s) => s.to_string(),
+        None if options.template_archive.is_some() => String::new(),
         None => return err("'key' is required", 400),
     };
 
@@ -236,7 +244,15 @@ fn handle_pack(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         .map(String::from)
         .or_else(|| if wrap_data { Some("data".to_string()) } else { None });
 
-    match crate::pack::run_pack(&source, &output, &key, fmts, auto_dds, iv, prefix.as_deref(), None) {
+    let (source, prefix) = if body["resolve_gui_source"].as_bool().unwrap_or(false) {
+        crate::pack::resolve_gui_pack_source(&source, prefix)
+    } else {
+        (source, prefix)
+    };
+    if let Err(e) = crate::pack::validate_pack_request(&source, &output, prefix.as_deref(), options.confirm_native_name) {
+        return err(&e.to_string(), 400);
+    }
+    match crate::pack::run_pack_with_options(&source, &output, &key, fmts, auto_dds, iv, prefix.as_deref(), &options, None) {
         Ok(_)  => ok(json!({ "source": source, "output": output, "format": "it" })),
         Err(e) => err(&e.to_string(), 500),
     }
@@ -2013,8 +2029,6 @@ pub fn spawn(port: u16) -> Arc<AtomicBool> {
 pub struct ServeArgs {
     pub port: u16,
 }
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

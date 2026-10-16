@@ -53,17 +53,34 @@ skipped), so nothing is written outside the output folder.
 Build an archive from a folder.
 
 ```
-mabi-patcher pack -i FOLDER -o OUTPUT -k SALT [--iv 0|1] [-f EXT]... [--wrap-data]
+mabi-patcher pack -i FOLDER -o OUTPUT [-k SALT] [--entries-key SALT] [--template ORIGINAL.IT]
+  [--encrypt-files] [--confirm-native-name] [--iv 0|1] [-f EXT]... [--wrap-data]
 ```
 
 | Option | Description |
 |---|---|
 | `-i`, `--input FOLDER` | **Required.** Folder to pack. |
 | `-o`, `--output PACK_NAME` | **Required.** Output file. A name ending in `.pack` writes a legacy MABI `.pack` (version 1); anything else writes a `.it`. |
-| `-k`, `--key SALT` | **Required** (even for `.pack`, where it is not used). Salt for the `.it` header and entry table. |
-| `--iv IV` | Snow2 initial vector, `0` or `1`. Default `0`. |
-| `-f`, `--compress-format EXT` | Also compress files ending in `EXT` (repeatable). The match is a plain "ends with" that ignores case, so pass the dot: `-f .lua`. `.txt .xml .dds .pmg .set .raw` are always compressed. |
-| `--wrap-data` | Store every entry under a virtual `data\` folder. |
+| `-k`, `--key SALT` | Header salt; also used for the entries table unless `--entries-key` is set. Required for manual `.it` packing and by the CLI parser for `.pack`; ignored by the legacy `.pack` writer. Optional with `--template`. |
+| `--entries-key SALT` | Separate entries-table salt. Conflicts with `--template`. |
+| `--template ORIGINAL.IT` | Read salts, cipher, IV, version, metadata layout and per-file settings from an original modern `.it`. Cannot be combined with `--entries-key` or `--encrypt-files`; template settings override manual salts, IV and compression options. The output cannot overwrite the template. |
+| `--encrypt-files` | Encrypt file payloads as well as metadata. Off by default. Conflicts with `--template`. |
+| `--confirm-native-name` | Confirm output names matching `data_#####.it`; they can cause load-order errors or conflict with game updates. |
+| `--iv IV` | Snow2 initial vector, `0` or `1`. Default `0`; ignored with `--template`. |
+| `-f`, `--compress-format EXT` | Also compress files ending in `EXT` (repeatable). Matching ignores case; pass the dot, such as `-f .lua`. `.txt .xml .dds .pmg .set .raw` are always compressed. |
+| `--wrap-data` | Store every entry under a virtual `data\` folder. Do not use if the source already contains a `data` root. |
+
+Manual packing leaves payloads unencrypted unless `--encrypt-files` is set.
+With a template, matching paths keep their stored file keys and flags; new
+files use the template's most common flags and receive a content-derived key
+when encrypted. Automatic PNG-to-DDS conversion is available in the GUI, not
+the CLI.
+
+Modern `.it` packing requires an output basename that starts with a lowercase
+ASCII letter, uses only ASCII letters, digits, `_` or `-`, has a lowercase
+`.it` extension and sorts after `data` (case-insensitive). All entries must be
+under a non-empty `data` directory, either already present in the source or
+added with `--wrap-data`.
 
 Before anything is written, every entry name is checked
 (`common::validate_entry_path`): it must be a safe relative path, at most

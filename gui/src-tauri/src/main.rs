@@ -332,6 +332,11 @@ fn run_cli_logic() -> Result<()> {
                 .arg(Arg::new("input").short('i').long("input").value_name("FOLDER").required(true))
                 .arg(Arg::new("output").short('o').long("output").value_name("PACK_NAME").required(true))
                 .arg(Arg::new("key").short('k').long("key").value_name("KEY_SALT"))
+                .arg(Arg::new("entries-key").long("entries-key").value_name("SALT").help("Separate entries-table salt").conflicts_with("template"))
+                .arg(Arg::new("template").long("template").value_name("ORIGINAL.IT").help("Copy salts, cipher, IV and per-file settings from an original .it archive"))
+                .arg(Arg::new("encrypt-files").long("encrypt-files").action(ArgAction::SetTrue).help("Encrypt file payloads as well as metadata").conflicts_with("template"))
+                .arg(Arg::new("confirm-native-name").long("confirm-native-name").action(ArgAction::SetTrue).help("Confirm data_#####.it naming despite possible load order errors and game-update conflicts"))
+                .arg(Arg::new("iv").long("iv").value_name("IV").default_value("0"))
                 .arg(Arg::new("auto-dds").long("auto-dds").action(ArgAction::SetTrue))
                 .arg(Arg::new("pack-version").long("pack-version").value_name("VERSION").default_value("999"))
                 .arg(Arg::new("additional_data").long("additional_data").action(ArgAction::SetTrue))
@@ -481,12 +486,22 @@ fn run_cli_logic() -> Result<()> {
             debug!("[CLI] Packing legacy v1 with version header {}.", ver);
             return pack_v1::run_pack_v1(input, output, ver);
         } else {
-            let key = sub_matches.get_one::<String>("key").expect("Key required for .it");
+            let template_archive = sub_matches.get_one::<String>("template").cloned();
+            let key = sub_matches.get_one::<String>("key").map(String::as_str).unwrap_or("");
+            anyhow::ensure!(!key.is_empty() || template_archive.is_some(), "A header salt or --template is required for .it packing");
+            let options = pack::PackOptions {
+                entries_key: sub_matches.get_one::<String>("entries-key").cloned(),
+                template_archive,
+                encrypt_files: if sub_matches.get_flag("encrypt-files") { Some(true) } else { None },
+                confirm_native_name: sub_matches.get_flag("confirm-native-name"),
+            };
+            let iv = sub_matches.get_one::<String>("iv").unwrap().parse::<u32>()?;
             let filters: Vec<&str> = sub_matches.get_many::<String>("compress-format").map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect());
             debug!("[CLI] Packing modern .it with key {} and {} compression overrides.", key, filters.len());
             let wrap = sub_matches.get_flag("wrap-data");
             let path_prefix = if wrap { Some("data") } else { None };
-            return pack::run_pack(input, output, key, filters, false, 0, path_prefix, None);
+            pack::validate_pack_request(input, output, path_prefix, options.confirm_native_name)?;
+            return pack::run_pack_with_options(input, output, key, filters, false, iv, path_prefix, &options, None);
         }
     }
 

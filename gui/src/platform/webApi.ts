@@ -123,6 +123,8 @@ export async function webInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
         iv: args.iv,
         path_prefix: args.pathPrefix,
         wrap_data: args.wrapData,
+        resolve_gui_source: true,
+        pack_options: args.options,
       });
     case "list_pack_contents":
       return apiFetch<T>("POST", "/api/v1/list", { archive: args.input, key: args.key });
