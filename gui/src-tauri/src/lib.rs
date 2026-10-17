@@ -316,6 +316,10 @@ struct Config {
     #[serde(default)]
 
     patcher_auto_update: bool,
+    #[serde(default = "default_true")]
+    patcher_check_on_start: bool,
+    #[serde(default = "default_true")]
+    patcher_focus_while_patching: bool,
 
     #[serde(default)]
 
@@ -463,6 +467,8 @@ impl Default for Config {
 
             patcher_hyddwn_url: default_hyddwn_url(),
             patcher_auto_update: false,
+            patcher_check_on_start: true,
+            patcher_focus_while_patching: true,
 
             patcher_focus_on_start: false,
 
@@ -4568,6 +4574,11 @@ const NEXON_LOGIN_INIT_JS: &str = r#"(function () {
       });
     setCookie("arenaSid", id);
   }
+  // Social (Google, etc.) login in launcher mode calls window.openExternal(url) and then
+  // polls Nexon until the system browser finishes. window.open goes to on_new_window.
+  if (typeof window.openExternal !== "function") {
+    window.openExternal = function (u) { window.open(String(u), "_blank"); };
+  }
   function wanted(u) {
     u = String(u || "");
     return u.indexOf("no-auth/login") >= 0 || u.indexOf("regional-auth") >= 0 || u.indexOf("passport") >= 0;
@@ -4634,6 +4645,21 @@ async fn nexon_login_webview(
         .resizable(true)
         .user_agent(auth::USER_AGENT)
         .initialization_script(NEXON_LOGIN_INIT_JS)
+        // Social login and support links open in the default browser; the login
+        // page keeps polling Nexon and finishes in this window.
+        .on_new_window({
+            let app = app.clone();
+            move |url, _| {
+                use tauri_plugin_opener::OpenerExt;
+                if matches!(url.scheme(), "http" | "https") {
+                    log::info!("[Launcher] Opening {} in the default browser", url.host_str().unwrap_or(""));
+                    if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
+                        log::warn!("[Launcher] Could not open the browser: {}", e);
+                    }
+                }
+                tauri::webview::NewWindowResponse::Deny
+            }
+        })
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -5965,34 +5991,13 @@ fn get_mabi_version_remote() -> Result<serde_json::Value, String> {
 
     let url = "https://www.nexon.com/api/game-build/v1/branch/games/10200/public";
 
-    let ps_script = format!(
-
-        "try {{ $r = Invoke-RestMethod -Uri '{}' -TimeoutSec 10; ConvertTo-Json $r -Depth 3 -Compress }} catch {{ Write-Error $_.Exception.Message }}",
-
-        url
-
-    );
-
-    let output = std::process::Command::new("powershell")
-
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-
-        .output()
-
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-
-        return Err(format!("HTTP error: {}", err));
-
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-
-    let body: serde_json::Value = serde_json::from_str(stdout.trim())
-
+    let body = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("HTTP error: {}", e))?
+        .into_string()
+        .map_err(|e| format!("HTTP error: {}", e))?;
+    let body: serde_json::Value = serde_json::from_str(body.trim())
         .map_err(|e| format!("Parse error: {}", e))?;
 
     let manifest_url = body.get("manifestUrl")
@@ -6087,20 +6092,11 @@ fn get_mabi_version_from_launcher_cache() -> Result<serde_json::Value, String> {
 
         };
 
-        let cdn_cmd = "try{(Invoke-WebRequest -Uri 'http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash' -TimeoutSec 8 -UseBasicParsing).Content.Trim()}catch{''}";
-
-        let cdn_out = std::process::Command::new("powershell")
-
-            .args(["-NoProfile", "-NonInteractive", "-Command", cdn_cmd])
-
-            .output().ok();
-
-        let cdn_hash: Option<String> = cdn_out
-
-            .filter(|o| o.status.success())
-
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-
+        let cdn_hash: Option<String> = ureq::get("http://download2.nexon.net/Game/nxl/games/10200/10200.manifest.hash")
+            .timeout(std::time::Duration::from_secs(8))
+            .call().ok()
+            .and_then(|r| r.into_string().ok())
+            .map(|s| s.trim().to_string())
             .filter(|s| s.len() == 40);
 
         let update_available = match (&local_manifest_hash, &cdn_hash) {
@@ -7208,7 +7204,9 @@ fn get_managed_version(buildtime: i64) -> Option<i64> {
         .send_string(&body)
         .ok()?;
     let text = resp.into_string().ok()?;
-    text.trim().parse::<i64>().ok()
+    // A buildtime the site has not registered yet comes back negative (its estimate
+    // of the next version, e.g. -514): show the number.
+    text.trim().parse::<i64>().ok().map(i64::abs)
 }
 
 #[tauri::command]
@@ -7370,10 +7368,12 @@ fn cleanup_old_app_exe() {
     });
 }
 
-fn download_and_swap_app(current: &str) -> Result<(String, std::path::PathBuf), String> {
+/// Returns None when this exe is already the latest release: nothing is downloaded.
+fn download_and_swap_app(current: &str) -> Result<Option<(String, std::path::PathBuf)>, String> {
     let info = fetch_app_update_info(current)?;
     if !info.newer {
-        return Err(format!("{} is already the latest version", current));
+        log::info!("[UPDATE] {} is already the latest version, skipping the download", current);
+        return Ok(None);
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("exe has no folder")?.to_path_buf();
@@ -7427,18 +7427,22 @@ fn download_and_swap_app(current: &str) -> Result<(String, std::path::PathBuf), 
         return Err(fail(format!("cannot move the new exe into place: {}", e)));
     }
     log::info!("[UPDATE] Installed mabi-patcher {} ({} bytes)", info.latest, size);
-    Ok((info.latest, exe))
+    Ok(Some((info.latest, exe)))
 }
 
 /// Downloads the latest mabi-patcher.exe, swaps it in and restarts the app.
+/// Returns the installed version, or None when this exe is already the latest.
 #[tauri::command]
-async fn install_app_update(app: tauri::AppHandle) -> Result<String, String> {
+async fn install_app_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let current = app.package_info().version.to_string();
     // The exe path comes from before the swap: after a rename Windows may report
     // the running image under its new .old name.
-    let (latest, exe) = tauri::async_runtime::spawn_blocking(move || download_and_swap_app(&current))
+    let Some((latest, exe)) = tauri::async_runtime::spawn_blocking(move || download_and_swap_app(&current))
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())??
+    else {
+        return Ok(None);
+    };
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -7447,7 +7451,7 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<String, String> {
             Err(e) => log::error!("[UPDATE] Restart failed, start {} by hand: {}", exe.display(), e),
         }
     });
-    Ok(latest)
+    Ok(Some(latest))
 }
 
 // ── Elevated drag-and-drop (WM_DROPFILES) ────────────────────────────────────
@@ -7463,54 +7467,222 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<String, String> {
 // inside the page depends on the removed targets.
 #[cfg(windows)]
 mod elevated_drop {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
     use tauri::{Emitter, Manager};
     use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, LRESULT, TRUE, UINT, WPARAM};
-    use winapi::shared::windef::{HWND, POINT};
+    use winapi::shared::windef::{HWND, POINT, RECT};
+    use winapi::um::libloaderapi::GetModuleHandleW;
     use winapi::um::ole2::RevokeDragDrop;
     use winapi::um::processthreadsapi::GetCurrentProcessId;
     use winapi::um::shellapi::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
+    use winapi::um::sysinfoapi::GetTickCount;
     use winapi::um::winuser::{
-        CallWindowProcW, ChangeWindowMessageFilterEx, EnumChildWindows, GetPropW,
-        GetWindowThreadProcessId, RemovePropW, SetWindowLongPtrW, GWLP_WNDPROC,
-        WM_COPYDATA, WM_DROPFILES, WNDPROC,
+        CallWindowProcW, ChangeWindowMessageFilterEx, ClientToScreen, CreateWindowExW, DefWindowProcW,
+        EnumChildWindows, GetAncestor, GetAsyncKeyState, GetClientRect, GetCursorPos, GetPropW,
+        GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, RegisterClassW, RemovePropW,
+        SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
+        GA_ROOT, GWLP_WNDPROC, HWND_TOP, LWA_ALPHA, MA_NOACTIVATE, SM_SWAPBUTTON, SWP_NOACTIVATE,
+        SWP_SHOWWINDOW, SW_HIDE, VK_LBUTTON, VK_RBUTTON, WM_COPYDATA, WM_DROPFILES, WM_ERASEBKGND,
+        WM_MOUSEACTIVATE, WM_TIMER, WNDCLASSW, WNDPROC, WS_EX_ACCEPTFILES, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     };
-
     const WM_COPYGLOBALDATA: UINT = 0x0049;
     const MSGFLT_ALLOW: DWORD = 1;
     const STRIP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-    static OLD_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+    static OLD_PROC: AtomicIsize = AtomicIsize::new(0);
     static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// Emits tauri://drag-drop for an HDROP; `pt` is in main-window client pixels.
+    unsafe fn emit_drop(hdrop: HDROP) {
+        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
+            let mut buf = vec![0u16; len as usize + 1];
+            DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as UINT);
+            paths.push(String::from_utf16_lossy(&buf[..len as usize]));
+        }
+        let mut pt = POINT { x: 0, y: 0 };
+        DragQueryPoint(hdrop, &mut pt);
+        DragFinish(hdrop);
+        if let Some(app) = APP.get() {
+            log::info!("[DROP] WM_DROPFILES: {} file(s)", paths.len());
+            let _ = app.emit("tauri://drag-drop", serde_json::json!({
+                "paths": paths,
+                "position": { "x": pt.x, "y": pt.y },
+            }));
+        }
+    }
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if msg == WM_DROPFILES {
-            let hdrop = wp as HDROP;
-            let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
-            let mut paths = Vec::with_capacity(count as usize);
-            for i in 0..count {
-                let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
-                let mut buf = vec![0u16; len as usize + 1];
-                DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as UINT);
-                paths.push(String::from_utf16_lossy(&buf[..len as usize]));
-            }
-            let mut pt = POINT { x: 0, y: 0 };
-            DragQueryPoint(hdrop, &mut pt);
-            DragFinish(hdrop);
-            if let Some(app) = APP.get() {
-                log::info!("[DROP] WM_DROPFILES: {} file(s)", paths.len());
-                let _ = app.emit("tauri://drag-drop", serde_json::json!({
-                    "paths": paths,
-                    "position": { "x": pt.x, "y": pt.y },
-                }));
-            }
+            emit_drop(wp as HDROP);
             return 0;
         }
-        let old: WNDPROC = std::mem::transmute(OLD_PROC.load(std::sync::atomic::Ordering::Relaxed));
+        if msg == WM_TIMER && wp == POLL_TIMER {
+            poll_drag(hwnd);
+            return 0;
+        }
+        let old: WNDPROC = std::mem::transmute(OLD_PROC.load(Ordering::Relaxed));
         CallWindowProcW(old, hwnd, msg, wp, lp)
+    }
+
+    // ── Drop overlay ──────────────────────────────────────────────────────────
+    // Explorer drops through OLE onto the window under the cursor. Over the page
+    // that is a WebView2 window of msedgewebview2.exe, which cannot take a drop
+    // from a non-admin Explorer. While a drag that started outside this window is
+    // over it, an invisible popup of this process (alpha 1, WS_EX_ACCEPTFILES,
+    // message filter open) covers the client area, so OLE falls back to
+    // WM_DROPFILES on a window that accepts it.
+
+    const POLL_TIMER: usize = 0x4D50;
+    const POLL_MS: UINT = 50;
+    /// The overlay stays up this long after the button is released, so OLE's drop
+    /// (which follows the release) still lands on it.
+    const RELEASE_GRACE_MS: u32 = 300;
+    static OVERLAY: AtomicIsize = AtomicIsize::new(0);
+    static PREV_DOWN: AtomicBool = AtomicBool::new(false);
+    /// The button went down over this window: an in-app drag, never an overlay.
+    static ORIGIN_INSIDE: AtomicBool = AtomicBool::new(false);
+    static RELEASED_AT: AtomicU32 = AtomicU32::new(0);
+    static LAST_POS: AtomicIsize = AtomicIsize::new(-1);
+
+    unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_DROPFILES => {
+                hide_overlay(false);
+                emit_drop(wp as HDROP);
+                0
+            }
+            WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+            WM_ERASEBKGND => 1,
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+
+    unsafe fn create_overlay(frame: HWND) -> HWND {
+        let class = wide("mabi_patcher_drop_overlay");
+        let hinst = GetModuleHandleW(std::ptr::null());
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(overlay_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinst,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class.as_ptr(),
+        };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_ACCEPTFILES,
+            class.as_ptr(),
+            std::ptr::null(),
+            WS_POPUP,
+            0, 0, 1, 1,
+            frame, // owner: stays above the main window, never in the taskbar
+            std::ptr::null_mut(),
+            hinst,
+            std::ptr::null_mut(),
+        );
+        if hwnd.is_null() {
+            return hwnd;
+        }
+        // Alpha 1 of 255: invisible, but still hit by WindowFromPoint (alpha 0 is not).
+        SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
+        for m in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
+            ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, std::ptr::null_mut());
+        }
+        DragAcceptFiles(hwnd, TRUE);
+        hwnd
+    }
+
+    /// The main window's client area in screen coordinates.
+    unsafe fn client_screen_rect(frame: HWND) -> RECT {
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(frame, &mut r);
+        let mut tl = POINT { x: r.left, y: r.top };
+        let mut br = POINT { x: r.right, y: r.bottom };
+        ClientToScreen(frame, &mut tl);
+        ClientToScreen(frame, &mut br);
+        RECT { left: tl.x, top: tl.y, right: br.x, bottom: br.y }
+    }
+
+    unsafe fn hide_overlay(leave: bool) {
+        let overlay = OVERLAY.load(Ordering::Relaxed) as HWND;
+        if !overlay.is_null() && IsWindowVisible(overlay) != 0 {
+            ShowWindow(overlay, SW_HIDE);
+            LAST_POS.store(-1, Ordering::Relaxed);
+            if leave {
+                if let Some(app) = APP.get() {
+                    let _ = app.emit("tauri://drag-leave", serde_json::Value::Null);
+                }
+            }
+        }
+    }
+
+    /// Runs every POLL_MS on the main thread: shows the overlay while a drag that
+    /// began outside this window is over it, and hides it afterwards.
+    unsafe fn poll_drag(frame: HWND) {
+        let overlay = OVERLAY.load(Ordering::Relaxed) as HWND;
+        if overlay.is_null() {
+            return;
+        }
+        // GetAsyncKeyState reads the physical button; the drag button is the
+        // logical left one.
+        let vk = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        let down = (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+        let was_down = PREV_DOWN.swap(down, Ordering::Relaxed);
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        let under = WindowFromPoint(pt);
+        let over_us = under == overlay || (!under.is_null() && GetAncestor(under, GA_ROOT) == frame);
+        let r = client_screen_rect(frame);
+        let in_client = pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+
+        if !down {
+            if was_down {
+                RELEASED_AT.store(GetTickCount(), Ordering::Relaxed);
+            }
+            ORIGIN_INSIDE.store(false, Ordering::Relaxed);
+            if IsWindowVisible(overlay) != 0
+                && GetTickCount().wrapping_sub(RELEASED_AT.load(Ordering::Relaxed)) >= RELEASE_GRACE_MS
+            {
+                hide_overlay(true);
+            }
+            return;
+        }
+        if !was_down {
+            ORIGIN_INSIDE.store(over_us && under != overlay, Ordering::Relaxed);
+        }
+        if ORIGIN_INSIDE.load(Ordering::Relaxed) {
+            return;
+        }
+        if over_us && in_client {
+            if IsWindowVisible(overlay) == 0 {
+                SetWindowPos(
+                    overlay, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+            // The page highlights the folder under the cursor from drag-over.
+            let (x, y) = (pt.x - r.left, pt.y - r.top);
+            let packed = ((x as isize) << 32) | (y as u32 as isize);
+            if LAST_POS.swap(packed, Ordering::Relaxed) != packed {
+                if let Some(app) = APP.get() {
+                    let _ = app.emit("tauri://drag-over", serde_json::json!({ "position": { "x": x, "y": y } }));
+                }
+            }
+        } else {
+            hide_overlay(true);
+        }
     }
 
     /// Removes the OLE drop target from one window. Windows of this process are
@@ -7562,8 +7734,15 @@ mod elevated_drop {
             if old == 0 {
                 return Err("SetWindowLongPtrW failed".into());
             }
-            OLD_PROC.store(old, std::sync::atomic::Ordering::Relaxed);
+            OLD_PROC.store(old, Ordering::Relaxed);
             DragAcceptFiles(hwnd, 1);
+            let overlay = create_overlay(hwnd);
+            if overlay.is_null() {
+                log::warn!("[DROP] Could not create the drop overlay");
+            } else {
+                OVERLAY.store(overlay as isize, Ordering::Relaxed);
+                SetTimer(hwnd, POLL_TIMER, POLL_MS, None);
+            }
         }
         let frame = hwnd as isize;
         let handle = app.clone();

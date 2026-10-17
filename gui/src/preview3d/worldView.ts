@@ -32,6 +32,10 @@ export interface WorldViewOptions {
 
 export interface WorldView {
     setLayer(layer: MapLayer, on: boolean): void;
+    /** Prop box opacity, 0 (hidden) to 1 (solid). */
+    setBoxOpacity(opacity: number): void;
+    /** Class-id labels over the props nearest the camera, in `color` on no background. */
+    setLabels(on: boolean, color: string): void;
     reset(): void;
     resize(): void;
     dispose(): void;
@@ -43,6 +47,8 @@ const MAX_BOXES = 30_000;
 const NEAREST = 24;
 const MAX_PLACED = 64;
 const MAX_IN_FLIGHT = 3;
+/** Labels drawn at once: the props nearest the camera. */
+const MAX_LABELS = 150;
 
 function hashColor(id: number): THREE.Color {
     const h = (((id * 2654435761) >>> 0) % 360) / 360;
@@ -150,6 +156,45 @@ export function createWorldView(opts: WorldViewOptions): WorldView {
     boxes.instanceMatrix.needsUpdate = true;
     if (boxes.instanceColor) boxes.instanceColor.needsUpdate = true;
     groups.props.add(boxes);
+
+    // ── prop id labels (HTML over the canvas: crisp text, transparent background) ──
+    if (getComputedStyle(container).position === "static") container.style.position = "relative";
+    const labelLayer = document.createElement("div");
+    labelLayer.style.cssText = "position:absolute;inset:0;pointer-events:none;overflow:hidden";
+    container.appendChild(labelLayer);
+    const labelEls: HTMLDivElement[] = [];
+    let labelsOn = false;
+    let labelColor = "#000000";
+    const projected = new THREE.Vector3();
+    const drawLabels = () => {
+        if (!labelsOn || !groups.props.visible) {
+            labelEls.forEach(el => { el.style.display = "none"; });
+            return;
+        }
+        const cam = camera.position;
+        const order = propScenePos.map((v, i) => ({ i, d: v.distanceToSquared(cam) }));
+        order.sort((a, b) => a.d - b.d);
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        let used = 0;
+        for (const { i } of order) {
+            if (used >= MAX_LABELS) break;
+            projected.copy(propScenePos[i]).project(camera);
+            if (projected.z < -1 || projected.z > 1 || Math.abs(projected.x) > 1 || Math.abs(projected.y) > 1) continue;
+            let el = labelEls[used];
+            if (!el) {
+                el = document.createElement("div");
+                el.style.cssText = "position:absolute;left:0;top:0;font:11px sans-serif;white-space:nowrap;background:transparent";
+                labelLayer.appendChild(el);
+                labelEls.push(el);
+            }
+            el.textContent = String(boxed[i].class_id);
+            el.style.color = labelColor;
+            el.style.transform = `translate(${((projected.x + 1) / 2) * w}px, ${((1 - projected.y) / 2) * h}px) translate(-50%, -100%)`;
+            el.style.display = "";
+            used++;
+        }
+        for (let k = used; k < labelEls.length; k++) labelEls[k].style.display = "none";
+    };
 
     // ── events ──
     {
@@ -354,11 +399,22 @@ export function createWorldView(opts: WorldViewOptions): WorldView {
         dirty = false;
         place();
         renderer.render(scene, camera);
+        drawLabels();
     };
     tick();
 
     return {
         setLayer(layer, on) { groups[layer].visible = on; invalidate(); },
+        setBoxOpacity(opacity) {
+            const o = Math.max(0, Math.min(1, opacity));
+            boxMat.opacity = o;
+            // A see-through box must not hide what is behind it.
+            boxMat.depthWrite = o >= 0.99;
+            boxMat.needsUpdate = true;
+            boxes.visible = o > 0;
+            dirty = true;
+        },
+        setLabels(on, color) { labelsOn = on; labelColor = color; dirty = true; },
         reset,
         resize() {
             const cw = container.clientWidth, ch = container.clientHeight;
@@ -401,6 +457,7 @@ export function createWorldView(opts: WorldViewOptions): WorldView {
             renderer.dispose();
             renderer.forceContextLoss();
             canvas.remove();
+            labelLayer.remove();
         },
     };
 }

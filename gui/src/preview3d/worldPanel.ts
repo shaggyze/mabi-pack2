@@ -32,6 +32,17 @@ function button(label: string, title: string, onClick: () => void): HTMLButtonEl
     return b;
 }
 
+/** 3D view display settings, remembered per viewer. */
+interface WorldPrefs { boxOpacity: number; labels: boolean; labelColor: string }
+const PREFS_KEY = "p3d.worldPrefs";
+function loadPrefs(): WorldPrefs {
+    const def: WorldPrefs = { boxOpacity: 0.75, labels: false, labelColor: "#000000" };
+    try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") }; } catch { return def; }
+}
+function savePrefs(p: WorldPrefs) {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* storage unavailable */ }
+}
+
 export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
     const { t, assets } = host;
     host.status(t("wv_loading"));
@@ -58,6 +69,7 @@ export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
     const summary = parts.join(" · ");
 
     const layers: Record<MapLayer, boolean> = { props: true, events: true, terrain: true };
+    const prefs = loadPrefs();
     const accentCss = `#${host.accent.toString(16).padStart(6, "0")}`;
     let map: MapView | undefined;
     let world: WorldView | undefined;
@@ -105,6 +117,8 @@ export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
             onModels: (placed) => { modelsText = placed ? ` · ${t("wv_models", [String(placed)])}` : ""; if (mode === "world") showStatus(); },
         });
         (Object.keys(layers) as MapLayer[]).forEach(l => world!.setLayer(l, layers[l]));
+        world.setBoxOpacity(prefs.boxOpacity);
+        world.setLabels(prefs.labels, prefs.labelColor);
         mode = "world";
         showStatus();
     };
@@ -126,11 +140,46 @@ export async function mountRegion(host: RegionHost): Promise<Mounted3d | null> {
         if (mode !== "world") { showWorld(); worldBtn.classList.add("active"); mapBtn.classList.remove("active"); }
     });
     mapBtn.classList.add("active");
+
+    // 3D-only display settings: prop box opacity, id labels and their text color.
+    const opacityWrap = document.createElement("label");
+    opacityWrap.title = t("wv_tip_box_opacity");
+    opacityWrap.style.cssText = "display:flex;align-items:center;gap:4px;font-size:0.75em;pointer-events:auto";
+    opacityWrap.append(t("wv_label_box_opacity"));
+    const opacity = document.createElement("input");
+    opacity.type = "range"; opacity.min = "0"; opacity.max = "100";
+    opacity.value = String(Math.round(prefs.boxOpacity * 100));
+    opacity.style.width = "70px";
+    opacity.addEventListener("input", () => {
+        prefs.boxOpacity = Number(opacity.value) / 100;
+        world?.setBoxOpacity(prefs.boxOpacity);
+        savePrefs(prefs);
+    });
+    opacityWrap.append(opacity);
+    const idsBtn = button(t("wv_btn_ids"), t("wv_tip_ids"), () => {
+        prefs.labels = !prefs.labels;
+        idsBtn.classList.toggle("active", prefs.labels);
+        world?.setLabels(prefs.labels, prefs.labelColor);
+        savePrefs(prefs);
+    });
+    idsBtn.classList.toggle("active", prefs.labels);
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = prefs.labelColor;
+    color.title = t("wv_tip_label_color");
+    color.style.cssText = "width:24px;height:20px;padding:0;border:none;background:none;pointer-events:auto";
+    color.addEventListener("input", () => {
+        prefs.labelColor = color.value;
+        world?.setLabels(prefs.labels, prefs.labelColor);
+        savePrefs(prefs);
+    });
+
     bar.append(
         mapBtn, worldBtn,
         layerBtn("terrain", "wv_btn_terrain", "wv_tip_terrain"),
         layerBtn("props", "wv_btn_props", "wv_tip_props"),
         layerBtn("events", "wv_btn_events", "wv_tip_events"),
+        opacityWrap, idsBtn, color,
         button(t("p3d_btn_reset"), t("p3d_tip_reset"), () => { map?.reset(); world?.reset(); }),
         button(t("p3d_btn_export_glb") || "Export GLB", t("p3d_tip_export_glb") || "Export scene as a .glb file", () => { world?.exportGLB(); }),
     );

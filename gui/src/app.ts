@@ -10,7 +10,7 @@ import type { AssetHost } from "./preview3d/worldData";
 
 interface JobEntry {
     id: number;
-    type: "extract" | "pack" | "differ" | "merge" | "apply-mod";
+    type: "extract" | "pack" | "differ" | "merge" | "apply-mod" | "patch";
     input: string;
     output: string;
     key?: string;
@@ -124,7 +124,9 @@ interface Config {
     patcher_hyddwn_enabled: boolean;
     patcher_hyddwn_url: string;
     patcher_auto_update: boolean;
+    patcher_check_on_start: boolean;
     patcher_focus_on_start: boolean;
+    patcher_focus_while_patching: boolean;
     patcher_max_workers: number;
     patcher_run_elevated: boolean;
     /** Private servers for the Launcher tab's Server dropdown (official NA is implicit). */
@@ -280,7 +282,9 @@ class App {
         patcher_hyddwn_enabled: false,
         patcher_hyddwn_url: "http://127.0.0.1:11000",
         patcher_auto_update: false,
+        patcher_check_on_start: true,
         patcher_focus_on_start: false,
+        patcher_focus_while_patching: true,
         patcher_run_elevated: false,
         patcher_ignore_list: [],
         patcher_max_workers: 10,
@@ -298,6 +302,10 @@ class App {
         minimize_to_tray: false,
     };
     private sharedConfig: SharedConfig = { ignore: [], hooks: {} };
+    /** Settles once the active profile's stored session has been restored (or not). */
+    private profilesReady: Promise<void> = Promise.resolve();
+    /** The Jobs entry of the patch that is running, if any. */
+    private patchJob: JobEntry | null = null;
     private sharedConfigLoaded: Promise<void> | null = null;
     private patchPaused = false;
     /** A patch or file scan is running (backend allows only one at a time). */
@@ -554,10 +562,7 @@ class App {
             document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
         }
 
-        if (this.config.patcher_auto_update && this.config.patcher_game_path) {
-            this.log(this.t("log_patcher_autoupdate"), "info");
-            this.runPatcher(this.config.patcher_game_path, false);
-        }
+        this.startupGameUpdate();
         this.log(this.t("engineInit"), "success");
         if (this.config.app_update_check) this.checkAppUpdate(true);
     }
@@ -1130,6 +1135,74 @@ class App {
         arc.style.stroke = `hsl(${hue},80%,55%)`;
     }
 
+    /** Compares the installed game with the patch server and shows the result on the
+     *  Patcher tab. Returns whether files need an update, or null when the check failed. */
+    private async checkGameUpdate(gamePath: string): Promise<boolean | null> {
+        const statusEl = document.getElementById("patcher-status");
+        const setText = (msg: string, ok?: boolean) => {
+            if (!statusEl) return;
+            statusEl.textContent = msg;
+            statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)";
+        };
+        setText(this.t("patcher_checking"));
+        this.log(this.t("log_patcher_checking_updates"));
+        try {
+            const res = await invoke("check_patch_version", { gamePath, session: this.launcherSession }) as any;
+            this.keepRefreshedSession(res.session);
+            if (res.relogin_required) {
+                setText(this.t("launcher_session_expired"), false);
+                await this.promptRelogin();
+                return null;
+            }
+            const localEl = document.getElementById("patcher-version-local");
+            const remoteEl = document.getElementById("patcher-version-remote");
+            if (localEl) localEl.textContent = String(res.local_version ?? "—");
+            if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
+            if (res.error && res.remote_version == null && !res.remote_hash) {
+                this.log(this.t("log_patcher_remote_check", [String(res.error)]));
+            }
+            if (res.needs_update) {
+                setText(this.t("patcher_update_available", [String(res.remote_version)]), false);
+                this.log(this.t("log_patcher_update_available", [String(res.local_version), String(res.remote_version)]));
+            } else if (res.remote_version == null) {
+                setText(this.t("patcher_installed_ver", [String(res.local_version ?? "?")]), true);
+                this.log(this.t("log_patcher_local_ver_no_remote", [String(res.local_version ?? "?")]));
+            } else {
+                setText(this.t("patcher_up_to_date"), true);
+                this.log(this.t("log_patcher_up_to_date", [String(res.local_version)]));
+            }
+            return !!res.needs_update;
+        } catch(e) {
+            if (this.isReloginError(e)) {
+                setText(this.t("launcher_session_expired"), false);
+                await this.promptRelogin();
+                return null;
+            }
+            setText(this.t("patcher_check_failed", [this.cleanErr(e)]), false);
+            this.log(this.t("log_patcher_check_error", [this.cleanErr(e)]));
+            return null;
+        }
+    }
+
+    /** Startup game check. Auto-update checks first and patches only when the
+     *  server has newer files; check-only logs the result. */
+    private async startupGameUpdate() {
+        const gp = this.config.patcher_game_path;
+        if (!gp) return;
+        const auto = this.config.patcher_auto_update;
+        if (!auto && !this.config.patcher_check_on_start) return;
+        // check_patch_version and patching both use the profile's session.
+        await this.profilesReady;
+        const needsUpdate = await this.checkGameUpdate(gp);
+        if (!auto) return;
+        if (needsUpdate === false) {
+            this.log(this.t("log_patcher_autoupdate_skip"), "info");
+            return;
+        }
+        this.log(this.t("log_patcher_autoupdate"), "info");
+        await this.runPatcher(gp, false);
+    }
+
     private setupPatcherTab() {
         const gamePathEl = () => document.getElementById("patcher-game-path") as HTMLInputElement | null;
         const getGamePath = () => gamePathEl()?.value?.trim() ?? "";
@@ -1176,45 +1249,10 @@ class App {
         });
 
         // Check for updates
-        document.getElementById("btn-patcher-check")?.addEventListener("click", async () => {
+        document.getElementById("btn-patcher-check")?.addEventListener("click", () => {
             const gp = getGamePath();
             if (!gp) { setText(this.t("patcher_set_path_first"), false); return; }
-            setText(this.t("patcher_checking"));
-            this.log(this.t("log_patcher_checking_updates"));
-            try {
-                const res = await invoke("check_patch_version", { gamePath: gp, session: this.launcherSession }) as any;
-                this.keepRefreshedSession(res.session);
-                if (res.relogin_required) {
-                    setText(this.t("launcher_session_expired"), false);
-                    await this.promptRelogin();
-                    return;
-                }
-                const localEl = document.getElementById("patcher-version-local");
-                const remoteEl = document.getElementById("patcher-version-remote");
-                if (localEl) localEl.textContent = String(res.local_version ?? "—");
-                if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
-                if (res.error && res.remote_version == null && !res.remote_hash) {
-                    this.log(this.t("log_patcher_remote_check", [String(res.error)]));
-                }
-                if (res.needs_update) {
-                    setText(this.t("patcher_update_available", [String(res.remote_version)]), false);
-                    this.log(this.t("log_patcher_update_available", [String(res.local_version), String(res.remote_version)]));
-                } else if (res.remote_version == null) {
-                    setText(this.t("patcher_installed_ver", [String(res.local_version ?? "?")]), true);
-                    this.log(this.t("log_patcher_local_ver_no_remote", [String(res.local_version ?? "?")]));
-                } else {
-                    setText(this.t("patcher_up_to_date"), true);
-                    this.log(this.t("log_patcher_up_to_date", [String(res.local_version)]));
-                }
-            } catch(e) {
-                if (this.isReloginError(e)) {
-                    setText(this.t("launcher_session_expired"), false);
-                    await this.promptRelogin();
-                    return;
-                }
-                setText(this.t("patcher_check_failed", [this.cleanErr(e)]), false);
-                this.log(this.t("log_patcher_check_error", [this.cleanErr(e)]));
-            }
+            this.checkGameUpdate(gp);
         });
 
         // Patch / Repair buttons
@@ -1307,6 +1345,8 @@ class App {
 
         // Settings > Patcher subtab wiring (elements live in stab-patcher but found by ID)
         const autoUpdateChk = document.getElementById("patcher-auto-update") as HTMLInputElement | null;
+        const checkOnStartChk = document.getElementById("patcher-check-on-start") as HTMLInputElement | null;
+        const focusWhilePatchingChk = document.getElementById("patcher-focus-while-patching") as HTMLInputElement | null;
         const focusOnStartChk = document.getElementById("patcher-focus-on-start") as HTMLInputElement | null;
         const runElevatedChk = document.getElementById("patcher-run-elevated") as HTMLInputElement | null;
         const maxWorkersEl = document.getElementById("patcher-max-workers") as HTMLInputElement | null;
@@ -1321,6 +1361,8 @@ class App {
         const productIdEl = document.getElementById("settings-product-id") as HTMLInputElement | null;
 
         if (autoUpdateChk) autoUpdateChk.checked = this.config.patcher_auto_update;
+        if (checkOnStartChk) checkOnStartChk.checked = this.config.patcher_check_on_start ?? true;
+        if (focusWhilePatchingChk) focusWhilePatchingChk.checked = this.config.patcher_focus_while_patching ?? true;
         if (focusOnStartChk) focusOnStartChk.checked = this.config.patcher_focus_on_start;
         if (runElevatedChk) runElevatedChk.checked = this.config.patcher_run_elevated ?? false;
         if (maxWorkersEl) maxWorkersEl.value = String(this.config.patcher_max_workers ?? 10);
@@ -1339,6 +1381,8 @@ class App {
         });
 
         autoUpdateChk?.addEventListener("change", () => { this.config.patcher_auto_update = autoUpdateChk.checked; this.saveConfig(); });
+        checkOnStartChk?.addEventListener("change", () => { this.config.patcher_check_on_start = checkOnStartChk.checked; this.saveConfig(); });
+        focusWhilePatchingChk?.addEventListener("change", () => { this.config.patcher_focus_while_patching = focusWhilePatchingChk.checked; this.saveConfig(); });
         focusOnStartChk?.addEventListener("change", () => { this.config.patcher_focus_on_start = focusOnStartChk.checked; this.saveConfig(); });
         runElevatedChk?.addEventListener("change", () => { this.config.patcher_run_elevated = runElevatedChk.checked; this.saveConfig(); });
         maxWorkersEl?.addEventListener("change", () => {
@@ -1425,6 +1469,7 @@ class App {
                     if (pipeLabel) pipeLabel.textContent = this.t("dash_pipe_idle");
                     if (stopBtn) stopBtn.style.display = "none";
                     this.setPatchPaused(false, true);
+                    this.updateProgress(0, "");
                     if (e.error) this.log(this.t("msg_error_fmt", [this.cleanErr(e.error)]));
                     // Clear all worker bars on completion
                     const barsEl = document.getElementById("patcher-bars");
@@ -1452,6 +1497,11 @@ class App {
                     }
                     if (pipeBar) pipeBar.style.width = pct + "%";
                     if (pipeLabel) pipeLabel.textContent = this.t("dash_pipe_patching", [info]);
+                    this.updateProgress(pct, this.t("dash_pipe_patching", [info]));
+                    if (this.patchJob) {
+                        this.patchJob.progress = pct;
+                        this.updateJobUI(this.patchJob, "running", pct, info);
+                    }
                     if (speedEl && e.speed_bps) {
                         const mb = (e.speed_bps / 1048576).toFixed(1);
                         speedEl.textContent = `${mb} MB/s`;
@@ -1528,6 +1578,11 @@ class App {
         };
         if (this.patchBusy) { setText(this.t("patcher_err_busy"), false); return; }
         const busyToken = this.setPatchBusy(true);
+        if (this.config.patcher_focus_while_patching) {
+            document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
+        }
+        const job = this.startPatchJob(gamePath, forceRepair ? "patcher_repairing" : verifyOnly ? "patcher_verifying" : "patcher_patching");
+        let jobError: string | null = null;
         if (pipeCard) pipeCard.style.display = "";
         if (wrap) wrap.style.display = "block";
         if (bar) bar.style.width = "0%";
@@ -1566,6 +1621,7 @@ class App {
             if (res.needs_elevation) {
                 setText(this.t("patcher_needs_admin"), false);
                 this.log(this.t("log_patcher_perm_denied"));
+                jobError = this.t("patcher_needs_admin");
                 await invoke("request_elevation");
             } else if (res.ok) {
                 const msg = res.patched === 0
@@ -1573,13 +1629,16 @@ class App {
                     : this.t("patcher_patched_files", [String(res.patched), String(res.managed_version ?? "?")]);
                 setText(msg, true);
                 this.log(msg);
+                this.finishPatchJob(job, null, msg);
             } else if (res.message) {
                 setText(res.message, true);
                 this.log(res.message);
+                this.finishPatchJob(job, null, res.message);
             } else {
                 const errs = (res.errors ?? []).slice(0, 3).join("; ");
                 setText(this.t("patcher_errors", [errs]), false);
                 this.log(this.t("patcher_errors", [errs]));
+                jobError = this.t("patcher_errors", [errs]);
             }
         } catch(e) {
             e = this.errWithSession(e);
@@ -1587,8 +1646,10 @@ class App {
             // Pause controls alone.
             if (String(e) === "patch_busy") {
                 setText(this.t("patcher_err_busy"), false);
+                this.finishPatchJob(job, this.t("patcher_err_busy"));
                 return;
             }
+            jobError = this.cleanErr(e);
             if (wrap) wrap.style.display = "none";
             if (pipeCard) pipeCard.style.display = "none";
             if (stopBtn) stopBtn.style.display = "none";
@@ -1609,8 +1670,49 @@ class App {
                 this.log(this.t("msg_error_fmt", [String(e)]));
             }
         } finally {
+            this.finishPatchJob(job, jobError);
             this.releasePatchBusy(busyToken);
         }
+    }
+
+    /** Adds a running "Game patch" entry to Jobs and Activity for one patcher run. */
+    private startPatchJob(gamePath: string, labelKey: string): JobEntry {
+        const job: JobEntry = {
+            id: Date.now() + Math.random(),
+            type: "patch",
+            input: gamePath,
+            output: gamePath,
+            status: "running",
+            progress: 0,
+            log: "",
+        };
+        this.jobs.push(job);
+        this.renderJob(job);
+        document.getElementById("jobs-empty-msg")?.classList.add("hidden");
+        const badge = document.getElementById("jobs-count-badge");
+        if (badge) badge.textContent = `(${this.jobs.length})`;
+        const row = document.getElementById(`job-${job.id}`);
+        if (row) {
+            row.className = "job-row running";
+            // A patch is started from the Patcher tab, never re-run from the queue.
+            row.querySelector(`[data-job-run="${job.id}"]`)?.remove();
+        }
+        this.updateJobUI(job, "running", 0, this.t(labelKey));
+        this.addActivity(this.t("activity_patch_started", [gamePath]));
+        this.patchJob = job;
+        return job;
+    }
+
+    /** Marks a patch job done or failed (once) and clears the top progress bar. */
+    private finishPatchJob(job: JobEntry, error: string | null, msg?: string) {
+        if (job.status !== "running") return;
+        job.status = error ? "error" : "done";
+        this.updateJobUI(job, job.status, error ? job.progress : 100, error ?? msg ?? this.t("jobs_completed"));
+        const row = document.getElementById(`job-${job.id}`);
+        if (row) row.className = `job-row ${job.status}`;
+        this.addActivity(error ? this.t("activity_patch_failed", [error]) : this.t("activity_patch_done", [msg ?? this.t("jobs_completed")]));
+        if (this.patchJob === job) this.patchJob = null;
+        this.updateProgress(0, "");
     }
 
     /** Clear the busy state only if `token`'s run is the one that set it. */
@@ -3052,7 +3154,7 @@ class App {
         row.className = "job-row";
         row.id = `job-${job.id}`;
         const typeLabel = this.t(`job_type_${job.type.replace("-","_")}`) || job.type;
-        const fname = job.input.split(/[\\/]/).pop() ?? job.input;
+        const fname = job.input.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || job.input;
         row.innerHTML = `
             <div class="job-header">
                 <span class="job-type-badge ${job.type}">${typeLabel}</span>
@@ -3422,7 +3524,7 @@ class App {
     private setupLauncher() {
         // Move a session older versions kept in localStorage into the profile store,
         // then load profiles from the backend.
-        this.migrateLegacySession().finally(() => this.loadProfiles());
+        this.profilesReady = this.migrateLegacySession().finally(() => this.loadProfiles()).catch(() => {});
 
         // Login / logout / launch
         document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
@@ -4340,17 +4442,8 @@ class App {
         const clientDir = (document.getElementById("launcher-client-dir") as HTMLInputElement).value.trim();
         if (!clientDir) { this.setLauncherStatus(this.t("launcher_folder_required"), "error"); return; }
 
-        // Client.exe runs as administrator; from a non-elevated mabi-patcher the ticket
-        // hand-off never reaches it and the game stops at "Failed to Init NXALauncher".
-        if (!isCustomServer && !(await invoke("is_ran_as_admin") as boolean)) {
-            const restart = await ask(this.t("launcher_admin_launch_prompt"), { title: this.t("launcher_admin_launch_title"), kind: "warning" });
-            if (restart) {
-                this.config.patcher_run_elevated = true;
-                await this.saveConfig();
-                await invoke("request_elevation");
-            }
-            return;
-        }
+        // No admin check here: from a normal (non-elevated) mabi-patcher, Client.exe
+        // starts through ShellExecuteEx with --mabi-map and the ticket hand-off works.
 
         const btn = document.getElementById("btn-launcher-launch") as HTMLButtonElement;
         btn.disabled = true;
@@ -4426,9 +4519,10 @@ class App {
         try {
             const res = await invoke("launcher_get_version", { session: this.launcherSession }) as { version: number; session?: any };
             this.keepRefreshedSession(res.session);
-            const ver = res.version;
-            verStr = ver > 0 ? String(ver) : "—";
-        } catch {
+            if (res.version > 0) verStr = String(res.version);
+        } catch {}
+        // The CDN answer often has no version number: use the patch manifest's.
+        if (verStr === "—") {
             try {
                 const gp = (this.config as any)?.patcher_game_path;
                 if (gp) {
@@ -4482,7 +4576,8 @@ class App {
         const item = document.createElement("div");
         item.className = "activity-item";
         const time = new Date().toLocaleTimeString();
-        item.innerHTML = `<span class="activity-time">${time}</span> <span class="activity-text">${message}</span>`;
+        // Messages carry paths and server errors: build them as text.
+        item.append(elText("span", "activity-time", time), " ", elText("span", "activity-text", message));
         list.prepend(item);
         if (list.children.length > 10) list.lastElementChild?.remove();
     }
@@ -6742,16 +6837,28 @@ class App {
         }
     }
 
-    /** Downloads the latest mabi-patcher.exe over this one and restarts into it. */
+    /** Checks for a newer release, then downloads it over this exe and restarts into
+     *  it. When this exe is already the latest, it logs that and downloads nothing. */
     private async installAppUpdate() {
         const status = document.getElementById("app-update-status");
         const install = document.getElementById("btn-app-update-install") as HTMLButtonElement | null;
         const tag = this.t("log_tag_update");
+        const skip = (current: string) => {
+            const msg = this.t("app_update_skip", [current]);
+            if (status) status.textContent = msg;
+            if (install) install.style.display = "none";
+            this.log(`${tag} ${msg}`, "info");
+        };
         if (install) install.disabled = true;
-        if (status) status.textContent = this.t("app_update_downloading");
-        this.log(`${tag} ${this.t("app_update_downloading")}`, "info");
         try {
-            const version = await invoke<string>("install_app_update");
+            if (status) status.textContent = this.t("app_update_checking");
+            const info = await invoke<{ current: string; latest: string; newer: boolean }>("check_app_update");
+            if (!info.newer) { skip(info.current); return; }
+
+            if (status) status.textContent = this.t("app_update_downloading");
+            this.log(`${tag} ${this.t("app_update_downloading")}`, "info");
+            const version = await invoke<string | null>("install_app_update");
+            if (!version) { skip(info.current); return; }
             const msg = this.t("app_update_installed", [version]);
             if (status) status.textContent = msg;
             this.log(`${tag} ${msg}`, "success");
@@ -6759,6 +6866,7 @@ class App {
             const msg = this.t("app_update_failed", [String(e)]);
             if (status) status.textContent = msg;
             this.log(`${tag} ${msg}`, "error");
+        } finally {
             if (install) install.disabled = false;
         }
     }

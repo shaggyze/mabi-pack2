@@ -1,6 +1,6 @@
 [package]
 name = "mabi-patcher"
-version = "2.0.8"
+version = "2.0.9"
 description = "mabi-patcher: Mabinogi Archive & Patcher Suite"
 authors = ["ShaggyZE <shaggyze@gmail.com>"]
 edition = "2021"
@@ -48,7 +48,7 @@ aes-gcm = "0.11.1"
 winreg = "0.52"
 # Native drag-out of List-tab entries to Explorer (static, no DLL).
 drag = "2"
-winapi = { version = "0.3.9", features = ["shellapi", "winuser", "ole2", "securitybaseapi", "processthreadsapi", "winnt", "shlobj", "std"] }
+winapi = { version = "0.3.9", features = ["shellapi", "winuser", "ole2", "libloaderapi", "sysinfoapi", "securitybaseapi", "processthreadsapi", "winnt", "shlobj", "std"] }
 
 [profile.release]
 opt-level = 3

@@ -847,6 +847,39 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// Logs every nexon*.dll Client.exe has loaded, with its folder. When the shim
+    /// never reports ready, this shows whether the game loaded another launcher's
+    /// nexon_x64.dll (for example the Nexon Launcher's) or none at all.
+    fn log_nexon_modules(pid: DWORD) {
+        use winapi::um::tlhelp32::{
+            CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+        };
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
+        if snap == INVALID_HANDLE_VALUE {
+            log::warn!("Client.exe modules: snapshot failed ({})", unsafe { GetLastError() });
+            return;
+        }
+        let mut entry: MODULEENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as DWORD;
+        let mut found = Vec::new();
+        let mut ok = unsafe { Module32FirstW(snap, &mut entry) };
+        while ok != 0 {
+            let len = entry.szExePath.iter().position(|&c| c == 0).unwrap_or(entry.szExePath.len());
+            let path = String::from_utf16_lossy(&entry.szExePath[..len]);
+            let name = path.rsplit(['\\', '/']).next().unwrap_or("").to_ascii_lowercase();
+            if name.starts_with("nexon") {
+                found.push(path);
+            }
+            ok = unsafe { Module32NextW(snap, &mut entry) };
+        }
+        unsafe { CloseHandle(snap) };
+        if found.is_empty() {
+            log::warn!("Client.exe has loaded no nexon*.dll");
+        } else {
+            log::warn!("Client.exe nexon modules: {}", found.join(" | "));
+        }
+    }
+
     fn os_err(what: &str, code: DWORD) -> anyhow::Error {
         anyhow!("{}: {}", what, std::io::Error::from_raw_os_error(code as i32))
     }
@@ -1235,6 +1268,7 @@ mod win {
             std::thread::sleep(std::time::Duration::from_millis(SHIM_GRACE_MS));
         } else if r == WAIT_TIMEOUT {
             log::warn!("nxl3p shim did not report ready within {} s; closed the ticket mapping", SHIM_READY_TIMEOUT_MS / 1000);
+            log_nexon_modules(pid);
         }
         // The shim has the ticket, the game is gone, or we gave up: wipe and close it.
         drop(mapping);
