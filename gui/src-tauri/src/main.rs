@@ -520,7 +520,19 @@ fn run_cli_logic() -> Result<()> {
             return Ok(());
         } else {
             debug!("[CLI] Listing modern .it with search.");
-            return list::run_list_with_key_search(input, key, &salts, output);
+            return match list::run_list_with_key_search(input, key, &salts, output) {
+                Ok(()) => Ok(()),
+                Err(e) => match mabi_pack2::placeholder_archive_size(input) {
+                    Some(n) => {
+                        if let Some(out) = output {
+                            std::fs::write(out, "")?;
+                        }
+                        println!("{}", mabi_pack2::placeholder_archive_note(input, n));
+                        Ok(())
+                    }
+                    None => Err(anyhow::anyhow!("{} ({})", mabi_pack2::header_search_failed_message(input, salts.len()), e)),
+                },
+            };
         }
     }
 

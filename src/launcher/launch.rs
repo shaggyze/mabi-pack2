@@ -51,9 +51,11 @@ pub const NEXON_PIPE_NAME: &str = r"\\.\pipe\{79d303ac-af79-46c3-9ae0-6cd4ff4805
 /// Line the Windows build prints (under Wine) once Client.exe has spawned, so the
 /// Linux side can fire its after-launch hook: `<marker> pid=N patch=0|1 args=N`.
 pub const STARTED_MARKER: &str = "MABI_LAUNCH_STARTED";
-/// How long a launch waits for the shim to pick up the ticket, even without `wait`.
+/// How long a launch keeps the ticket for the shim, even without `wait`. The game
+/// asks for it only when its NXA init runs, which took 15 s on one start and 88 s
+/// on another (2026-10-17), so this is generous; the game exiting ends it sooner.
 #[cfg(windows)]
-const SHIM_READY_TIMEOUT_MS: u32 = 60_000;
+const SHIM_READY_TIMEOUT_MS: u32 = 15 * 60_000;
 /// Extra time for the SDK to finish its pipe requests once the shim is ready.
 #[cfg(windows)]
 const SHIM_GRACE_MS: u64 = 3_000;
@@ -567,7 +569,7 @@ mod wine {
 ///
 /// The stub needs `--exit-event <Local\mabi-patcher.stub.{GUID}> --parent-pid
 /// <launcher pid>`; it exits (code 2) on anything else, and otherwise once the
-/// launch's exit event is set, the launcher process is gone, or after 120 s.
+/// launch's exit event is set (the game exited) or the launcher process is gone.
 pub fn run_stub_if_requested() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let pos = match args.iter().position(|a| a == STUB_FLAG) {
@@ -1065,7 +1067,8 @@ mod win {
                 return 2;
             }
             let handles = [ev.raw(), parent.raw()];
-            match WaitForMultipleObjects(2, handles.as_ptr(), FALSE, 120_000) {
+            // No timeout: the game may ask for nexon_client.exe late in its start-up.
+            match WaitForMultipleObjects(2, handles.as_ptr(), FALSE, INFINITE) {
                 r if r == WAIT_OBJECT_0 || r == WAIT_OBJECT_0 + 1 => 0,
                 WAIT_TIMEOUT => 3,
                 _ => 2,
@@ -1263,8 +1266,10 @@ mod win {
         //    is only needed during start-up (a no-wait CLI launch exits right after
         //    this), so stop it then and release the launch lock.
         let handles = [shim_ready.raw(), game.raw()];
+        let waited = std::time::Instant::now();
         let r = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, SHIM_READY_TIMEOUT_MS) };
         if r == WAIT_OBJECT_0 {
+            log::info!("nxl3p shim took the ticket after {} s", waited.elapsed().as_secs());
             std::thread::sleep(std::time::Duration::from_millis(SHIM_GRACE_MS));
         } else if r == WAIT_TIMEOUT {
             log::warn!("nxl3p shim did not report ready within {} s; closed the ticket mapping", SHIM_READY_TIMEOUT_MS / 1000);

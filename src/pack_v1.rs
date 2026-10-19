@@ -41,7 +41,63 @@ fn write_file(root_dir: &str, rel_path: &str, content: Vec<u8>) -> Result<(), Er
     Ok(())
 }
 
+/// Entry flag for Mabinogi's own .pack format (MabinogiResource / MabiPack /
+/// Cichol): the entry data is XOR-encrypted with an MT19937 stream seeded from the
+/// entry's seed (kept in `FileEntry::checksum`). Never set for .it entries.
+pub const FLAG_PACK_SEED_ENCRYPTED: u32 = 0x100;
+
+/// Mabinogi's own .pack header starts with "PACK" and revision 0x0102 (or 0x0101).
+/// mabi-patcher's simple PACK format stores a free version number there instead.
+pub fn is_mabinogi_pack(input_path: &str) -> bool {
+    let mut sig = [0u8; 8];
+    StdFile::open(input_path).and_then(|mut f| f.read_exact(&mut sig)).is_ok()
+        && &sig[0..4] == b"PACK"
+        && (sig[4..8] == [2, 1, 0, 0] || sig[4..8] == [1, 1, 0, 0])
+}
+
+/// Minimal MT19937 (32-bit), as used by the .pack cipher.
+struct Mt19937 { mt: [u32; 624], i: usize }
+
+impl Mt19937 {
+    fn new(seed: u32) -> Self {
+        let mut mt = [0u32; 624];
+        mt[0] = seed;
+        for i in 1..624 {
+            mt[i] = 1812433253u32.wrapping_mul(mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_add(i as u32);
+        }
+        Mt19937 { mt, i: 624 }
+    }
+    fn next(&mut self) -> u32 {
+        if self.i >= 624 {
+            for k in 0..624 {
+                let y = (self.mt[k] & 0x8000_0000) | (self.mt[(k + 1) % 624] & 0x7fff_ffff);
+                self.mt[k] = self.mt[(k + 397) % 624] ^ (y >> 1) ^ if y & 1 != 0 { 0x9908_b0df } else { 0 };
+            }
+            self.i = 0;
+        }
+        let mut y = self.mt[self.i];
+        self.i += 1;
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^= y >> 18;
+        y
+    }
+}
+
+/// Decrypts one Mabinogi .pack entry in place: stream seed = (seed << 7) ^ 0xA9C36DE1.
+pub fn decrypt_pack_entry(data: &mut [u8], seed: u32) {
+    let mut mt = Mt19937::new((seed << 7) ^ 0xA9C3_6DE1);
+    for b in data.iter_mut() {
+        *b ^= mt.next() as u8;
+    }
+}
+
 pub fn run_list_v1_data(input_path: &str) -> Result<Vec<FileEntry>, Error> {
+    // Mabinogi's own .pack (e.g. private servers like MabiPro) has a different index.
+    if is_mabinogi_pack(input_path) {
+        return run_list_logue_data(input_path);
+    }
     info!("[PACK_V1] Listing metadata for .pack file: '{}'", input_path);
     let mut file = StdFile::open(input_path)?;
     let mut magic = [0u8; 4];
@@ -101,6 +157,17 @@ pub fn extract_single_v1(mmap: &Mmap, ent: &FileEntry) -> Result<Vec<u8>, Error>
     }
 
     let compressed_data = &mmap[start..end];
+    if ent.flags & FLAG_PACK_SEED_ENCRYPTED != 0 {
+        let mut data = compressed_data.to_vec();
+        decrypt_pack_entry(&mut data, ent.checksum);
+        if ent.flags & crate::common::FLAG_COMPRESSED == 0 {
+            return Ok(data);
+        }
+        let mut decoder = ZlibDecoder::new(&data[..]);
+        let mut out = Vec::with_capacity(ent.original_size as usize);
+        decoder.read_to_end(&mut out).context(format!("Decompression failed for '{}'", ent.name))?;
+        return Ok(out);
+    }
     if ent.original_size == ent.raw_size {
         Ok(compressed_data.to_vec())
     } else {
@@ -243,6 +310,13 @@ pub fn run_pack_v1(input_dir: &str, output_path: &str, version: u32) -> Result<(
     Ok(())
 }
 
+/// A .pack name field: the name ends at the first NUL; the bytes after it are
+/// leftover padding, not part of the name.
+fn pack_name(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).trim().to_string()
+}
+
 pub fn run_list_logue_data(input_path: &str) -> Result<Vec<FileEntry>, Error> {
     info!("[PACK_LOGUE] Listing metadata for Logue .pack: '{}'", input_path);
     let mut file = StdFile::open(input_path)?;
@@ -256,7 +330,12 @@ pub fn run_list_logue_data(input_path: &str) -> Result<Vec<FileEntry>, Error> {
     
     let _d1 = file.read_u32::<LittleEndian>()?;
     let file_count = file.read_u32::<LittleEndian>()?;
-    file.seek(SeekFrom::Current(8 + 8 + 480))?; // Skip FTs and Path
+    file.seek(SeekFrom::Current(8 + 8))?; // Skip FTs
+    // Root folder the entry names are relative to (normally "data\").
+    let mut root_buf = [0u8; 480];
+    file.read_exact(&mut root_buf)?;
+    let root = String::from_utf8_lossy(&root_buf).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string();
+    let root = if root.is_empty() || root.ends_with('\\') || root.ends_with('/') { root } else { format!("{}\\", root) };
 
     // List Header (32 bytes)
     let list_sum = file.read_u32::<LittleEndian>()?;
@@ -269,33 +348,31 @@ pub fn run_list_logue_data(input_path: &str) -> Result<Vec<FileEntry>, Error> {
         warn!("[PACK_LOGUE] File count mismatch: header={} list={}", file_count, list_sum);
     }
 
-    let mut entries = Vec::with_capacity(file_count as usize);
-    
+    // The list header's count is the real one (the header count can lag behind).
+    let count = if list_sum > 0 { list_sum } else { file_count };
+    let mut entries = Vec::with_capacity(count as usize);
+
     let data_start = 512 + 32 + list_header_size as u64;
 
-    for _ in 0..file_count {
+    for _ in 0..count {
         let len_or_type = file.read_u8()?;
         let (name, _name_block_size) = if len_or_type < 4 {
             let block_size = (len_or_type as u32 + 1) * 16;
             let mut name_buf = vec![0u8; block_size as usize - 1];
             file.read_exact(&mut name_buf)?;
-            let n = String::from_utf8_lossy(&name_buf)
-                .trim_matches(|c: char| c == '\0' || c.is_whitespace())
-                .to_string();
+            let n = pack_name(&name_buf);
             (n, block_size)
         } else if len_or_type == 4 {
             let block_size = 0x60;
             let mut name_buf = vec![0u8; block_size as usize - 1];
             file.read_exact(&mut name_buf)?;
-            let n = String::from_utf8_lossy(&name_buf)
-                .trim_matches(|c: char| c == '\0' || c.is_whitespace())
-                .to_string();
+            let n = pack_name(&name_buf);
             (n, block_size)
         } else {
             let name_len = file.read_u32::<LittleEndian>()?;
             let mut name_buf = vec![0u8; name_len as usize];
             file.read_exact(&mut name_buf)?;
-            let n = String::from_utf8_lossy(&name_buf).to_string();
+            let n = pack_name(&name_buf);
             (n, name_len + 5)
         };
         
@@ -308,13 +385,17 @@ pub fn run_list_logue_data(input_path: &str) -> Result<Vec<FileEntry>, Error> {
         let is_compressed = file.read_u32::<LittleEndian>()?;
         file.seek(SeekFrom::Current(40))?; // Skip FTs
         
+        let offset = data_start + offset as u64;
+        if offset > u32::MAX as u64 {
+            return Err(Error::msg(format!("'{}' starts past 4 GiB, which FileEntry can't address", name)));
+        }
         entries.push(FileEntry {
-            name,
-            offset: (data_start + offset as u64) as u32, // Relative to start of data
+            name: format!("{}{}", root, name),
+            offset: offset as u32, // absolute
             original_size: decompress_size,
             raw_size: compress_size,
-            checksum: seed, // Using seed as a proxy
-            flags: if is_compressed != 0 { crate::common::FLAG_COMPRESSED } else { 0 },
+            checksum: seed, // decryption seed
+            flags: FLAG_PACK_SEED_ENCRYPTED | if is_compressed != 0 { crate::common::FLAG_COMPRESSED } else { 0 },
             key: [0u8; 16],
         });
     }
@@ -336,24 +417,8 @@ pub fn run_extract_logue(input_path: &str, output_dir: &str) -> Result<(), Error
         if end > mmap.len() {
              return Err(Error::msg(format!("Entry '{}' out of bounds", ent.name)));
         }
-        let data = &mmap[start..end];
-        
-        // Decrypt if necessary (Logue format uses seed-based encryption)
-        // Check MabinogiResource/Utility.cpp for Encrypt/Decrypt
-        // It's a custom RNG-based cipher. For now, let's assume raw if it fails.
-        
-        let final_data = if (ent.flags & crate::common::FLAG_COMPRESSED) != 0 {
-            let mut decoder = ZlibDecoder::new(data);
-            let mut decompressed = Vec::with_capacity(ent.original_size as usize);
-            if decoder.read_to_end(&mut decompressed).is_ok() {
-                decompressed
-            } else {
-                data.to_vec() // Fallback
-            }
-        } else {
-            data.to_vec()
-        };
-        
+        let _ = &mmap[start..end];
+        let final_data = extract_single_v1(&mmap, ent)?;
         write_file(output_dir, &ent.name, final_data)?;
         Ok::<(), Error>(())
     })?;

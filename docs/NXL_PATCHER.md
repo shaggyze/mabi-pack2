@@ -258,8 +258,17 @@ remaining 90 %, at most about 10 per second) and `patch-worker` events.
 
 The "managed version" is looked up by sending the manifest `buildtime` to an
 external service over plain HTTP (`get_managed_version`, posting
-`Action=CV&buildtime=...` to `theproffessorslaboratory.net/api.php`). If that
-fails the number is missing or `0`.
+`Action=CV&buildtime=...` to `theproffessorslaboratory.net/api.php`). The
+buildtime is sent as a whole number. The service answers in plain text:
+
+| Answer | Meaning |
+|---|---|
+| `513` | The version whose manifest was active at that buildtime. |
+| `-514` | No entry, and the buildtime is newer than every build the service knows: it returns its latest version + 1, negated ("assume an update on Nexon's side"). The patcher shows the absolute value, as the service's author advises. The minus goes away once the service lists the build. |
+| `ERROR` | Invalid input or no version found; the number is missing. |
+
+`buildtime=-1` returns the latest version the service knows (uotiara's
+installer uses this). If the request fails the number is missing or `0`.
 
 ---
 

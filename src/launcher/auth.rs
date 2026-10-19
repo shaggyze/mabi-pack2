@@ -652,8 +652,28 @@ pub fn import_from_nexon_launcher(device_id: &str) -> Result<NexonSession> {
             s.tpa = false;
             Ok(s)
         }
-        None => Err(anyhow!("Nexon Launcher is not logged in (no valid session found)")),
+        None => Err(anyhow!(
+            "The Nexon Launcher is logged out (its cookie store has {}). Log in to the Nexon Launcher, then import again.",
+            if map.contains_key("NxLSession") { "NxLSession but no AToken" } else { "no NxLSession" }
+        )),
     }
+}
+
+/// Seconds until the Nexon Launcher's stored NxLSession cookie expires (the
+/// launcher's own session length); `None` when unknown or already past.
+pub fn nexon_launcher_session_expires_in() -> Option<i64> {
+    let db = nexon_launcher_cookie_db().filter(|p| p.exists())?;
+    let copy = crate::launcher::cookies::PrivateDbCopy::new(&db).ok()?;
+    let conn = rusqlite::Connection::open(&copy.db).ok()?;
+    // Chromium stores microseconds since 1601-01-01 (UTC).
+    let exp: i64 = conn.query_row(
+        &format!("SELECT MAX(expires_utc) FROM cookies WHERE name = 'NxLSession' AND {}",
+            crate::launcher::cookies::nexon_host_filter("host_key")),
+        [], |r| r.get::<_, Option<i64>>(0),
+    ).ok()??;
+    let exp_unix = exp / 1_000_000 - 11_644_473_600;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    (exp_unix > now + 60).then_some(exp_unix - now)
 }
 
 /// Import from mabi-patcher's own WebView2 cookie store (after `nexon_login_webview`).
@@ -853,6 +873,10 @@ fn login_result_from(headers: &reqwest::header::HeaderMap, body: &str, tpa: bool
     if session.access_token.is_empty() && session.session_token.is_empty() {
         return Err(anyhow!("Login succeeded but no NxLSession/AToken cookie was set"));
     }
+    // Nexon's own number for the NxLSession lifetime, when the reply carries it.
+    if let Some(n) = v["loginSessionExpiresIn"].as_i64().filter(|n| *n > 0) {
+        session.refreshed_expires_in = Some(n as i32);
+    }
     let expires = v["loginSessionExpiresIn"].as_i64().unwrap_or(86400) as i32;
     Ok(LoginResult { session, session_expires_in: expires })
 }
@@ -955,6 +979,16 @@ fn machine_guid() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Live check of this machine's Nexon Launcher cookie store (prints no secrets).
+    #[test]
+    #[ignore]
+    fn live_nexon_launcher_import() {
+        match import_from_nexon_launcher(&device_id("")) {
+            Ok(s) => println!("LIVE ok: nxl={} atoken={} g_atoken={} expires_in={:?}", !s.session_token.is_empty(), !s.access_token.is_empty(), !s.g_access_token.is_empty(), nexon_launcher_session_expires_in()),
+            Err(e) => println!("LIVE err: {:#}", e),
+        }
+    }
+
 
     #[test]
     fn login_error_maps_captcha_and_device_trust() {

@@ -320,6 +320,12 @@ struct Config {
     patcher_check_on_start: bool,
     #[serde(default = "default_true")]
     patcher_focus_while_patching: bool,
+    /// Profile list shows time signed in (true) or session time left (false).
+    #[serde(default = "default_true")]
+    launcher_show_time_logged_in: bool,
+    /// Assume 8 h (browser) / 24 h (other) when Nexon gives no session expiry.
+    #[serde(default)]
+    launcher_session_fallback: bool,
 
     #[serde(default)]
 
@@ -469,6 +475,8 @@ impl Default for Config {
             patcher_auto_update: false,
             patcher_check_on_start: true,
             patcher_focus_while_patching: true,
+            launcher_show_time_logged_in: true,
+            launcher_session_fallback: false,
 
             patcher_focus_on_start: false,
 
@@ -1386,7 +1394,14 @@ async fn list_sequence_contents(app: tauri::AppHandle, folder: String, key: Opti
 
                 let cli_key = if key.as_ref().map_or(true, |k| k.is_empty()) { None } else { key.clone() };
 
-                if let Ok((entries, salt, entries_salt, iv0, h_off, mode, _c_off)) = common_ext::run_list_with_key_search_data(&path_str, cli_key, &salts, Some(config.region_key.clone())) {
+                let listed = common_ext::run_list_with_key_search_data(&path_str, cli_key, &salts, Some(config.region_key.clone()));
+                if let Err(e) = &listed {
+                    match mabi_pack2::placeholder_archive_size(&path_str) {
+                        Some(n) => log::info!("[GUI_LIST] {}", mabi_pack2::placeholder_archive_note(&path_str, n)),
+                        None => log::warn!("[GUI_LIST] {} ({})", mabi_pack2::header_search_failed_message(&path_str, salts.len()), e),
+                    }
+                }
+                if let Ok((entries, salt, entries_salt, iv0, h_off, mode, _c_off)) = listed {
 
                     let mode_str = match mode {
 
@@ -1592,7 +1607,17 @@ async fn list_pack_contents(app: tauri::AppHandle, input: String, key: Option<St
 
         },
 
-        Err(e) => Err(format!("Regional Unlock Failure: {}", e))
+        Err(e) => match mabi_pack2::placeholder_archive_size(&input) {
+            // Nexon's 1 KiB placeholder slots: an empty archive, not an error.
+            Some(n) => {
+                log::info!("[GUI_LIST] {}", mabi_pack2::placeholder_archive_note(&input, n));
+                Ok(PackListResponse {
+                    entries: Vec::new(),
+                    details: ArchiveDetails { file_count: 0, salt: String::new(), iv0: 0, header_offset: 0 },
+                })
+            }
+            None => Err(format!("{} ({})", mabi_pack2::header_search_failed_message(&input, salts.len()), e)),
+        },
 
     }
 
@@ -4553,6 +4578,25 @@ fn delete_webview_cookies() {
     let _ = std::fs::remove_file(&cookies_db);
 }
 
+/// Settings > Launcher > Reset Cache: clears the app's whole WebView2 profile
+/// (cookies, site storage, cache), which holds Nexon's and Google's "stay logged in"
+/// state. The page saves and restores its own local storage around this call.
+/// Returns the number of cookies there were. Goes through WebView2 because its
+/// files are locked while the app runs.
+#[tauri::command]
+async fn reset_login_cache(app: tauri::AppHandle) -> Result<usize, String> {
+    use tauri::Manager;
+    let win = app.get_webview_window("main").ok_or("no main window")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cookies = win.cookies().map(|c| c.len()).unwrap_or(0);
+        win.clear_all_browsing_data().map_err(|e| e.to_string())?;
+        log::info!("[Launcher] Reset login cache: cleared browsing data ({} cookie(s))", cookies);
+        Ok(cookies)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Nexon login page as the NXL launcher opens it: the return_url makes Nexon
 /// issue a launcher session (NxLSession) rather than a web-only one.
 const NEXON_LOGIN_URL: &str = "https://www.nexon.com/account/en/login?autologin=false&return_url=https%3A%2F%2Fnxl.nxfs.nexon.com%2F";
@@ -4592,6 +4636,8 @@ const NEXON_LOGIN_INIT_JS: &str = r#"(function () {
       if (nxl) setCookie("NxLSession", nxl);
       if (at) setCookie("AToken", at);
       if (nxl && gun) setCookie("NxGUN", gun);
+      var exp = d.loginSessionExpiresIn || d.LoginSessionExpiresIn || 0;
+      if (exp > 0) setCookie("mp_expires_in", String(exp));
     } catch (e) {}
   }
   var origFetch = window.fetch;
@@ -4670,6 +4716,10 @@ async fn nexon_login_webview(
     // found session is confirmed on the next poll before the window closes.
     let mut pending = false;
     let mut last_cookies: std::collections::HashMap<String, String> = Default::default();
+    // Seconds until Nexon's session expires; 0 when Nexon gives no number (the
+    // GUI then applies its optional fallback).
+    let mut session_secs: i64 = 0;
+    let mut session_src = "no expiry from Nexon";
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if app.get_webview_window("nexon_login").is_none() {
@@ -4679,7 +4729,7 @@ async fn nexon_login_webview(
             if let Ok(Ok(Some(session))) =
                 tauri::async_runtime::spawn_blocking(move || auth::session_from_login_cookies(&c, &d, false)).await
             {
-                return Ok(serde_json::json!({ "session": session, "expiresIn": 28800 }));
+                return Ok(serde_json::json!({ "session": session, "expiresIn": session_secs }));
             }
             return Err("Login window closed without logging in".to_string());
         }
@@ -4710,6 +4760,22 @@ async fn nexon_login_webview(
             .map(|c| (c.name().to_string(), c.value().to_string()))
             .collect();
         last_cookies = map.clone();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        if let Some(exp) = cookies.iter()
+            .filter(|c| c.name() == "NxLSession" || c.name() == "TpaSession")
+            .filter_map(|c| c.expires_datetime().map(|t| t.unix_timestamp()))
+            .max()
+        {
+            if exp > now + 60 {
+                session_secs = exp - now;
+                session_src = "NxLSession cookie";
+            }
+        }
+        // Nexon's own number from the login reply (copied by the init script).
+        if let Some(n) = map.get("mp_expires_in").and_then(|v| v.parse::<i64>().ok()).filter(|n| *n > 0) {
+            session_secs = n;
+            session_src = "Nexon login reply";
+        }
         let on_login_page = url.contains("/account/en/login") || url.contains("/nxl/login");
         let after_login = !on_login_page && upgrade_tries < 3 && !map.contains_key("NxLSession") && !map.contains_key("TpaSession");
         if after_login {
@@ -4725,9 +4791,17 @@ async fn nexon_login_webview(
             .map_err(|e| e.to_string())?;
         match polled {
             Ok(Some(session)) => {
-                log::info!("[Launcher] Browser login complete (tpa={})", session.tpa);
+                if let Some(n) = session.refreshed_expires_in.filter(|n| *n > 0) {
+                    session_secs = n as i64;
+                    session_src = "Nexon TPA exchange";
+                }
+                if session_secs > 0 {
+                    log::info!("[Launcher] Browser login complete (tpa={}, Nexon session valid for {} h {} min, from {})", session.tpa, session_secs / 3600, session_secs % 3600 / 60, session_src);
+                } else {
+                    log::info!("[Launcher] Browser login complete (tpa={}, {})", session.tpa, session_src);
+                }
                 let _ = window.close();
-                return Ok(serde_json::json!({ "session": session, "expiresIn": 28800 }));
+                return Ok(serde_json::json!({ "session": session, "expiresIn": session_secs }));
             }
             Ok(None) => {}
             // A rejected TpaSession exchange is final (single-use cookie): stop and report.
@@ -4748,8 +4822,10 @@ async fn launcher_restore_session(id: String) -> Result<serde_json::Value, Strin
     tauri::async_runtime::spawn_blocking(move || {
         use mabi_pack2::launcher::{auth, profile};
         let p = profile::load_profile(&id).map_err(|e| e.to_string())?;
-        if !p.is_session_valid() {
-            return Err("No valid stored session".to_string());
+        // A locally expired session is still worth one try: Nexon answers 401 and
+        // autologin renews it, as the official launcher does after a long break.
+        if p.session_token.is_empty() {
+            return Err("No stored session".to_string());
         }
         let mut session = match p.session.clone() {
             Some(s) => s,
@@ -4808,7 +4884,10 @@ fn launcher_import_session(profile_id: Option<String>) -> Result<serde_json::Val
         return Err("The Nexon Launcher's saved session is expired. Log in to the Nexon Launcher, then import again.".to_string());
     }
     import_guard::clear(SOURCE);
-    Ok(serde_json::json!({ "session": session }))
+    // The launcher's own NxLSession cookie date (14 days for a launcher login).
+    let expires_in = auth::nexon_launcher_session_expires_in().unwrap_or(0);
+    log::info!("[Launcher] Imported the Nexon Launcher session ({})", if expires_in > 0 { format!("valid for {} d {} h", expires_in / 86400, expires_in % 86400 / 3600) } else { "no expiry in its cookie".to_string() });
+    Ok(serde_json::json!({ "session": session, "expiresIn": expires_in }))
 }
 
 /// Device id for a login, matching the CLI (`login_device_id`): the selected
@@ -4842,8 +4921,13 @@ async fn launcher_import_browser(profile_id: Option<String>) -> Result<serde_jso
 
 /// Store a full session (cookies + NxLSession) on a profile, like the CLI does.
 #[tauri::command]
-fn launcher_save_profile_session(id: String, session: SessionInfo, expires_in: Option<i32>) -> Result<(), String> {
-    mabi_pack2::launcher::profile::save_session(&id, &session, expires_in.unwrap_or(86400))
+fn launcher_save_profile_session(id: String, session: SessionInfo, expires_in: Option<i32>, fresh: Option<bool>) -> Result<(), String> {
+    // A new sign-in restarts the signed-in clock and drops the old session's expiry.
+    if fresh.unwrap_or(false) {
+        mabi_pack2::launcher::profile::mark_login(&id).map_err(|e| e.to_string())?;
+    }
+    // 0 = Nexon gave no expiry: the profile keeps it unknown.
+    mabi_pack2::launcher::profile::save_session(&id, &session, expires_in.unwrap_or(0))
         .map_err(|e| e.to_string())
 }
 
@@ -7023,7 +7107,10 @@ async fn check_patch_version(game_path: String, session: Option<SessionInfo>) ->
         let local_hash = roots.local_hash();
         let local_manifest = local_hash.as_ref()
             .and_then(|h| std::fs::read(roots.patchdata.join(h)).ok().and_then(|b| patch::Manifest::parse(h, &b).ok()));
-        let local_version = local_manifest.as_ref().and_then(|m| get_managed_version(m.buildtime.round() as i64));
+        let local_version = local_manifest.as_ref().and_then(|m| get_managed_version(m.buildtime.round() as i64))
+            // No installed manifest (or no number for it): version.dat beside Client.exe,
+            // which mabi-patcher writes after each patch (Hyddwn's legacy ReadVersion).
+            .or_else(|| read_version_dat(&game_path));
 
         let mut session = session;
         let (remote_hash, remote_version, remote_error) = match patch::remote_manifest_hash(session.as_mut()) {
@@ -7076,6 +7163,7 @@ async fn patch_game_files(
     // Held until this command returns (after the after-patch hook).
     let _guard = PatchRunGuard::acquire()?;
     let hook_dir = game_path.clone();
+    let version_dir = game_path.clone();
     let hook_profile = profile_name.unwrap_or_default();
     let hook = move |cmd: &Option<String>, what: &str| -> Result<(), String> {
         if let Some(cmd) = cmd.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -7167,6 +7255,9 @@ async fn patch_game_files(
         return Err(session_err(msg, &token_before, session.as_ref(), profile_id.as_deref()));
     }
     let managed_version = get_managed_version(r.buildtime.round() as i64).unwrap_or(0);
+    if r.errors.is_empty() && !r.cancelled && managed_version > 0 {
+        write_version_dat(&version_dir, managed_version);
+    }
     let message = if r.cancelled { Some("Patch cancelled — run Update again to resume".to_string()) }
         else if r.need.is_empty() { Some("Game is already up to date".to_string()) }
         else { None };
@@ -7196,6 +7287,32 @@ fn clear_patch_cache(game_path: String) -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({ "ok": true, "deleted": false }))
     }
 }
+/// Folder holding the profile's Client.exe (else the install's appdata).
+fn client_dir_for(game_path: &str) -> std::path::PathBuf {
+    mabi_pack2::launcher::detect::exe_in_dir(std::path::Path::new(game_path))
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| mabi_pack2::launcher::patch::GameRoots::resolve(game_path).appdata)
+}
+
+/// version.dat beside Client.exe (u32 little-endian); None when missing or 0.
+fn read_version_dat(game_path: &str) -> Option<i64> {
+    let b = std::fs::read(client_dir_for(game_path).join("version.dat")).ok()?;
+    let v = u32::from_le_bytes(b.get(..4)?.try_into().ok()?);
+    (v > 0).then_some(v as i64)
+}
+
+/// Writes the game version (u32 little-endian) to version.dat beside the profile's
+/// Client.exe, as Nexon's old launcher did. Nexon's NXL manifest no longer lists
+/// the file (it stayed at 484), but older tools still read it.
+fn write_version_dat(game_path: &str, version: i64) {
+    let Ok(v) = u32::try_from(version) else { return };
+    let path = client_dir_for(game_path).join("version.dat");
+    match std::fs::write(&path, v.to_le_bytes()) {
+        Ok(()) => log::info!("[Patcher] Wrote version {} to {}", v, path.display()),
+        Err(e) => log::warn!("[Patcher] Could not write {}: {}", path.display(), e),
+    }
+}
+
 fn get_managed_version(buildtime: i64) -> Option<i64> {
     let body = format!("Action=CV&buildtime={}", buildtime);
     let resp = ureq::post("http://theproffessorslaboratory.net/api.php")
@@ -7204,8 +7321,10 @@ fn get_managed_version(buildtime: i64) -> Option<i64> {
         .send_string(&body)
         .ok()?;
     let text = resp.into_string().ok()?;
-    // A buildtime the site has not registered yet comes back negative (its estimate
-    // of the next version, e.g. -514): show the number.
+    // The API answers <version>, or -<latest + 1> when the buildtime is newer than
+    // every build it knows ("assume an update on Nexon's side"; its author says to
+    // use the absolute value as the next version), or ERROR (parsed as None).
+    // The minus goes away once the site's list has the build.
     text.trim().parse::<i64>().ok().map(i64::abs)
 }
 
@@ -7479,7 +7598,7 @@ mod elevated_drop {
     use winapi::um::winuser::{
         CallWindowProcW, ChangeWindowMessageFilterEx, ClientToScreen, CreateWindowExW, DefWindowProcW,
         EnumChildWindows, GetAncestor, GetAsyncKeyState, GetClientRect, GetCursorPos, GetPropW,
-        GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, RegisterClassW, RemovePropW,
+        GetSystemMetrics, GetWindowThreadProcessId, IsIconic, IsWindowVisible, RegisterClassW, RemovePropW,
         SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
         GA_ROOT, GWLP_WNDPROC, HWND_TOP, LWA_ALPHA, MA_NOACTIVATE, SM_SWAPBUTTON, SWP_NOACTIVATE,
         SWP_SHOWWINDOW, SW_HIDE, VK_LBUTTON, VK_RBUTTON, WM_COPYDATA, WM_DROPFILES, WM_ERASEBKGND,
@@ -7633,6 +7752,11 @@ mod elevated_drop {
     unsafe fn poll_drag(frame: HWND) {
         let overlay = OVERLAY.load(Ordering::Relaxed) as HWND;
         if overlay.is_null() {
+            return;
+        }
+        // Minimized or hidden (tray): nothing to drop on.
+        if IsIconic(frame) != 0 || IsWindowVisible(frame) == 0 {
+            hide_overlay(true);
             return;
         }
         // GetAsyncKeyState reads the physical button; the drag button is the
@@ -7936,7 +8060,7 @@ pub fn run() {
             launcher_import_browser, launcher_save_profile_session,
             kanan_import::kanan_default_path, kanan_import::kanan_list_accounts, kanan_import::kanan_import_accounts, kanan_import::kanan_import_otp, kanan_import::hyddwn_list_accounts, kanan_import::hyddwn_import_accounts,
 
-            shared_config_load, shared_config_save, fetch_news, open_external_url, set_tray_labels,
+            shared_config_load, shared_config_save, fetch_news, open_external_url, reset_login_cache, set_tray_labels,
             get_start_with_windows, set_start_with_windows,
 
             world_preview::itemdb_load, world_preview::itemdb_for_model, world_preview::itemdb_search,

@@ -4,6 +4,7 @@ import { writeTextFile, writeFile } from "./platform/fs";
 import { listen } from "./platform/event";
 import { isTauri } from "./platform/isTauri";
 import { locales as TRANSLATIONS } from "./locales";
+import { sessionTime } from "./sessionLabel";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
 import type { Mounted3d } from "./preview3d/panel";
 import type { AssetHost } from "./preview3d/worldData";
@@ -136,6 +137,8 @@ interface Config {
     /** Wildcard paths (`*`, `?`) the patcher never touches — keeps local mods safe. */
     patcher_ignore_list?: string[];
     launch_use_nexon_launcher: boolean;
+    launcher_show_time_logged_in: boolean;
+    launcher_session_fallback: boolean;
     launch_cmd_override: string;
     pre_patch_cmd: string;
     post_patch_cmd: string;
@@ -289,6 +292,8 @@ class App {
         patcher_ignore_list: [],
         patcher_max_workers: 10,
         launch_use_nexon_launcher: false,
+        launcher_show_time_logged_in: true,
+        launcher_session_fallback: false,
         launch_cmd_override: "",
         pre_patch_cmd: "",
         post_patch_cmd: "",
@@ -538,10 +543,6 @@ class App {
         }
 
         const isAdmin: boolean = await invoke("is_ran_as_admin");
-        if (isAdmin) {
-            // Windows (UIPI) blocks drag-and-drop from a normal Explorer window into an elevated one.
-            this.log(this.t("msg_admin_no_dragdrop"), "warn");
-        }
         if (this.config.patcher_run_elevated && !isAdmin) {
             await invoke("request_elevation");
             return;
@@ -563,6 +564,7 @@ class App {
         }
 
         this.startupGameUpdate();
+        this.restoreActivity();
         this.log(this.t("engineInit"), "success");
         if (this.config.app_update_check) this.checkAppUpdate(true);
     }
@@ -1138,48 +1140,64 @@ class App {
     /** Compares the installed game with the patch server and shows the result on the
      *  Patcher tab. Returns whether files need an update, or null when the check failed. */
     private async checkGameUpdate(gamePath: string): Promise<boolean | null> {
-        const statusEl = document.getElementById("patcher-status");
+        // The Patcher tab and Settings > Launcher > Game Update Check show the same result.
         const setText = (msg: string, ok?: boolean) => {
-            if (!statusEl) return;
-            statusEl.textContent = msg;
-            statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)";
+            const statusEl = document.getElementById("patcher-status");
+            if (statusEl) {
+                statusEl.textContent = msg;
+                statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)";
+            }
+            const settingsEl = document.getElementById("launcher-update-status");
+            if (settingsEl) {
+                settingsEl.textContent = msg;
+                settingsEl.className = "launcher-update-status" + (ok === false ? " error" : ok === true ? " up-to-date" : "");
+                settingsEl.classList.remove("hidden");
+            }
+        };
+        const report = (msg: string, ok: boolean | undefined, level: "info" | "warn" = "info") => {
+            setText(msg, ok);
+            this.log(`${this.t("log_tag_patcher")} ${msg}`, level);
         };
         setText(this.t("patcher_checking"));
         this.log(this.t("log_patcher_checking_updates"));
         try {
             const res = await invoke("check_patch_version", { gamePath, session: this.launcherSession }) as any;
             this.keepRefreshedSession(res.session);
-            if (res.relogin_required) {
-                setText(this.t("launcher_session_expired"), false);
-                await this.promptRelogin();
-                return null;
-            }
+            const local = String(res.local_version ?? "?");
             const localEl = document.getElementById("patcher-version-local");
             const remoteEl = document.getElementById("patcher-version-remote");
             if (localEl) localEl.textContent = String(res.local_version ?? "—");
             if (remoteEl) remoteEl.textContent = String(res.remote_version ?? "—");
-            if (res.error && res.remote_version == null && !res.remote_hash) {
-                this.log(this.t("log_patcher_remote_check", [String(res.error)]));
+            if (res.relogin_required) {
+                report(this.t("patcher_remote_expired", [local]), false, "warn");
+                await this.promptRelogin();
+                return null;
+            }
+            if (!res.remote_hash) {
+                // Nexon's current manifest could not be read: say why.
+                const msg = !this.launcherSession
+                    ? this.t("patcher_remote_need_login", [local])
+                    : this.t("patcher_remote_unreachable", [local, this.cleanErr(res.error ?? "")]);
+                report(msg, false, "warn");
+                return null;
             }
             if (res.needs_update) {
-                setText(this.t("patcher_update_available", [String(res.remote_version)]), false);
-                this.log(this.t("log_patcher_update_available", [String(res.local_version), String(res.remote_version)]));
-            } else if (res.remote_version == null) {
-                setText(this.t("patcher_installed_ver", [String(res.local_version ?? "?")]), true);
-                this.log(this.t("log_patcher_local_ver_no_remote", [String(res.local_version ?? "?")]));
+                report(res.remote_version != null
+                    ? this.t("log_patcher_update_available", [local, String(res.remote_version)])
+                    : this.t("patcher_update_version_unknown", [local]), false);
             } else {
-                setText(this.t("patcher_up_to_date"), true);
-                this.log(this.t("log_patcher_up_to_date", [String(res.local_version)]));
+                report(res.local_version != null
+                    ? this.t("log_patcher_up_to_date", [local])
+                    : this.t("patcher_up_to_date_version_unknown"), true);
             }
             return !!res.needs_update;
         } catch(e) {
             if (this.isReloginError(e)) {
-                setText(this.t("launcher_session_expired"), false);
+                report(this.t("patcher_remote_expired", ["?"]), false, "warn");
                 await this.promptRelogin();
                 return null;
             }
-            setText(this.t("patcher_check_failed", [this.cleanErr(e)]), false);
-            this.log(this.t("log_patcher_check_error", [this.cleanErr(e)]));
+            report(this.t("patcher_check_failed", [this.cleanErr(e)]), false, "warn");
             return null;
         }
     }
@@ -1352,6 +1370,8 @@ class App {
         const maxWorkersEl = document.getElementById("patcher-max-workers") as HTMLInputElement | null;
         const hyddwnUrlEl = document.getElementById("patcher-hyddwn-url") as HTMLInputElement | null;
         const launchNexonEl = document.getElementById("launch-use-nexon-launcher") as HTMLInputElement | null;
+        const showLoggedInEl = document.getElementById("launcher-show-time-logged-in") as HTMLInputElement | null;
+        const sessionFallbackEl = document.getElementById("launcher-session-fallback") as HTMLInputElement | null;
         const launchCmdEl = document.getElementById("launch-cmd-override") as HTMLTextAreaElement | null;
         const prePatchEl = document.getElementById("pre-patch-cmd") as HTMLTextAreaElement | null;
         const postPatchEl = document.getElementById("post-patch-cmd") as HTMLTextAreaElement | null;
@@ -1368,6 +1388,8 @@ class App {
         if (maxWorkersEl) maxWorkersEl.value = String(this.config.patcher_max_workers ?? 10);
         if (hyddwnUrlEl && this.config.patcher_hyddwn_url) hyddwnUrlEl.value = this.config.patcher_hyddwn_url;
         if (launchNexonEl) launchNexonEl.checked = this.config.launch_use_nexon_launcher ?? false;
+        if (showLoggedInEl) showLoggedInEl.checked = this.config.launcher_show_time_logged_in ?? true;
+        if (sessionFallbackEl) sessionFallbackEl.checked = this.config.launcher_session_fallback ?? false;
         if (launchCmdEl) launchCmdEl.value = this.config.launch_cmd_override ?? "";
         if (productIdEl) productIdEl.value = String(this.config.product_id || 10200);
         // Hooks + ignore list come from the config shared with the CLI/REST API.
@@ -1396,6 +1418,12 @@ class App {
             this.saveConfig();
         });
         launchNexonEl?.addEventListener("change", () => { this.config.launch_use_nexon_launcher = launchNexonEl.checked; this.saveConfig(); });
+        showLoggedInEl?.addEventListener("change", () => {
+            this.config.launcher_show_time_logged_in = showLoggedInEl.checked;
+            this.saveConfig();
+            this.refreshProfileLabels();
+        });
+        sessionFallbackEl?.addEventListener("change", () => { this.config.launcher_session_fallback = sessionFallbackEl.checked; this.saveConfig(); });
         launchCmdEl?.addEventListener("blur", () => { this.config.launch_cmd_override = launchCmdEl.value.trim(); this.saveConfig(); });
         prePatchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.before_patch = prePatchEl.value.trim(); this.saveSharedConfig(); });
         postPatchEl?.addEventListener("blur", () => { this.sharedConfig.hooks.after_patch = postPatchEl.value.trim(); this.saveSharedConfig(); });
@@ -3525,6 +3553,7 @@ class App {
         // Move a session older versions kept in localStorage into the profile store,
         // then load profiles from the backend.
         this.profilesReady = this.migrateLegacySession().finally(() => this.loadProfiles()).catch(() => {});
+        this.startSessionKeepAlive();
 
         // Login / logout / launch
         document.getElementById("btn-launcher-login")?.addEventListener("click", () => this.launcherDoLogin());
@@ -3535,44 +3564,34 @@ class App {
         document.getElementById("btn-launcher-import-kanan")?.addEventListener("click", () => this.launcherImportKanan());
         document.getElementById("btn-launcher-import-hyddwn")?.addEventListener("click", () => this.launcherImportHyddwn());
         document.getElementById("btn-launcher-installs")?.addEventListener("click", () => this.checkAllInstalls("launcher-installs-panel"));
+        document.getElementById("btn-reset-login-cache")?.addEventListener("click", async () => {
+            // Clearing the WebView2 profile also wipes this page's local storage
+            // (Recent Activity, 3D view settings): keep a copy and put it back.
+            const saved: Record<string, string> = {};
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (k !== null) saved[k] = localStorage.getItem(k) ?? "";
+                }
+            } catch { /* storage unavailable */ }
+            try {
+                const n = await invoke<number>("reset_login_cache");
+                // The clear finishes in the background: restore after it has run.
+                await new Promise(r => setTimeout(r, 1500));
+                try { for (const [k, v] of Object.entries(saved)) localStorage.setItem(k, v); } catch { /* storage unavailable */ }
+                this.log(`${this.t("log_tag_launcher")} ${this.t("log_login_cache_reset", [String(n)])}`, "success");
+            } catch (e) {
+                this.log(`${this.t("log_tag_launcher")} ${this.t("msg_error_fmt", [String(e)])}`, "error");
+            }
+        });
 
         document.getElementById("btn-launcher-check-update")?.addEventListener("click", async () => {
+            const gp = this.config.patcher_game_path;
+            if (gp) { await this.checkGameUpdate(gp); return; }
             const statusEl = document.getElementById("launcher-update-status")!;
-            statusEl.textContent = this.t("patcher_checking");
-            statusEl.className = "launcher-update-status";
+            statusEl.textContent = this.t("patcher_set_path_first");
+            statusEl.className = "launcher-update-status error";
             statusEl.classList.remove("hidden");
-            try {
-                const info = await invoke("get_mabi_version_from_launcher_cache") as {
-                    cached_version: number | null;
-                    cached_manifest_url: string | null;
-                    local_manifest_hash: string | null;
-                    cdn_manifest_hash: string | null;
-                    update_available: boolean | null;
-                };
-                if (info.cached_version) {
-                    if (info.update_available === true) {
-                        statusEl.textContent = this.t("launcher_ver_update_available", [String(info.cached_version)]);
-                        statusEl.className = "launcher-update-status error";
-                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_update", [String(info.cached_version)])}`, "warn");
-                    } else if (info.update_available === false) {
-                        statusEl.textContent = this.t("launcher_ver_up_to_date", [String(info.cached_version)]);
-                        statusEl.className = "launcher-update-status up-to-date";
-                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_uptodate", [String(info.cached_version)])}`, "info");
-                    } else {
-                        statusEl.textContent = this.t("launcher_ver_cached", [String(info.cached_version)]);
-                        statusEl.className = "launcher-update-status up-to-date";
-                        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_cached", [String(info.cached_version)])}`, "info");
-                    }
-                } else {
-                    statusEl.textContent = this.t("launcher_ver_not_found");
-                    statusEl.className = "launcher-update-status error";
-                    this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_none")}`, "warn");
-                }
-            } catch (e) {
-                statusEl.textContent = this.t("patcher_check_failed", [String(e)]);
-                statusEl.className = "launcher-update-status error";
-                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_vercheck_failed", [String(e)])}`, "error");
-            }
         });
 
         // Profile selector change (Settings > Launcher sub-tab)
@@ -3691,11 +3710,13 @@ class App {
 
             if (active) {
                 this.applyProfileToUI(active);
-                if (await this.handleExpiredAutologin(active)) {
-                    // expired: re-login prompt shown instead of a doomed autologin
-                } else if (this.launcherSession) {
+                if (this.launcherSession) {
                     // already signed in this run (e.g. reload right after a login)
-                } else if (!(await this.restoreProfileSession(active)) && active.auto_login && active.session_valid) {
+                } else if (await this.restoreProfileSession(active)) {
+                    // stored session accepted, or renewed by Nexon
+                } else if (await this.handleExpiredAutologin(active)) {
+                    // Nexon refused to renew it: re-login prompt shown
+                } else if (active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
                 }
             } else {
@@ -3758,21 +3779,31 @@ class App {
         const state = signedIn ? `✓ ${this.t("launcher_profile_state_ok")}`
             : p.has_session ? `⚠ ${this.t("launcher_profile_state_expired")}`
             : this.t("launcher_profile_state_none");
-        const left = signedIn ? this.formatExpiry(p.session_expires_at) : "";
+        const left = this.formatSessionTime(sessionTime(
+            { signedIn, session_started_at: p.session_started_at, session_expires_at: p.session_expires_at },
+            Date.now() / 1000, this.config.launcher_show_time_logged_in ?? true));
         return `${p.name}${emailPart}${typeBadge} · ${state}${left ? ` (${left})` : ""}`;
     }
 
-    /** Session time left until `expiresAt` (unix seconds): "29d 4h", "2h 15m", "45m",
-     *  "Expired" (localized); "" when unknown. Same rules as profile::format_expiry. */
-    private formatExpiry(expiresAt: number | undefined): string {
-        if (!expiresAt) return "";
-        const left = Math.floor(expiresAt - Date.now() / 1000);
-        if (left <= 0) return this.t("launcher_expiry_expired");
-        const d = Math.floor(left / 86400), h = Math.floor((left % 86400) / 3600), m = Math.floor((left % 3600) / 60);
-        if (d > 0) return this.t("launcher_expiry_dh", [String(d), String(h)]);
-        if (h > 0) return this.t("launcher_expiry_hm", [String(h), String(m)]);
-        if (m > 0) return this.t("launcher_expiry_m", [String(m)]);
-        return this.t("launcher_expiry_lt1m");
+    /** Localized label for [`sessionTime`]: "for 2h 15m", "for 0m" (sign-in time
+     *  unknown), "5h 44m" left, "Expired", or "". Spans follow profile::format_expiry. */
+    private formatSessionTime(st: ReturnType<typeof sessionTime>): string {
+        if (st.kind === "none") return "";
+        if (st.kind === "left" && st.secs <= 0) return this.t("launcher_expiry_expired");
+        const n = st.secs;
+        const d = Math.floor(n / 86400), h = Math.floor((n % 86400) / 3600), m = Math.floor((n % 3600) / 60);
+        const span = d > 0 ? this.t("launcher_expiry_dh", [String(d), String(h)])
+            : h > 0 ? this.t("launcher_expiry_hm", [String(h), String(m)])
+            : m > 0 || (st.kind === "since" && !st.known) ? this.t("launcher_expiry_m", [String(m)])
+            : this.t("launcher_expiry_lt1m");
+        return st.kind === "since" ? this.t("launcher_signed_in_for", [span]) : span;
+    }
+
+    /** Nexon's session length, or (with the fallback setting on) `assumed` seconds
+     *  when Nexon gave none; 0 = unknown. */
+    private sessionSecs(fromNexon: number | undefined, assumed: number): number {
+        if (fromNexon && fromNexon > 0) return fromNexon;
+        return this.config.launcher_session_fallback ? assumed : 0;
     }
 
     /** True when the profile's stored session is past its recorded expiry (unknown = no). */
@@ -3781,27 +3812,47 @@ class App {
     }
 
     private profileExpiryTimer: number | null = null;
+    private sessionKeepAliveTimer: number | null = null;
+
+    /** While the app runs, renew the active profile's session when it has under an
+     *  hour left (autologin), so it never lapses. Browser (Google) logins cannot be
+     *  renewed by Nexon and are left alone. */
+    private startSessionKeepAlive() {
+        if (this.sessionKeepAliveTimer !== null) return;
+        this.sessionKeepAliveTimer = window.setInterval(async () => {
+            const id = this.activeProfileId;
+            const p = id ? this.launcherProfiles.find(x => x.id === id) : null;
+            if (!p || p.is_official === false || !this.launcherSession || this.launcherSession.tpa) return;
+            if (!p.session_expires_at || p.session_expires_at - Date.now() / 1000 > 3600) return;
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_renew", [p.name])}`, "info");
+            await this.autologinProfile(p.id);
+        }, 10 * 60_000);
+    }
 
     /** Refresh the profile list's countdowns every 60 s (labels only; the selection stays). */
     private startProfileExpiryTimer() {
         if (this.profileExpiryTimer !== null) return;
-        this.profileExpiryTimer = window.setInterval(() => {
-            for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
-                const sel = document.getElementById(selId) as HTMLSelectElement | null;
-                if (!sel) continue;
-                for (const opt of Array.from(sel.options)) {
-                    const p = this.launcherProfiles.find(x => x.id === opt.value);
-                    if (p) opt.textContent = this.profileOptionLabel(p);
-                }
+        this.profileExpiryTimer = window.setInterval(() => this.refreshProfileLabels(), 60_000);
+    }
+
+    /** Rewrite the profile list labels (time left / time signed in); the selection stays. */
+    private refreshProfileLabels() {
+        for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
+            const sel = document.getElementById(selId) as HTMLSelectElement | null;
+            if (!sel) continue;
+            for (const opt of Array.from(sel.options)) {
+                const p = this.launcherProfiles.find(x => x.id === opt.value);
+                if (p) opt.textContent = this.profileOptionLabel(p);
             }
-        }, 60_000);
+        }
     }
 
     /** Record a new session expiry for a profile locally (the backend persisted it). */
     private noteProfileExpiry(id: string | null, expiresIn: number) {
         const p = id ? this.launcherProfiles.find(x => x.id === id) : null;
-        if (!p || !(expiresIn > 0)) return;
-        p.session_expires_at = Math.floor(Date.now() / 1000) + expiresIn;
+        if (!p) return;
+        // 0 = Nexon gave no expiry: unknown.
+        p.session_expires_at = expiresIn > 0 ? Math.floor(Date.now() / 1000) + expiresIn : 0;
         p.has_session = true;
         p.session_valid = true;
         for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
@@ -4038,8 +4089,8 @@ class App {
         }
         this.applyProfileToUI(profile);
         try { await invoke("launcher_set_active_profile", { id }); } catch {}
-        if (await this.handleExpiredAutologin(profile)) return;
         if (await this.restoreProfileSession(profile)) return;
+        if (await this.handleExpiredAutologin(profile)) return;
         if (profile.auto_login && profile.session_valid) {
             await this.autologinProfile(id);
         }
@@ -4049,7 +4100,8 @@ class App {
      *  Nexon allows it, by the backend). Works for browser/SSO logins too, which
      *  autologin can't renew. True when the profile is now signed in. */
     private async restoreProfileSession(profile: any): Promise<boolean> {
-        if (profile?.is_official === false || !profile?.session_valid || this.profileSessionExpired(profile)) return false;
+        // An expired session is still tried: the backend asks Nexon to renew it.
+        if (profile?.is_official === false || !profile?.has_session) return false;
         try {
             const r = await invoke("launcher_restore_session", { id: profile.id }) as { session: any; expiresIn?: number };
             if (!r?.session) return false;
@@ -4083,9 +4135,9 @@ class App {
             await invoke("launcher_update_profile_session", {
                 id: profileId,
                 sessionToken: result.session.session_token,
-                expiresIn: result.expiresIn || 86400,
+                expiresIn: this.sessionSecs(result.expiresIn, 86400),
             }).catch(() => {});
-            this.noteProfileExpiry(profileId, result.expiresIn || 86400);
+            this.noteProfileExpiry(profileId, this.sessionSecs(result.expiresIn, 86400));
         } catch (e: any) {
             this.setLauncherStatus(this.t("launcher_autologin_failed", [String(e)]), "error");
             this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_autologin_failed", [String(e)])}`, "error");
@@ -4275,7 +4327,8 @@ class App {
                 await invoke("launcher_save_profile_session", {
                     id: this.activeProfileId,
                     session: result.session,
-                    expiresIn: result.expiresIn || 86400,
+                    expiresIn: this.sessionSecs(result.expiresIn, 28800),
+                    fresh: true,
                 }).catch(() => {});
                 await this.loadProfiles();
             }
@@ -4306,8 +4359,8 @@ class App {
         if (btn) btn.disabled = true;
         this.setLauncherStatus(this.t("launcher_importing_session"), "busy");
         try {
-            const result = await invoke("launcher_import_session", { profileId: this.activeProfileId || null }) as { session: any };
-            await this.adoptImportedSession(result.session);
+            const result = await invoke("launcher_import_session", { profileId: this.activeProfileId || null }) as { session: any; expiresIn?: number };
+            await this.adoptImportedSession(result.session, result.expiresIn);
             this.setLauncherStatus(this.t("launcher_session_imported"), "ok");
             this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_session_imported")}`, "info");
             this.fetchLauncherVersion();
@@ -4320,10 +4373,10 @@ class App {
     }
 
     /** Use an imported session: keep it, and save it into the selected profile. */
-    private async adoptImportedSession(session: any) {
+    private async adoptImportedSession(session: any, expiresIn?: number) {
         this.launcherSession = session;
         if (this.activeProfileId && session?.session_token) {
-            await invoke("launcher_save_profile_session", { id: this.activeProfileId, session, expiresIn: 86400 })
+            await invoke("launcher_save_profile_session", { id: this.activeProfileId, session, expiresIn: this.sessionSecs(expiresIn, 86400), fresh: true })
                 .catch((e) => this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_save_to_profile_failed", [String(e)])}`, "warn"));
             await this.loadProfiles();
         }
@@ -4432,8 +4485,8 @@ class App {
         }
         if (!isCustomServer) {
             const active = this.launcherProfiles.find(p => p.id === this.activeProfileId);
-            if (this.profileSessionExpired(active)) {
-                // The stored session is past its expiry: a launch could only fail with 401.
+            if (this.profileSessionExpired(active) && !(await this.restoreProfileSession(active))) {
+                // Past its expiry and Nexon would not renew it: log in again.
                 this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [active.name])}`, "warn");
                 await this.promptRelogin();
                 return;
@@ -4569,17 +4622,42 @@ class App {
         }
     }
 
-    private addActivity(message: string) {
+    /** Recent Activity survives restarts: the last ACTIVITY_MAX entries are kept here. */
+    private static readonly ACTIVITY_KEY = "mabi-patcher.activity";
+    private static readonly ACTIVITY_MAX = 30;
+
+    private savedActivity(): { at: number; text: string }[] {
+        try {
+            const v = JSON.parse(localStorage.getItem(App.ACTIVITY_KEY) || "[]");
+            return Array.isArray(v) ? v.filter(e => e && typeof e.text === "string" && typeof e.at === "number") : [];
+        } catch { return []; }
+    }
+
+    /** Adds one row to the top of Recent Activity; earlier days show their date. */
+    private renderActivity(at: number, message: string) {
         const list = document.getElementById("activity-list");
         if (!list) return;
         list.querySelector(".no-activity")?.remove();
         const item = document.createElement("div");
         item.className = "activity-item";
-        const time = new Date().toLocaleTimeString();
+        const d = new Date(at);
+        const time = d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString() : d.toLocaleString();
         // Messages carry paths and server errors: build them as text.
         item.append(elText("span", "activity-time", time), " ", elText("span", "activity-text", message));
         list.prepend(item);
-        if (list.children.length > 10) list.lastElementChild?.remove();
+        while (list.children.length > App.ACTIVITY_MAX) list.lastElementChild?.remove();
+    }
+
+    private addActivity(message: string) {
+        const at = Date.now();
+        const saved = [{ at, text: message }, ...this.savedActivity()].slice(0, App.ACTIVITY_MAX);
+        try { localStorage.setItem(App.ACTIVITY_KEY, JSON.stringify(saved)); } catch { /* storage unavailable */ }
+        this.renderActivity(at, message);
+    }
+
+    /** Shows the activity saved by earlier runs, oldest first so the newest ends on top. */
+    private restoreActivity() {
+        for (const e of this.savedActivity().reverse()) this.renderActivity(e.at, e.text);
     }
 
     private setupNavigation() {

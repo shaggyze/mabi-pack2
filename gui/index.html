@@ -977,6 +977,14 @@
               <span id="label_launch_nexon_launcher" data-i18n="label_launch_nexon_launcher">Via Nexon Launcher</span>
               <label class="switch"><input type="checkbox" id="launch-use-nexon-launcher"><span class="slider"></span></label>
             </div>
+            <div class="sys-stat">
+              <span data-i18n="label_launcher_show_time_logged_in">Show time logged in (in place of time left)</span>
+              <label class="switch"><input type="checkbox" id="launcher-show-time-logged-in"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_launcher_session_fallback">Assume 8 h session when Nexon gives no expiry</span>
+              <label class="switch"><input type="checkbox" id="launcher-session-fallback"><span class="slider"></span></label>
+            </div>
             <div class="form-group" style="margin-top:8px">
               <label style="font-size:0.8rem;color:var(--text-muted)" id="label_launch_cmd_override" data-i18n="label_launch_cmd_override">Custom Launch Command (leave blank for auto)</label>
               <textarea id="launch-cmd-override" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="{client_dir}\Client.exe {args} /P:{passport}"></textarea>

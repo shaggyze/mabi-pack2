@@ -280,7 +280,14 @@ fn handle_list(req: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 .collect();
             ok(json!({ "archive": archive, "count": entries.len(), "entries": entries }))
         }
-        Err(e) => err(&e.to_string(), 500),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            match crate::placeholder_archive_size(&archive) {
+                Some(n) => ok(json!({ "archive": archive, "count": 0, "entries": [], "placeholder": true,
+                                      "note": crate::placeholder_archive_note(&archive, n) })),
+                None => err(&format!("{} ({})", crate::header_search_failed_message(&archive, salts.len()), e), 500),
+            }
+        }
     }
 }
 

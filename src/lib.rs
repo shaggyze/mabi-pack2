@@ -139,6 +139,37 @@ pub fn load_salts() -> Vec<String> {
     CACHED_SALTS.lock().unwrap().clone().unwrap_or_default()
 }
 
+/// Nexon's manifest keeps some retired `.it` slots as 1 KiB files with no header
+/// and no entries (e.g. `data_00656.it`, `data_01780.it`). Listing reports them as
+/// empty archives instead of failing.
+pub const PLACEHOLDER_IT_MAX_BYTES: u64 = 1024;
+
+/// Size of `path` when it is such a placeholder `.it` (call only after the header
+/// search failed: a real archive is never this small).
+pub fn placeholder_archive_size(path: &str) -> Option<u64> {
+    if !path.to_ascii_lowercase().ends_with(".it") {
+        return None;
+    }
+    let size = std::fs::metadata(path).ok()?.len();
+    (size <= PLACEHOLDER_IT_MAX_BYTES).then_some(size)
+}
+
+/// One line for logs and the CLI about a placeholder archive.
+pub fn placeholder_archive_note(path: &str, size: u64) -> String {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+    format!("{}: empty placeholder archive ({} bytes, no header), 0 files. Nexon ships it this way.", name, size)
+}
+
+/// Clearer text for a failed header search on a real archive.
+pub fn header_search_failed_message(path: &str, salts: usize) -> String {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+    format!(
+        "{}: no salt opens its header (tried {} salts in Sub and Xor mode at every header offset). \
+         It may be damaged, not a Mabinogi .it file, or need a salt that is not in salts.txt yet.",
+        name, salts
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

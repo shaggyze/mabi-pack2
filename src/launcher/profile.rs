@@ -27,6 +27,10 @@ pub struct Profile {
     /// Seconds until session_token expires (unix epoch).
     #[serde(default)]
     pub session_expires_at: u64,
+    /// Unix time the user last signed in (browser, email or import). Session
+    /// checks and renewals keep it, so the GUI can show time signed in.
+    #[serde(default)]
+    pub session_started_at: u64,
     /// Mabinogi installation directory containing Client.exe.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_dir: String,
@@ -76,6 +80,7 @@ impl Profile {
             email: email.to_string(),
             session_token: String::new(),
             session_expires_at: 0,
+            session_started_at: 0,
             client_dir: String::new(),
             auto_login: false,
             created_at: unix_now(),
@@ -106,11 +111,40 @@ impl Profile {
         self.session_expires_at != 0 && unix_now() >= self.session_expires_at
     }
 
+    /// A stored session that is not known to be expired. An unknown expiry (0)
+    /// counts as valid: Nexon decides when the session is used.
+    /// A new sign-in at `now`: the signed-in clock restarts, and the previous
+    /// session's expiry is cleared (the following [`Self::apply_session`] sets the real one).
+    pub fn apply_login(&mut self, now: u64) {
+        self.session_started_at = now;
+        self.session_expires_at = 0;
+    }
+
+    /// Store `session` at `now`. `expires_in_secs` 0 = unknown: the expiry of an
+    /// in-place refresh is used if one happened, else the stored expiry is kept.
+    pub fn apply_session(&mut self, session: &crate::launcher::auth::NexonSession, expires_in_secs: i32, now: u64) {
+        self.session_token = session.session_token.clone();
+        let expires_in_secs = if expires_in_secs > 0 {
+            expires_in_secs
+        } else {
+            session.refreshed_expires_in.unwrap_or(0)
+        };
+        self.session = Some(crate::launcher::auth::NexonSession { refreshed_expires_in: None, ..session.clone() });
+        if expires_in_secs > 0 {
+            self.session_expires_at = now + expires_in_secs as u64;
+        }
+        // Profiles saved before session_started_at existed: start from the last login.
+        if self.session_started_at == 0 {
+            self.session_started_at = if self.last_login_at > 0 { self.last_login_at } else { now };
+        }
+        self.last_login_at = now;
+    }
+
     pub fn is_session_valid(&self) -> bool {
         !self.session_token.is_empty() && {
             let now = unix_now();
             // Allow a 60-second grace window for clock skew
-            self.session_expires_at > now.saturating_sub(60)
+            self.session_expires_at == 0 || self.session_expires_at > now.saturating_sub(60)
         }
     }
 }
@@ -304,8 +338,18 @@ pub fn update_session(id: &str, session_token: &str, expires_in_secs: i32) -> Re
     if let Some(s) = profile.session.as_mut() {
         s.session_token = session_token.to_string();
     }
-    profile.session_expires_at = unix_now() + expires_in_secs.max(0) as u64;
+    // 0 = Nexon gave no expiry: keep it unknown.
+    profile.session_expires_at = if expires_in_secs > 0 { unix_now() + expires_in_secs as u64 } else { 0 };
     profile.last_login_at = unix_now();
+    store.save()
+}
+
+/// Record a new sign-in on a profile: the signed-in clock restarts, and an expiry
+/// left from the previous session is cleared (the next save sets the real one).
+pub fn mark_login(id: &str) -> Result<()> {
+    let mut store = ProfileStore::load()?;
+    let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile not found: {}", id))?;
+    profile.apply_login(unix_now());
     store.save()
 }
 
@@ -313,18 +357,7 @@ pub fn update_session(id: &str, session_token: &str, expires_in_secs: i32) -> Re
 pub fn save_session(id: &str, session: &crate::launcher::auth::NexonSession, expires_in_secs: i32) -> Result<()> {
     let mut store = ProfileStore::load()?;
     let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile not found: {}", id))?;
-    profile.session_token = session.session_token.clone();
-    // 0 = "unknown": use the expiry of an in-place refresh, if one happened.
-    let expires_in_secs = if expires_in_secs > 0 {
-        expires_in_secs
-    } else {
-        session.refreshed_expires_in.unwrap_or(0)
-    };
-    profile.session = Some(crate::launcher::auth::NexonSession { refreshed_expires_in: None, ..session.clone() });
-    if expires_in_secs > 0 {
-        profile.session_expires_at = unix_now() + expires_in_secs as u64;
-    }
-    profile.last_login_at = unix_now();
+    profile.apply_session(session, expires_in_secs, unix_now());
     store.save()
 }
 
@@ -342,6 +375,9 @@ pub struct ProfileSummary {
     /// Unix time the stored session (NxLSession) expires; 0 = unknown / none.
     #[serde(default)]
     pub session_expires_at: u64,
+    /// Unix time of the last sign-in; 0 = unknown / none.
+    #[serde(default)]
+    pub session_started_at: u64,
     pub created_at: u64,
     pub last_login_at: u64,
     pub profile_type: String,
@@ -363,6 +399,7 @@ impl From<&Profile> for ProfileSummary {
             has_session: !p.session_token.is_empty(),
             session_valid: p.is_session_valid(),
             session_expires_at: if p.session_token.is_empty() { 0 } else { p.session_expires_at },
+            session_started_at: if p.session_token.is_empty() { 0 } else { p.session_started_at },
             created_at: p.created_at,
             last_login_at: p.last_login_at,
             profile_type: p.profile_type.clone(),
@@ -500,6 +537,67 @@ mod tests {
         assert_eq!(ProfileSummary::from(&p).session_expires_at, p.session_expires_at);
         p.session_token.clear();
         assert_eq!(ProfileSummary::from(&p).session_expires_at, 0, "no session, no countdown");
+    }
+
+    fn test_session(token: &str) -> crate::launcher::auth::NexonSession {
+        let mut s = crate::launcher::auth::NexonSession::default();
+        s.session_token = token.into();
+        s
+    }
+
+    #[test]
+    fn unknown_expiry_counts_as_valid() {
+        let mut p = Profile::new("x", "x@example.com");
+        assert!(!p.is_session_valid(), "no token");
+        p.session_token = "tok".into();
+        assert!(p.is_session_valid(), "token, unknown expiry");
+        p.session_expires_at = unix_now() - 3600;
+        assert!(!p.is_session_valid(), "known and past");
+    }
+
+    #[test]
+    fn login_with_unknown_expiry_clears_old_expiry_and_starts_clock() {
+        let mut p = Profile::new("x", "x@example.com");
+        p.apply_session(&test_session("old"), 3600, 1_000);
+        assert_eq!(p.session_expires_at, 4_600);
+        p.apply_login(9_000);
+        p.apply_session(&test_session("new"), 0, 9_000);
+        assert_eq!(p.session_expires_at, 0, "no stale expiry from the old session");
+        assert_eq!(p.session_started_at, 9_000);
+        assert!(p.is_session_valid());
+    }
+
+    #[test]
+    fn renewal_keeps_signed_in_clock() {
+        let mut p = Profile::new("x", "x@example.com");
+        p.apply_login(1_000);
+        p.apply_session(&test_session("a"), 28_740, 1_000);
+        p.apply_session(&test_session("b"), 0, 5_000);
+        assert_eq!(p.session_started_at, 1_000, "restore/refresh keeps the clock");
+        assert_eq!(p.session_expires_at, 29_740, "unknown keeps the stored expiry");
+        assert_eq!(p.last_login_at, 5_000);
+    }
+
+    #[test]
+    fn legacy_profile_clock_starts_at_last_login() {
+        let mut p = Profile::new("x", "x@example.com");
+        p.last_login_at = 2_000;
+        p.apply_session(&test_session("a"), 0, 7_000);
+        assert_eq!(p.session_started_at, 2_000);
+        let mut fresh = Profile::new("y", "y@example.com");
+        fresh.apply_session(&test_session("a"), 0, 7_000);
+        assert_eq!(fresh.session_started_at, 7_000, "first save ever");
+    }
+
+    #[test]
+    fn summary_hides_times_without_a_session() {
+        let mut p = Profile::new("x", "x@example.com");
+        p.apply_login(1_000);
+        p.apply_session(&test_session("a"), 100, 1_000);
+        assert_eq!(ProfileSummary::from(&p).session_started_at, 1_000);
+        p.session_token.clear();
+        let s = ProfileSummary::from(&p);
+        assert_eq!((s.session_started_at, s.session_expires_at), (0, 0), "not logged in = 0");
     }
 
     #[test]

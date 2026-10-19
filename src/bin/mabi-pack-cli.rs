@@ -223,7 +223,17 @@ fn main() -> Result<()> {
         let input_fname = sub_matches.get_one::<String>("input").unwrap();
         let output_path = sub_matches.get_one::<String>("output").map(|s| s.as_str());
         
-        list::run_list_with_key_search(input_fname, cli_key, &all_salts, output_path)?;
+        if let Err(e) = list::run_list_with_key_search(input_fname, cli_key, &all_salts, output_path) {
+            match mabi_pack2::placeholder_archive_size(input_fname) {
+                Some(n) => {
+                    if let Some(out) = output_path {
+                        std::fs::write(out, "")?;
+                    }
+                    println!("{}", mabi_pack2::placeholder_archive_note(input_fname, n));
+                }
+                None => return Err(anyhow::anyhow!("{} ({})", mabi_pack2::header_search_failed_message(input_fname, all_salts.len()), e)),
+            }
+        }
     } else if let Some(sub_matches) = matches.subcommand_matches("extract") {
         let cli_key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
         let input_fname = sub_matches.get_one::<String>("input").unwrap();

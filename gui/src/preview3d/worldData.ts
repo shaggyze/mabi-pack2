@@ -174,18 +174,17 @@ export function ensureItemDb(host: AssetHost): Promise<ItemDbStatus | null> {
 export const itemsForModel = (model: string) => invoke<ItemEntry[]>("itemdb_for_model", { model });
 export const searchItems = (query: string, limit = 40) => invoke<ItemEntry[]>("itemdb_search", { query, limit });
 
-export interface PropDbStatus { classes: number; skipped: number }
+export interface PropDbStatus { classes: number; skipped: number; remote: boolean }
 const propDbLoads = new WeakMap<AssetEntry[], Promise<PropDbStatus | null>>();
 
-/** Loads plaintext propdb.xml files (encoded ones are skipped quietly). */
+/** Loads plaintext propdb.xml files (encoded ones are skipped quietly). Without
+ *  one, the backend falls back to the web version's PropDB.xml. */
 export function ensurePropDb(host: AssetHost): Promise<PropDbStatus | null> {
     const entries = host.entries();
     let p = propDbLoads.get(entries);
     if (p) return p;
     const s = sourcesFor(entries, "propdb", host.language());
-    p = s.xml.length
-        ? invoke<PropDbStatus>("propdb_load", { sources: s.xml.map(toRef), locals: s.locals.map(toRef), cacheKey: s.key }).catch(() => null)
-        : Promise.resolve(null);
+    p = invoke<PropDbStatus>("propdb_load", { sources: s.xml.map(toRef), locals: s.locals.map(toRef), cacheKey: s.key }).catch(() => null);
     propDbLoads.set(entries, p);
     return p;
 }

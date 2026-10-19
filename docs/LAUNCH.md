@@ -77,7 +77,10 @@ to the Nexon SDK over a named pipe. mabi-patcher provides all three:
    Init NXALauncher" on elevated starts). `on_started(pid)` is called at once;
    the CLI fires the `after-launch` hook here.
 9. **Wait for the shim**, even without `wait`: until the shim sets
-   `<mapping name>.ready`, the game exits, or 60 s pass. After the signal it
+   `<mapping name>.ready`, the game exits, or 15 minutes pass. The game asks
+   for the ticket only when its NXA init runs, which can take 90 s or more on a
+   slow start; a 60 s limit used to close the ticket first ("Failed to Init
+   NXALauncher"). The log records how long the shim took. After the signal it
    waits another 3 s so the SDK can finish its pipe requests. Then the
    mapping is zeroed, unmapped and closed (the shim has already zeroed it
    after reading), the pipe server is stopped and the launch lock released.
@@ -96,8 +99,9 @@ The stub itself (`run_stub_if_requested`, called first in `main` of both
 executables) accepts exactly `--exit-event <Local\mabi-patcher.stub.{GUID}>
 --parent-pid <pid>`; the PID may not be 0 or the stub's own. Anything else,
 an event that does not exist or a parent that is not running makes it exit
-with code 2. Otherwise it waits until the event is set, the launcher process
-exits, or 120 s pass.
+with code 2. Otherwise it waits until the event is set (the game exited) or the
+launcher process exits, with no time limit, since the game may look for
+`nexon_client.exe` late in its start-up.
 
 ---
 

@@ -143,13 +143,108 @@ pub struct PropDbStatus {
     classes: usize,
     /// propdb files that were not plaintext XML (encoded) and were skipped.
     skipped: usize,
+    /// The classes came from the online PropDB.xml (no plaintext propdb was open).
+    remote: bool,
+}
+
+/// Plaintext PropDB.xml and its English names, published with the web version of
+/// mabi-patcher. Used when the open archives only have an encoded propdb (current
+/// clients).
+const REMOTE_PROPDB_URL: &str = "https://shaggyze.website/mabipatcher/mabi-files/db/PropDB.xml";
+const REMOTE_PROPDB_NAMES_URL: &str = "https://shaggyze.website/mabipatcher/mabi-files/local/xml/PropDB.english.txt";
+/// The web version's compact prop list, `[[id, class_name, events, class_path], ...]`
+/// (700 KB against 4.2 MB for the XML). Tried first.
+const REMOTE_PROPS_JSON_URL: &str = "https://shaggyze.website/mabipatcher/props.json";
+/// Downloaded copies are reused for this long before they are fetched again.
+const REMOTE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// A file from the web version, cached in %APPDATA%: the cached copy while it is
+/// fresh and `valid`, else a new download, else an old cached copy.
+fn remote_file(url: &str, file: &str, valid: impl Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+    let cache = std::env::var_os("APPDATA")
+        .map(|a| std::path::PathBuf::from(a).join("com.shaggyze.mabi-patcher").join("web-db").join(file));
+    let cached = || cache.as_ref().and_then(|p| std::fs::read(p).ok()).filter(|b| valid(b));
+    let fresh = cache.as_ref().and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < REMOTE_MAX_AGE);
+    if fresh {
+        if let Some(b) = cached() {
+            return Some(b);
+        }
+    }
+    let downloaded = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .ok()
+        .and_then(|r| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(r.into_reader(), 64 << 20), &mut buf).ok().map(|_| buf)
+        })
+        .filter(|b| valid(b));
+    match downloaded {
+        Some(bytes) => {
+            if let Some(p) = &cache {
+                let _ = p.parent().map(std::fs::create_dir_all);
+                let _ = std::fs::write(p, &bytes);
+            }
+            log::info!("[PropDB] Downloaded {}", url);
+            Some(bytes)
+        }
+        None => {
+            log::warn!("[PropDB] Could not download {}", url);
+            cached()
+        }
+    }
+}
+
+/// Prop classes from the web version's props.json (class names and paths; the
+/// English names file is mostly untranslated Korean, so it adds little).
+fn remote_props_json() -> Option<Vec<PropClass>> {
+    let parse = |b: &[u8]| -> Option<Vec<PropClass>> {
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(b).ok()?;
+        let list: Vec<PropClass> = rows
+            .iter()
+            .filter_map(|r| {
+                let r = r.as_array()?;
+                Some(PropClass {
+                    id: i32::try_from(r.first()?.as_i64()?).ok()?,
+                    class_name: r.get(1)?.as_str()?.to_string(),
+                    class_path: r.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    string_id: String::new(),
+                    name: String::new(),
+                })
+            })
+            .collect();
+        (!list.is_empty()).then_some(list)
+    };
+    let bytes = remote_file(REMOTE_PROPS_JSON_URL, "props.json", |b| parse(b).is_some())?;
+    parse(&bytes)
+}
+
+/// Prop classes from the online PropDB.xml, with `_LT[...]` names resolved from
+/// the online English names file.
+fn remote_propdb() -> Option<Vec<PropClass>> {
+    if let Some(list) = remote_props_json() {
+        return Some(list);
+    }
+    let xml = remote_file(REMOTE_PROPDB_URL, "PropDB.xml", |b| itemdb::parse_propdb(b).is_some())?;
+    let mut list = itemdb::parse_propdb(&xml)?;
+    if let Some(txt) = remote_file(REMOTE_PROPDB_NAMES_URL, "PropDB.english.txt", |b| !b.is_empty()) {
+        if let Some(prefix) = itemdb::local_prefix("local/xml/propdb.english.txt") {
+            let mut names = HashMap::new();
+            itemdb::parse_local_txt(&itemdb::decode_text(&txt), &prefix, &mut names);
+            itemdb::localize_props(&mut list, &names);
+        }
+    }
+    Some(list)
 }
 
 #[tauri::command]
 pub async fn propdb_load(sources: Vec<EntryRef>, locals: Vec<EntryRef>, cache_key: String) -> Result<PropDbStatus, String> {
     if let Some((k, map)) = PROPS.lock().map_err(|e| e.to_string())?.as_ref() {
         if *k == cache_key {
-            return Ok(PropDbStatus { classes: map.len(), skipped: 0 });
+            return Ok(PropDbStatus { classes: map.len(), skipped: 0, remote: false });
         }
     }
     blocking(move || {
@@ -161,11 +256,18 @@ pub async fn propdb_load(sources: Vec<EntryRef>, locals: Vec<EntryRef>, cache_ke
                 None => skipped += 1,
             }
         }
+        let mut remote = false;
+        if all.is_empty() {
+            if let Some(list) = remote_propdb() {
+                all = list;
+                remote = true;
+            }
+        }
         if !all.is_empty() {
             itemdb::localize_props(&mut all, &load_locals(&locals));
         }
         let map: HashMap<i32, PropClass> = all.into_iter().map(|p| (p.id, p)).collect();
-        let status = PropDbStatus { classes: map.len(), skipped };
+        let status = PropDbStatus { classes: map.len(), skipped, remote };
         *PROPS.lock().map_err(|e| e.to_string())? = Some((cache_key, Arc::new(map)));
         Ok(status)
     })
