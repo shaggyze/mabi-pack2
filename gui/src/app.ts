@@ -103,6 +103,8 @@ interface Config {
     fetch_remote_salts: boolean;
     app_update_check: boolean;
     app_auto_update: boolean;
+    mods_auto_update: boolean;
+    launcher_auto_launch: boolean;
     auto_convert_features: boolean;
     auto_convert_pmg: boolean;
     list_full_sequence: boolean;
@@ -263,6 +265,8 @@ class App {
         fetch_remote_salts: true,
         app_update_check: true,
         app_auto_update: false,
+        mods_auto_update: false,
+        launcher_auto_launch: false,
         auto_convert_features: false,
         auto_convert_pmg: false,
         list_full_sequence: false,
@@ -563,10 +567,61 @@ class App {
             document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
         }
 
-        this.startupGameUpdate();
         this.restoreActivity();
         this.log(this.t("engineInit"), "success");
-        if (this.config.app_update_check) this.checkAppUpdate(true);
+        this.runStartupChain();
+    }
+
+    /** Startup chain, each step behind its own setting: self-update, website mods,
+     *  game files, then launch. An "already current" step skips to the next one. */
+    private async runStartupChain() {
+        // A self-update restarts into the new exe, which runs the chain again.
+        if (this.config.app_update_check && await this.checkAppUpdate(true)) return;
+        if (this.config.mods_auto_update) await this.startupModsUpdate();
+        const gameReady = await this.startupGameUpdate();
+        if (!this.config.launcher_auto_launch) return;
+        if (!gameReady) {
+            this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autolaunch_skip")}`, "warn");
+            return;
+        }
+        await this.profilesReady;
+        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autolaunch")}`, "info");
+        await this.launcherDoLaunch();
+    }
+
+    /** Startup mods step: reinstall each installed website mod whose catalog
+     *  version differs from the one recorded at install. */
+    private async startupModsUpdate() {
+        try {
+            const installed = await invoke("installed_web_mods_info") as { id: number; format: string; version: string | null }[];
+            if (installed.length === 0) return;
+            const catalog = new Map((await this.loadWebModCatalog()).map(m => [m.id, m]));
+            const stale = installed.flatMap(i => {
+                const m = catalog.get(i.id);
+                return m?.version && m.version !== i.version ? [{ mod: m, format: i.format }] : [];
+            });
+            if (stale.length === 0) {
+                this.log(this.t("log_mods_autoupdate_skip"), "info");
+                return;
+            }
+            this.log(this.t("log_mods_autoupdate_updating", [String(stale.length)]), "info");
+            let updated = 0;
+            for (const { mod, format } of stale) {
+                try {
+                    const saved = await invoke("install_web_mod", {
+                        packUrl: this.modPackUrl(), id: mod.id, name: mod.name, format, version: mod.version,
+                    }) as string;
+                    this.log(this.t("log_mods_web_installed", [mod.name, saved]), "info");
+                    updated++;
+                } catch (e) {
+                    this.log(this.t("log_mods_install_failed", [String(e)]), "error");
+                }
+            }
+            this.log(this.t("log_mods_autoupdate_done", [String(updated), String(stale.length)]), updated === stale.length ? "success" : "warn");
+            await this.refreshInstalledWebMods();
+        } catch (e) {
+            this.log(this.t("log_mods_autoupdate_failed", [String(e)]), "warn");
+        }
     }
 
     private t(key: string, args: string[] = []): string {
@@ -785,6 +840,8 @@ class App {
             { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
             { id: "settings-app-update-check", prop: "app_update_check" },
             { id: "settings-app-auto-update", prop: "app_auto_update" },
+            { id: "settings-mods-auto-update", prop: "mods_auto_update" },
+            { id: "settings-launcher-auto-launch", prop: "launcher_auto_launch" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -1203,22 +1260,23 @@ class App {
     }
 
     /** Startup game check. Auto-update checks first and patches only when the
-     *  server has newer files; check-only logs the result. */
-    private async startupGameUpdate() {
+     *  server has newer files; check-only logs the result. Returns false when the
+     *  game files are known to be out of date afterwards. */
+    private async startupGameUpdate(): Promise<boolean> {
         const gp = this.config.patcher_game_path;
-        if (!gp) return;
+        if (!gp) return true;
         const auto = this.config.patcher_auto_update;
-        if (!auto && !this.config.patcher_check_on_start) return;
+        if (!auto && !this.config.patcher_check_on_start) return true;
         // check_patch_version and patching both use the profile's session.
         await this.profilesReady;
         const needsUpdate = await this.checkGameUpdate(gp);
-        if (!auto) return;
+        if (!auto) return needsUpdate !== true;
         if (needsUpdate === false) {
             this.log(this.t("log_patcher_autoupdate_skip"), "info");
-            return;
+            return true;
         }
         this.log(this.t("log_patcher_autoupdate"), "info");
-        await this.runPatcher(gp, false);
+        return this.runPatcher(gp, false);
     }
 
     private setupPatcherTab() {
@@ -1594,7 +1652,7 @@ class App {
         });
     }
 
-    async runPatcher(gamePath: string, forceRepair: boolean, verifyOnly = false, only: string[] | null = null) {
+    async runPatcher(gamePath: string, forceRepair: boolean, verifyOnly = false, only: string[] | null = null): Promise<boolean> {
         const statusEl = document.getElementById("patcher-status");
         const wrap = document.getElementById("patcher-progress-wrap");
         const bar = document.getElementById("patcher-progress-bar");
@@ -1604,7 +1662,7 @@ class App {
         const setText = (msg: string, ok?: boolean) => {
             if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === false ? "var(--accent-neon)" : ok === true ? "var(--accent-cyan)" : "var(--text-muted)"; }
         };
-        if (this.patchBusy) { setText(this.t("patcher_err_busy"), false); return; }
+        if (this.patchBusy) { setText(this.t("patcher_err_busy"), false); return false; }
         const busyToken = this.setPatchBusy(true);
         if (this.config.patcher_focus_while_patching) {
             document.querySelector('.nav-item[data-tab="patcher"]')?.dispatchEvent(new Event('click'));
@@ -1675,7 +1733,7 @@ class App {
             if (String(e) === "patch_busy") {
                 setText(this.t("patcher_err_busy"), false);
                 this.finishPatchJob(job, this.t("patcher_err_busy"));
-                return;
+                return false;
             }
             jobError = this.cleanErr(e);
             if (wrap) wrap.style.display = "none";
@@ -1686,7 +1744,7 @@ class App {
                 setText(this.t("launcher_session_expired"), false);
                 this.log(this.t("msg_error_fmt", [this.cleanErr(e)]));
                 await this.promptRelogin();
-                return;
+                return false;
             }
             const errStr = String(e).toLowerCase();
             if (errStr.includes("access is denied") || errStr.includes("permissiondenied") || errStr.includes("permission denied")) {
@@ -1701,6 +1759,7 @@ class App {
             this.finishPatchJob(job, jobError);
             this.releasePatchBusy(busyToken);
         }
+        return jobError === null;
     }
 
     /** Adds a running "Game patch" entry to Jobs and Activity for one patcher run. */
@@ -2157,11 +2216,7 @@ class App {
             try {
                 // Fetched in Rust (no CORS); the site has no JSON list, so the
                 // command reads the catalog out of the Mods page's JS bundle.
-                const raw = await invoke("fetch_web_mods_catalog", { url }) as unknown;
-                const arr: unknown[] = Array.isArray(raw) ? raw
-                    : (raw && Array.isArray((raw as any).mods)) ? (raw as any).mods : [];
-                this.webModCatalog = arr.filter((m): m is WebMod =>
-                    !!m && typeof (m as any).id === "number" && typeof (m as any).name === "string");
+                await this.loadWebModCatalog();
                 this.populateModCategories();
             } catch (e) {
                 if (this.modBrowserMode === 'remote' && empty) {
@@ -2173,6 +2228,17 @@ class App {
         }
         await this.refreshInstalledWebMods();
         if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+    }
+
+    /** Fetch the website catalog into webModCatalog (in Rust, so CORS doesn't apply;
+     *  the site has no JSON list, so the command reads the Mods page's JS bundle). */
+    private async loadWebModCatalog(): Promise<WebMod[]> {
+        const raw = await invoke("fetch_web_mods_catalog", { url: this.modCatalogUrl() }) as unknown;
+        const arr: unknown[] = Array.isArray(raw) ? raw
+            : (raw && Array.isArray((raw as any).mods)) ? (raw as any).mods : [];
+        this.webModCatalog = arr.filter((m): m is WebMod =>
+            !!m && typeof (m as any).id === "number" && typeof (m as any).name === "string");
+        return this.webModCatalog;
     }
 
     private async refreshInstalledWebMods() {
@@ -2240,7 +2306,7 @@ class App {
             installBtn.textContent = this.t("mod_installing");
             try {
                 const saved = await invoke("install_web_mod", {
-                    packUrl: this.modPackUrl(), id: m.id, name: m.name, format,
+                    packUrl: this.modPackUrl(), id: m.id, name: m.name, format, version: m.version ?? null,
                 }) as string;
                 this.webModsInstalled.add(m.id);
                 this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
@@ -4978,6 +5044,8 @@ class App {
             { id: "settings-fetch-remote-salts", prop: "fetch_remote_salts" },
             { id: "settings-app-update-check", prop: "app_update_check" },
             { id: "settings-app-auto-update", prop: "app_auto_update" },
+            { id: "settings-mods-auto-update", prop: "mods_auto_update" },
+            { id: "settings-launcher-auto-launch", prop: "launcher_auto_launch" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -6886,8 +6954,9 @@ class App {
     }
 
     /** Compares this exe with the latest GitHub release. At startup a failure is
-     *  logged quietly and a newer version installs itself when app_auto_update is on. */
-    private async checkAppUpdate(atStartup: boolean) {
+     *  logged quietly and a newer version installs itself when app_auto_update is on.
+     *  Returns true when an update was installed and the app is restarting. */
+    private async checkAppUpdate(atStartup: boolean): Promise<boolean> {
         const status = document.getElementById("app-update-status");
         const install = document.getElementById("btn-app-update-install") as HTMLButtonElement | null;
         const tag = this.t("log_tag_update");
@@ -6898,7 +6967,7 @@ class App {
                 const msg = this.t("app_update_current", [info.current]);
                 if (status) status.textContent = msg;
                 if (!atStartup) this.log(`${tag} ${msg}`, "info");
-                return;
+                return false;
             }
             const msg = this.t("app_update_available", [info.latest, info.current]);
             if (status) status.textContent = msg;
@@ -6907,17 +6976,19 @@ class App {
                 install.style.display = "";
             }
             this.log(`${tag} ${msg}`, "warn");
-            if (atStartup && this.config.app_auto_update) await this.installAppUpdate();
+            return atStartup && this.config.app_auto_update && await this.installAppUpdate();
         } catch (e) {
             const msg = this.t("app_update_check_failed", [String(e)]);
             if (status) status.textContent = msg;
             this.log(`${tag} ${msg}`, atStartup ? "info" : "error");
+            return false;
         }
     }
 
     /** Checks for a newer release, then downloads it over this exe and restarts into
-     *  it. When this exe is already the latest, it logs that and downloads nothing. */
-    private async installAppUpdate() {
+     *  it. When this exe is already the latest, it logs that and downloads nothing.
+     *  Returns true when the new exe was installed. */
+    private async installAppUpdate(): Promise<boolean> {
         const status = document.getElementById("app-update-status");
         const install = document.getElementById("btn-app-update-install") as HTMLButtonElement | null;
         const tag = this.t("log_tag_update");
@@ -6931,19 +7002,21 @@ class App {
         try {
             if (status) status.textContent = this.t("app_update_checking");
             const info = await invoke<{ current: string; latest: string; newer: boolean }>("check_app_update");
-            if (!info.newer) { skip(info.current); return; }
+            if (!info.newer) { skip(info.current); return false; }
 
             if (status) status.textContent = this.t("app_update_downloading");
             this.log(`${tag} ${this.t("app_update_downloading")}`, "info");
             const version = await invoke<string | null>("install_app_update");
-            if (!version) { skip(info.current); return; }
+            if (!version) { skip(info.current); return false; }
             const msg = this.t("app_update_installed", [version]);
             if (status) status.textContent = msg;
             this.log(`${tag} ${msg}`, "success");
+            return true;
         } catch (e) {
             const msg = this.t("app_update_failed", [String(e)]);
             if (status) status.textContent = msg;
             this.log(`${tag} ${msg}`, "error");
+            return false;
         } finally {
             if (install) install.disabled = false;
         }

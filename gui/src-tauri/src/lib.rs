@@ -233,6 +233,12 @@ struct Config {
 
     #[serde(default)]
     app_auto_update: bool,
+    /// Startup: reinstall website mods whose catalog version changed.
+    #[serde(default)]
+    mods_auto_update: bool,
+    /// Startup: launch the game once the update steps finish.
+    #[serde(default)]
+    launcher_auto_launch: bool,
 
     list_full_sequence: bool,
 
@@ -430,6 +436,8 @@ impl Default for Config {
             fetch_remote_salts: true,
             app_update_check: true,
             app_auto_update: false,
+            mods_auto_update: false,
+            launcher_auto_launch: false,
 
             list_full_sequence: false,
 
@@ -4433,10 +4441,28 @@ fn fetch_web_mods_catalog(url: String) -> Result<serde_json::Value, String> {
     serde_json::from_str(&json).map_err(|e| format!("catalog parse error: {}", e))
 }
 
+/// `mods/web/versions.json`: catalog version of each installed website mod, by id.
+fn web_mod_versions_path() -> std::path::PathBuf {
+    web_mods_dir().join("versions.json")
+}
+
+fn read_web_mod_versions() -> std::collections::BTreeMap<u32, String> {
+    std::fs::read_to_string(web_mod_versions_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_web_mod_versions(v: &std::collections::BTreeMap<u32, String>) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
+    std::fs::write(web_mod_versions_path(), json).map_err(|e| e.to_string())
+}
+
 /// Build one website mod via `POST pack_url` and save it to `mods/web/`.
+/// Replaces this mod's earlier file of the same format and records `version`.
 /// Returns the saved file path.
 #[tauri::command]
-fn install_web_mod(pack_url: String, id: u32, name: String, format: String) -> Result<String, String> {
+fn install_web_mod(pack_url: String, id: u32, name: String, format: String, version: Option<String>) -> Result<String, String> {
     if format != "it" && format != "pack" { return Err("format must be 'it' or 'pack'".into()); }
     if !pack_url.starts_with("https://") && !pack_url.starts_with("http://") {
         return Err("pack URL must be http(s)".into());
@@ -4470,8 +4496,46 @@ fn install_web_mod(pack_url: String, id: u32, name: String, format: String) -> R
         .map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' })
         .collect::<String>().trim().chars().take(80).collect();
     let dest = dir.join(format!("MOD{:04} - {}.{}", id, safe, format));
+    // A renamed mod would otherwise leave its old file beside the new one.
+    let prefix = format!("MOD{:04}", id);
+    let ext = format!(".{}", format);
+    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.starts_with(&prefix) && n.ends_with(&ext) && e.path() != dest {
+            std::fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+        }
+    }
     std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    let mut versions = read_web_mod_versions();
+    match version.filter(|v| !v.is_empty()) {
+        Some(v) => { versions.insert(id, v); }
+        None => { versions.remove(&id); }
+    }
+    write_web_mod_versions(&versions)?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Installed website mods: id, file format and the catalog version recorded at
+/// install (null for mods installed before versions were recorded).
+#[tauri::command]
+fn installed_web_mods_info() -> Vec<serde_json::Value> {
+    let versions = read_web_mod_versions();
+    let mut out: Vec<(u32, String)> = std::fs::read_dir(web_mods_dir())
+        .map(|rd| rd.filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                if n.len() < 7 || !n.starts_with("MOD") { return None; }
+                let id = n[3..7].parse::<u32>().ok()?;
+                let format = std::path::Path::new(&n).extension()?.to_string_lossy().to_lowercase();
+                (format == "it" || format == "pack").then_some((id, format))
+            })
+            .collect())
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out.into_iter()
+        .map(|(id, format)| serde_json::json!({ "id": id, "format": format, "version": versions.get(&id) }))
+        .collect()
 }
 
 /// Ids of website mods present in `mods/web/` (files named `MOD0001 - ….it`).
@@ -4501,6 +4565,8 @@ fn remove_web_mod(id: u32) -> Result<u32, String> {
             removed += 1;
         }
     }
+    let mut versions = read_web_mod_versions();
+    if versions.remove(&id).is_some() { write_web_mod_versions(&versions)?; }
     Ok(removed)
 }
 
@@ -8027,7 +8093,7 @@ pub fn run() {
 
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, api_start, api_stop, nexon_login_webview,
 
-            fetch_web_mods_catalog, install_web_mod, list_installed_web_mods, remove_web_mod,
+            fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 
