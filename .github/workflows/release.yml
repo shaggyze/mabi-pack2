@@ -1,0 +1,88 @@
+name: Release
+
+# Builds the GUI on Windows and publishes a GitHub release with the same four
+# files build.bat produces. Runs when a tag like v2.0.11 is pushed, or by hand
+# (Actions > Release > Run workflow) for an existing tag.
+#   scripts\set-version.bat 2.0.11
+#   write docs/release-notes/v2.0.11.md, commit
+#   git tag v2.0.11; git push origin mabi-patcher v2.0.11
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and release (for example v2.0.11)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Tag must match tauri.conf.json version
+        shell: pwsh
+        run: |
+          $v = (Get-Content gui/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne $env:TAG) { throw "Tag $env:TAG does not match app version $v (run scripts\set-version.bat)." }
+          "VERSION=$v" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            gui/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Lib unit tests
+        run: cargo test --release --lib
+
+      - name: Build GUI (exe, NSIS, MSI)
+        working-directory: gui
+        run: |
+          npm ci
+          npm run tauri build
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $rel = "gui/src-tauri/target/release"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "$rel/mabi-patcher.exe" out/
+          Copy-Item "$rel/release/mabi-patcher-setup.exe" out/
+          Copy-Item "$rel/release/mabi-patcher-setup.msi" out/
+          # Batches zip: the tracked helper scripts with the new exe.
+          Expand-Archive mabi-pack2_batches.zip -DestinationPath batches
+          Copy-Item out/mabi-patcher.exe batches/ -Force
+          Compress-Archive -Path batches/* -DestinationPath out/mabi-pack2_batches.zip
+          Get-ChildItem out | Format-Table Name, Length
+
+      - name: Publish release
+        shell: pwsh
+        run: |
+          $notes = "docs/release-notes/$env:TAG.md"
+          $ghArgs = @($env:TAG, 'out/mabi-patcher.exe', 'out/mabi-patcher-setup.exe',
+                    'out/mabi-patcher-setup.msi', 'out/mabi-pack2_batches.zip',
+                    '--repo', $env:GITHUB_REPOSITORY, '--title', "mabi-patcher $env:VERSION")
+          if (Test-Path $notes) { $ghArgs += @('--notes-file', $notes) } else { $ghArgs += '--generate-notes' }
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG out/* --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create @ghArgs
+          }

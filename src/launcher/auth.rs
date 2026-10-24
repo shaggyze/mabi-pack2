@@ -226,6 +226,9 @@ pub enum AuthError {
     SessionExpired(String),
     /// The game is not playable right now (maintenance / region block).
     NotPlayable(String),
+    /// Nexon refused the session while a maintenance notice is open: the session
+    /// is probably fine and is kept. `end` is the notice's end (unix seconds, 0 = none given).
+    Maintenance { status: u16, end: i64, title: String },
     /// Any other HTTP failure.
     Http { status: u16, code: i64, body: String },
 }
@@ -242,6 +245,14 @@ impl std::fmt::Display for AuthError {
             ),
             AuthError::SessionExpired(m) => write!(f, "Session expired (401). Re-login and try again. {}", m),
             AuthError::NotPlayable(m) => write!(f, "{}", m),
+            // No "HTTP 401"/"(401)" here: the GUI reads those as "log in again".
+            AuthError::Maintenance { status, end, title } => {
+                write!(f, "Mabinogi is under maintenance")?;
+                if let Some(t) = chrono::DateTime::from_timestamp(*end, 0).filter(|_| *end > 0) {
+                    write!(f, " until {}", t.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p"))?;
+                }
+                write!(f, " (\"{}\"; Nexon replied {}). Your saved session was kept; it works again after maintenance.", title, status)
+            }
             AuthError::Http { status, code, body } => {
                 write!(f, "HTTP {} (code {}): {}", status, code, truncate(body, 300))
             }
@@ -385,7 +396,11 @@ pub fn autologin_with(session_token: &str, device_id: &str) -> Result<LoginResul
             )
             .into());
         }
-        return Err(AuthError::SessionExpired(format!("autologin HTTP {} code {}", status, code)).into());
+        // During maintenance autologin answers 401/404/5xx for sessions that are fine.
+        return Err(or_maintenance(
+            AuthError::SessionExpired(format!("autologin HTTP {} code {}", status, code)).into(),
+            status,
+        ));
     }
     let mut result = login_result_from(&headers, &text, false, device_id)?;
     if result.session.session_token.is_empty() {
@@ -399,8 +414,14 @@ pub fn refresh(session: &mut NexonSession) -> Result<()> {
     refresh_with_expiry(session).map(|_| ())
 }
 
-/// [`refresh`], returning the new NxLSession lifetime in seconds.
+/// [`refresh`], returning the new NxLSession lifetime in seconds. Called after
+/// Nexon answered 401; while a maintenance notice is open a failed refresh comes
+/// back as [`AuthError::Maintenance`] (the session is kept).
 pub fn refresh_with_expiry(session: &mut NexonSession) -> Result<i32> {
+    refresh_inner(session).map_err(|e| or_maintenance(e, 401))
+}
+
+fn refresh_inner(session: &mut NexonSession) -> Result<i32> {
     if session.tpa {
         return Err(AuthError::SessionExpired(
             "Browser (Google/SSO) sessions can't be refreshed — use the browser login again.".into(),
@@ -583,9 +604,34 @@ where
     }
 }
 
-/// A 401 whose refresh failed stays a typed `SessionExpired` (the API answers 401).
+/// A 401 whose refresh failed stays a typed `SessionExpired` (the API answers 401),
+/// unless the refresh found maintenance.
 fn refresh_failed(e: &anyhow::Error, re: &anyhow::Error) -> anyhow::Error {
+    if let Some(m @ AuthError::Maintenance { .. }) = re.downcast_ref::<AuthError>() {
+        return m.clone().into();
+    }
     AuthError::SessionExpired(format!("{} (refresh failed: {})", e, re)).into()
+}
+
+/// A refused session (`SessionExpired` or an HTTP error) re-typed as
+/// [`AuthError::Maintenance`] while Nexon's news shows maintenance in progress;
+/// anything else, or no open notice, comes back unchanged.
+pub fn or_maintenance(e: anyhow::Error, status: u16) -> anyhow::Error {
+    if !matches!(e.downcast_ref::<AuthError>(), Some(AuthError::SessionExpired(_)) | Some(AuthError::Http { .. })) {
+        return e;
+    }
+    match super::news::active_maintenance() {
+        Some(w) => {
+            log::info!("[Launcher] Nexon replied {} during maintenance \"{}\"; keeping the session", status, w.title);
+            AuthError::Maintenance { status, end: w.end, title: w.title }.into()
+        }
+        None => e,
+    }
+}
+
+/// True for [`AuthError::Maintenance`].
+pub fn is_maintenance_error(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<AuthError>(), Some(AuthError::Maintenance { .. }))
 }
 
 /// True if `e` is a typed expired-session error: `AuthError::SessionExpired`

@@ -148,7 +148,24 @@ locally to run them.
 3. `cargo test --release --tests` (ignored tests stay ignored)
 4. Uploads `target/release/mabi-patcher[.exe]` as an artifact.
 
-CI does not build the GUI.
+`cli.yml` does not build the GUI.
+
+`.github/workflows/release.yml` builds the GUI and publishes a GitHub release
+when a `v*` tag is pushed (or by hand from the Actions tab for an existing tag):
+
+1. Fails if the tag differs from `version` in `tauri.conf.json`.
+2. `cargo test --release --lib`, then `npm ci` and `npm run tauri build` in `gui`.
+3. Uploads `mabi-patcher.exe`, `mabi-patcher-setup.exe`, `mabi-patcher-setup.msi`
+   and `mabi-pack2_batches.zip` (the tracked zip with the new exe inside).
+4. Uses `docs/release-notes/<tag>.md` as the release text, or GitHub's
+   generated notes when that file is missing. A rerun replaces the files.
+
+```
+scripts\set-version.bat 2.0.11
+# write docs/release-notes/v2.0.11.md, commit
+git tag v2.0.11
+git push origin mabi-patcher v2.0.11
+```
 
 ---
 

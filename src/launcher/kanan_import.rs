@@ -387,7 +387,7 @@ pub fn import_account_from(acct: &ImportedAccount, source: ImportSource) -> Resu
     } else {
         match auth::login(&acct.username, &acct.password, &device_id) {
             Ok(res) => {
-                profile::save_session(&id, &res.session, res.session_expires_in)?;
+                profile::save_login(&id, &res.session, res.session_expires_in)?;
                 ImportStatus::LoggedIn { expires_in: res.session_expires_in }
             }
             Err(e) => match e.downcast_ref::<auth::AuthError>() {
@@ -406,7 +406,7 @@ pub fn import_account_from(acct: &ImportedAccount, source: ImportSource) -> Resu
 pub fn complete_mfa(profile_id: &str, mfa_key: &str, otp: &str) -> Result<i32> {
     let p = profile::load_profile(profile_id)?;
     let res = auth::login_otp(mfa_key, otp.trim(), &p.device_id())?;
-    profile::save_session(profile_id, &res.session, res.session_expires_in)?;
+    profile::save_login(profile_id, &res.session, res.session_expires_in)?;
     Ok(res.session_expires_in)
 }
 

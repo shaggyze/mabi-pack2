@@ -221,7 +221,7 @@ pub fn store_session(
     store.upsert(p);
     store.active_id = id.clone();
     store.save()?;
-    profile::save_session(&id, s, expires)?;
+    profile::save_login(&id, s, expires)?;
     profile::load_profile(&id)
 }
 

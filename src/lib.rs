@@ -16,6 +16,7 @@ pub mod patch;
 pub mod pmg;
 pub mod region_map;
 pub mod rgn;
+pub mod uotiara;
 
 pub const SALTS_URL: &str = "https://shaggyze.website/files/salts.txt";
 

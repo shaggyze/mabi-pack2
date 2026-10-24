@@ -361,6 +361,17 @@ pub fn save_session(id: &str, session: &crate::launcher::auth::NexonSession, exp
     store.save()
 }
 
+/// [`save_session`] for a fresh login or import: the signed-in clock restarts
+/// ([`mark_login`]) and the new session is stored, in one save.
+pub fn save_login(id: &str, session: &crate::launcher::auth::NexonSession, expires_in_secs: i32) -> Result<()> {
+    let mut store = ProfileStore::load()?;
+    let profile = store.get_mut(id).ok_or_else(|| anyhow!("Profile not found: {}", id))?;
+    let now = unix_now();
+    profile.apply_login(now);
+    profile.apply_session(session, expires_in_secs, now);
+    store.save()
+}
+
 // ── Summary (safe for IPC — no session token) ─────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

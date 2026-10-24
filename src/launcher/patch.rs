@@ -803,14 +803,28 @@ pub fn get_latest_version(session: &mut NexonSession) -> Result<i32> {
     Ok(fetch_manifest(session)?.version)
 }
 
-/// True if Mabinogi is under maintenance (HTTP 200 from the maintenance endpoint).
+/// True if Mabinogi is under maintenance; see [`maintenance_state`].
 pub fn is_maintenance(session: &NexonSession) -> Result<bool> {
-    let resp = CDN
+    Ok(maintenance_state(session)?.0)
+}
+
+/// Maintenance from Nexon's endpoint (HTTP 200 = maintenance; it answers 401
+/// without a valid session) or from an open maintenance notice in the news
+/// feed, which works logged out. Returns the notice when there is one.
+pub fn maintenance_state(session: &NexonSession) -> Result<(bool, Option<super::news::MaintenanceWindow>)> {
+    let notice = super::news::active_maintenance();
+    let endpoint = CDN
         .get(format!("{}/maintenance/v1/products/{}", API_BASE, auth::product_id()))
         .query(&[("lang", "en")])
         .header("Cookie", session.cookie_header())
-        .send()?;
-    Ok(resp.status().is_success())
+        .send()
+        .map(|r| r.status().is_success());
+    match (endpoint, notice) {
+        (Ok(true), n) => Ok((true, n)),
+        (_, Some(n)) => Ok((true, Some(n))),
+        (Ok(false), None) => Ok((false, None)),
+        (Err(e), None) => Err(e.into()),
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

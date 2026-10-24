@@ -152,6 +152,21 @@ interface Config {
     product_id: number;
     /** Hide to the tray instead of exiting when the window is closed. */
     minimize_to_tray: boolean;
+    /** Mirror the uotiara installer's mod checkboxes with website mods, both ways. */
+    uotiara_sync: boolean;
+}
+
+/** `read_uotiara_install`: the installer's registry record and the latest release. */
+interface UotiaraInfo {
+    install: {
+        version: string;
+        game_version: number;
+        install_source: string;
+        uninstaller: string;
+        mods: { id: number; name: string; installed: boolean }[];
+    } | null;
+    latest: string | null;
+    latestUrl: string | null;
 }
 
 /** Hooks + update ignore list, stored in the config shared with the CLI/REST API. */
@@ -305,6 +320,7 @@ class App {
         mod_remote_url: "",
         product_id: 10200,
         minimize_to_tray: false,
+        uotiara_sync: true,
     };
     private sharedConfig: SharedConfig = { ignore: [], hooks: {} };
     /** Settles once the active profile's stored session has been restored (or not). */
@@ -340,6 +356,9 @@ class App {
     /** Website mod catalog (fetched once per session via fetch_web_mods_catalog). */
     private webModCatalog: WebMod[] | null = null;
     private webModsInstalled = new Set<number>();
+    /** uotiara installer record (registry), read when the Online view loads. */
+    private uotiara: UotiaraInfo | null = null;
+    private uotiaraSyncing = false;
     /** App version from the exe (get_app_version); fills {version} in locale strings. */
     private appVersion: string = "";
 
@@ -1684,8 +1703,7 @@ class App {
             this.setPatchPaused(false, true);
             if (this.isReloginError(e)) {
                 setText(this.t("launcher_session_expired"), false);
-                this.log(this.t("msg_error_fmt", [this.cleanErr(e)]));
-                await this.promptRelogin();
+                await this.promptRelogin(this.cleanErr(e));
                 return;
             }
             const errStr = String(e).toLowerCase();
@@ -2173,6 +2191,87 @@ class App {
         }
         await this.refreshInstalledWebMods();
         if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+        await this.syncFromUotiara();
+    }
+
+    /**
+     * Read the uotiara installer's registry record and install every website
+     * mod it has ticked that `mods/web/` lacks. The reverse direction (untick
+     * in uotiara when a mod is removed here) runs from the row buttons.
+     */
+    private async syncFromUotiara() {
+        if (this.uotiaraSyncing) return;
+        try { this.uotiara = await invoke("read_uotiara_install") as UotiaraInfo; }
+        catch (e) { this.uotiara = null; this.log(this.t("log_uotiara_read_failed", [String(e)]), "warn"); }
+        this.renderUotiaraStatus();
+        const inst = this.uotiara?.install;
+        if (!this.config.uotiara_sync || !inst || !this.webModCatalog) return;
+        const byId = new Map(this.webModCatalog.map(m => [m.id, m]));
+        const missing = inst.mods.filter(m => m.installed && byId.has(m.id) && !this.webModsInstalled.has(m.id));
+        if (missing.length === 0) return;
+        this.uotiaraSyncing = true;
+        const format = (document.getElementById("mods-format") as HTMLSelectElement | null)?.value === "pack" ? "pack" : "it";
+        let done = 0, failed = 0, lastError = "";
+        try {
+            for (const m of missing) {
+                this.renderUotiaraStatus(this.t("mods_uotiara_syncing", [String(done + failed + 1), String(missing.length)]));
+                const w = byId.get(m.id)!;
+                try {
+                    await invoke("install_web_mod", { packUrl: this.modPackUrl(), id: w.id, name: w.name, format });
+                    this.webModsInstalled.add(w.id);
+                    done++;
+                } catch (e) {
+                    failed++;
+                    lastError = String(e);
+                    // The site refusing every package (login required, offline): stop.
+                    if (done === 0 && failed >= 3) break;
+                }
+            }
+        } finally {
+            this.uotiaraSyncing = false;
+        }
+        this.log(this.t("log_uotiara_synced", [String(done), String(missing.length)]), failed ? "warn" : "info");
+        if (failed) this.log(this.t("log_mods_install_failed", [lastError]), "warn");
+        this.renderUotiaraStatus();
+        if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+    }
+
+    /** One status line under the catalog URL: installed uotiara version, latest, mods ticked. */
+    private renderUotiaraStatus(progress?: string) {
+        const chk = document.getElementById("mods-uotiara-sync") as HTMLInputElement | null;
+        if (chk) chk.checked = this.config.uotiara_sync !== false;
+        const el = document.getElementById("mods-uotiara-status");
+        if (!el) return;
+        const info = this.uotiara;
+        const inst = info?.install;
+        if (!inst) {
+            el.textContent = info ? this.t("mods_uotiara_none") : "";
+            return;
+        }
+        const ticked = inst.mods.filter(m => m.installed).length;
+        const parts = [this.t("mods_uotiara_installed", [inst.version, String(ticked), String(inst.mods.length)])];
+        if (info.latest) {
+            parts.push(info.latest === inst.version
+                ? this.t("mods_uotiara_latest", [info.latest])
+                : this.t("mods_uotiara_update", [info.latest]));
+        }
+        if (progress) parts.push(progress);
+        el.textContent = parts.join(" · ");
+    }
+
+    /** Mirror an install/remove done here into the uotiara installer's checkboxes. */
+    private async mirrorToUotiara(id: number, installed: boolean) {
+        const inst = this.uotiara?.install;
+        if (!this.config.uotiara_sync || !inst) return;
+        const entry = inst.mods.find(m => m.id === id);
+        if (!entry || entry.installed === installed) return;
+        try {
+            await invoke("set_uotiara_mods_installed", { ids: [id], installed });
+            entry.installed = installed;
+            this.renderUotiaraStatus();
+        } catch (e) {
+            this.log(this.t("log_uotiara_write_failed", [String(e)]), "warn");
+        }
     }
 
     private async refreshInstalledWebMods() {
@@ -2245,6 +2344,7 @@ class App {
                 this.webModsInstalled.add(m.id);
                 this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
                 this.renderRemoteMods();
+                await this.mirrorToUotiara(m.id, true);
             } catch (e) {
                 installBtn.disabled = false;
                 installBtn.textContent = this.t(installed ? "mods_reinstall" : "mod_install");
@@ -2261,6 +2361,7 @@ class App {
                     this.webModsInstalled.delete(m.id);
                     this.log(this.t("log_mods_web_removed", [m.name]), "info");
                     this.renderRemoteMods();
+                    await this.mirrorToUotiara(m.id, false);
                 } catch (e) {
                     removeBtn.disabled = false;
                     this.log(this.t("log_mods_install_failed", [String(e)]), "error");
@@ -2338,6 +2439,15 @@ class App {
         document.getElementById("mods-search")?.addEventListener("input", () => this.renderRemoteMods());
         document.getElementById("mods-category")?.addEventListener("change", () => this.renderRemoteMods());
         document.getElementById("mods-installed-only")?.addEventListener("change", () => this.renderRemoteMods());
+        const uoSync = document.getElementById("mods-uotiara-sync") as HTMLInputElement | null;
+        if (uoSync) {
+            uoSync.checked = this.config.uotiara_sync !== false;
+            uoSync.addEventListener("change", () => {
+                this.config.uotiara_sync = uoSync.checked;
+                this.saveConfig();
+                if (uoSync.checked && this.modBrowserMode === 'remote') this.syncFromUotiara();
+            });
+        }
     }
 
     // ── VFS editing ─────────────────────────────────────────────────────────────
@@ -3713,9 +3823,9 @@ class App {
                 if (this.launcherSession) {
                     // already signed in this run (e.g. reload right after a login)
                 } else if (await this.restoreProfileSession(active)) {
-                    // stored session accepted, or renewed by Nexon
-                } else if (await this.handleExpiredAutologin(active)) {
-                    // Nexon refused to renew it: re-login prompt shown
+                    // stored session accepted, renewed by Nexon, or kept during maintenance
+                } else if (await this.promptReloginAfterRestore(active)) {
+                    // Nexon refused to renew it: one re-login prompt shown
                 } else if (active.auto_login && active.session_valid) {
                     await this.autologinProfile(active.id);
                 }
@@ -3815,15 +3925,20 @@ class App {
     private sessionKeepAliveTimer: number | null = null;
 
     /** While the app runs, renew the active profile's session when it has under an
-     *  hour left (autologin), so it never lapses. Browser (Google) logins cannot be
-     *  renewed by Nexon and are left alone. */
+     *  hour left (autologin), so it never lapses. A session with no known expiry is
+     *  renewed once 6 h have passed since it was last saved. Browser (Google) logins
+     *  cannot be renewed by Nexon and are left alone. */
     private startSessionKeepAlive() {
         if (this.sessionKeepAliveTimer !== null) return;
         this.sessionKeepAliveTimer = window.setInterval(async () => {
             const id = this.activeProfileId;
             const p = id ? this.launcherProfiles.find(x => x.id === id) : null;
             if (!p || p.is_official === false || !this.launcherSession || this.launcherSession.tpa) return;
-            if (!p.session_expires_at || p.session_expires_at - Date.now() / 1000 > 3600) return;
+            const now = Date.now() / 1000;
+            const due = p.session_expires_at
+                ? p.session_expires_at - now <= 3600
+                : !!p.last_login_at && now - p.last_login_at >= 6 * 3600;
+            if (!due) return;
             this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_renew", [p.name])}`, "info");
             await this.autologinProfile(p.id);
         }, 10 * 60_000);
@@ -3853,21 +3968,14 @@ class App {
         if (!p) return;
         // 0 = Nexon gave no expiry: unknown.
         p.session_expires_at = expiresIn > 0 ? Math.floor(Date.now() / 1000) + expiresIn : 0;
+        // The backend stamps last_login_at on every save; the keep-alive reads it.
+        p.last_login_at = Math.floor(Date.now() / 1000);
         p.has_session = true;
         p.session_valid = true;
         for (const selId of ["launcher-profile-select", "launcher-page-profile-select"]) {
             const opt = Array.from((document.getElementById(selId) as HTMLSelectElement | null)?.options ?? []).find(o => o.value === p.id);
             if (opt) opt.textContent = this.profileOptionLabel(p);
         }
-    }
-
-    /** Auto-login is on but the stored session already expired: skip the doomed
-     *  network round trip and go straight to the re-login prompt. */
-    private async handleExpiredAutologin(p: any): Promise<boolean> {
-        if (!p?.auto_login || !this.profileSessionExpired(p) || p.is_official === false) return false;
-        this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [p.name])}`, "warn");
-        await this.promptRelogin();
-        return true;
     }
 
     /** Settings > Launcher (profile list); `newProfile` also opens a blank profile editor. */
@@ -4090,7 +4198,7 @@ class App {
         this.applyProfileToUI(profile);
         try { await invoke("launcher_set_active_profile", { id }); } catch {}
         if (await this.restoreProfileSession(profile)) return;
-        if (await this.handleExpiredAutologin(profile)) return;
+        if (await this.promptReloginAfterRestore(profile)) return;
         if (profile.auto_login && profile.session_valid) {
             await this.autologinProfile(id);
         }
@@ -4100,21 +4208,72 @@ class App {
      *  Nexon allows it, by the backend). Works for browser/SSO logins too, which
      *  autologin can't renew. True when the profile is now signed in. */
     private async restoreProfileSession(profile: any): Promise<boolean> {
+        this.restoreReloginDetail = null;
         // An expired session is still tried: the backend asks Nexon to renew it.
         if (profile?.is_official === false || !profile?.has_session) return false;
         try {
-            const r = await invoke("launcher_restore_session", { id: profile.id }) as { session: any; expiresIn?: number };
+            const r = await invoke("launcher_restore_session", { id: profile.id }) as {
+                session: any; expiresIn?: number; maintenance?: { end: number; title: string };
+            };
             if (!r?.session) return false;
             this.launcherSession = r.session;
             if (r.expiresIn) this.noteProfileExpiry(profile.id, r.expiresIn);
             this.updateLauncherUI(true);
+            if (r.maintenance) {
+                // Nexon refuses every session during maintenance: this one is kept.
+                const msg = this.maintenanceKeptText(r.maintenance.end);
+                this.setLauncherStatus(msg, "error");
+                this.log(`${this.t("log_tag_launcher")} ${msg}`, "warn");
+                this.showMaintenance(true, r.maintenance.end);
+                return true;
+            }
             this.setLauncherStatus(this.t("launcher_status_ok"), "ok");
             this.fetchLauncherVersion();
             return true;
         } catch (e) {
-            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_login_failed", [String(e)])}`, "warn");
+            if (this.isReloginError(e)) {
+                // The caller shows the one "log in again" message.
+                this.restoreReloginDetail = this.cleanErr(e);
+            } else {
+                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_login_failed", [this.cleanErr(e)])}`, "warn");
+            }
             return false;
         }
+    }
+
+    /** Set by restoreProfileSession when Nexon refused the stored session for good. */
+    private restoreReloginDetail: string | null = null;
+
+    /** After restoreProfileSession failed: ask for a new login when Nexon refused
+     *  the session, or when auto-login is on and the session is past its expiry.
+     *  True when the prompt was shown. */
+    private async promptReloginAfterRestore(p: any): Promise<boolean> {
+        const detail = this.restoreReloginDetail;
+        if (detail === null && !(p?.auto_login && this.profileSessionExpired(p) && p.is_official !== false)) return false;
+        await this.promptRelogin(detail ?? undefined);
+        return true;
+    }
+
+    /** "Mabinogi is under maintenance until …; your session was kept." */
+    private maintenanceKeptText(end: number): string {
+        return end > 0
+            ? this.t("launcher_maint_session_kept", [this.formatClock(end)])
+            : this.t("launcher_maint_session_kept_noend");
+    }
+
+    /** Local date and time for unix seconds, e.g. "Oct 22, 9:00 AM". */
+    private formatClock(unix: number): string {
+        return new Date(unix * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+
+    /** The Maintenance field: "No", "Yes", or "Yes, until <time>". */
+    private showMaintenance(active: boolean, end: number) {
+        const text = !active ? this.t("label_no")
+            : end > 0 ? this.t("launcher_maint_until", [this.formatClock(end)])
+            : this.t("label_yes");
+        const el = document.getElementById("launcher-maintenance-value");
+        if (el) el.textContent = text;
+        return text;
     }
 
     private async autologinProfile(profileId: string) {
@@ -4446,6 +4605,8 @@ class App {
      *  marker, or an explicit HTTP 401. */
     private isReloginError(e: unknown): boolean {
         const s = String(e ?? "");
+        // Nexon refused the session during maintenance: it is kept, no new login.
+        if (s.includes(App.MAINTENANCE_MARKER)) return false;
         if (s.includes(App.RELOGIN_MARKER)) return true;
         return /\b(?:HTTP|status(?: code)?)\s*:?\s*401\b|\(401\)|\b401 Unauthorized\b/i.test(s);
     }
@@ -4460,15 +4621,20 @@ class App {
         return e;
     }
 
-    /** Error text without the backend's re-login marker. */
+    /** Backend marker on errors meaning Nexon refused the session during maintenance. */
+    private static readonly MAINTENANCE_MARKER = "[MAINTENANCE]";
+
+    /** Error text without the backend's re-login / maintenance markers. */
     private cleanErr(e: unknown): string {
-        return String(e ?? "").split(App.RELOGIN_MARKER).join("").trim();
+        return String(e ?? "").split(App.RELOGIN_MARKER).join("").split(App.MAINTENANCE_MARKER).join("").trim();
     }
 
-    /** The session could not be refreshed: offer to log in again. */
-    private async promptRelogin() {
+    /** The session could not be refreshed: offer to log in again. One log line,
+     *  with Nexon's reason (`detail`) when there is one. */
+    private async promptRelogin(detail?: string) {
+        const msg = this.t("launcher_session_expired") + (detail ? ` (${detail})` : "");
         this.setLauncherStatus(this.t("launcher_session_expired"), "error");
-        this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_session_expired")}`, "warn");
+        this.log(`${this.t("log_tag_launcher")} ${msg}`, "warn");
         const again = await ask(this.t("launcher_relogin_prompt"), { title: this.t("launcher_relogin_title"), kind: "warning" });
         // Keep the session unless the user chose to log in again.
         if (!again) return;
@@ -4487,8 +4653,7 @@ class App {
             const active = this.launcherProfiles.find(p => p.id === this.activeProfileId);
             if (this.profileSessionExpired(active) && !(await this.restoreProfileSession(active))) {
                 // Past its expiry and Nexon would not renew it: log in again.
-                this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_expired_skip", [active.name])}`, "warn");
-                await this.promptRelogin();
+                await this.promptRelogin(this.restoreReloginDetail ?? undefined);
                 return;
             }
         }
@@ -4526,9 +4691,8 @@ class App {
                 profileName: this.activeProfileName() || null,
             }) as any;
             if (r.relogin_required) {
-                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [String(r.error ?? "")])}`, "warn");
                 btn.disabled = false;
-                await this.promptRelogin();
+                await this.promptRelogin(this.cleanErr(r.error ?? "") || undefined);
                 return;
             }
             if (r.session) {
@@ -4548,17 +4712,17 @@ class App {
             e = this.errWithSession(e);
             // Any failed token refresh means the stored session is dead: offer a fresh login.
             if (this.isReloginError(e)) {
-                this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [this.cleanErr(e)])}`, "warn");
                 btn.disabled = false;
-                await this.promptRelogin();
+                await this.promptRelogin(this.cleanErr(e));
                 return;
             }
+            const err = this.cleanErr(e);
             const result = document.getElementById("launcher-launch-result")!;
-            result.textContent = this.t("launcher_launch_failed", [String(e)]);
+            result.textContent = this.t("launcher_launch_failed", [err]);
             result.className = "launcher-launch-result error";
             result.classList.remove("hidden");
-            this.setLauncherStatus(this.t("launcher_launch_error", [String(e)]), "error");
-            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [String(e)])}`, "error");
+            this.setLauncherStatus(this.t("launcher_launch_error", [err]), "error");
+            this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_launch_failed", [err])}`, "error");
         } finally {
             btn.disabled = false;
         }
@@ -4591,9 +4755,8 @@ class App {
 
         // Maintenance check is independent of version check
         try {
-            const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as boolean;
-            const maintText = maint ? this.t("label_yes") : this.t("label_no");
-            (document.getElementById("launcher-maintenance-value") as HTMLElement).textContent = maintText;
+            const maint = await invoke("launcher_check_maintenance", { session: this.launcherSession }) as { active: boolean; end: number };
+            const maintText = this.showMaintenance(maint.active, maint.end);
             this.log(`${this.t("log_tag_launcher")} ${this.t("launcher_maintenance_label")} ${maintText}`, "info");
         } catch (e) {
             this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_maint_failed", [String(e)])}`, "warn");

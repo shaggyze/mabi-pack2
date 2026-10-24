@@ -385,6 +385,11 @@ struct Config {
     #[serde(default)]
     minimize_to_tray: bool,
 
+    /// Mirror the uotiara installer's mod checkboxes (registry) with the
+    /// website mods in `mods/web/`, both ways.
+    #[serde(default = "default_true")]
+    uotiara_sync: bool,
+
     #[serde(default = "default_true")]
 
     parallel_ops: bool,
@@ -499,6 +504,7 @@ impl Default for Config {
             api_port: api::DEFAULT_PORT,
             product_id: default_product_id(),
             minimize_to_tray: false,
+            uotiara_sync: true,
 
             parallel_ops: true,
 
@@ -4490,6 +4496,29 @@ fn list_installed_web_mods() -> Vec<u32> {
     ids
 }
 
+/// The uotiara installer's registry record (`install`: version and each mod's
+/// checkbox, null when uotiara was never installed) plus the latest uotiara
+/// release on GitHub (`latest`, `latestUrl`; null when GitHub is unreachable).
+#[tauri::command]
+async fn read_uotiara_install() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let install = mabi_pack2::uotiara::read_install().map_err(|e| e.to_string())?;
+        let latest = mabi_pack2::uotiara::latest_release().ok();
+        Ok(serde_json::json!({
+            "install": install,
+            "latest": latest.as_ref().map(|l| l.0.clone()),
+            "latestUrl": latest.as_ref().map(|l| l.1.clone()),
+        }))
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Tick (`installed`) or untick mods in the uotiara installer's registry so
+/// its next run keeps or removes them. Needs administrator rights.
+#[tauri::command]
+fn set_uotiara_mods_installed(ids: Vec<u32>, installed: bool) -> Result<usize, String> {
+    mabi_pack2::uotiara::set_installed(&ids, installed).map_err(|e| e.to_string())
+}
+
 /// Delete an installed website mod's files from `mods/web/`.
 #[tauri::command]
 fn remove_web_mod(id: u32) -> Result<u32, String> {
@@ -4837,12 +4866,26 @@ async fn launcher_restore_session(id: String) -> Result<serde_json::Value, Strin
                 let _ = profile::save_session(&id, &session, 0);
                 Ok(serde_json::json!({ "session": session }))
             }
-            Ok(401) => {
-                let expires = auth::refresh_with_expiry(&mut session).map_err(|e| e.to_string())?;
-                let _ = profile::save_session(&id, &session, expires);
-                Ok(serde_json::json!({ "session": session, "expiresIn": expires }))
+            Ok(401) => match auth::refresh_with_expiry(&mut session) {
+                Ok(expires) => {
+                    let _ = profile::save_session(&id, &session, expires);
+                    Ok(serde_json::json!({ "session": session, "expiresIn": expires }))
+                }
+                // Nexon refuses sessions during maintenance: keep this one.
+                Err(e) if auth::is_maintenance_error(&e) => Ok(maintenance_restore(session, &e)),
+                Err(e) => Err(e.to_string()),
+            },
+            Ok(code) => {
+                let e = auth::or_maintenance(
+                    auth::AuthError::Http { status: code, code: 0, body: String::new() }.into(),
+                    code,
+                );
+                if auth::is_maintenance_error(&e) {
+                    Ok(maintenance_restore(session, &e))
+                } else {
+                    Err(format!("Session check failed (HTTP {})", code))
+                }
             }
-            Ok(code) => Err(format!("Session check failed (HTTP {})", code)),
             // Network trouble: keep the stored session; the launch retries and refreshes.
             Err(e) => {
                 log::warn!("[Launcher] Session check failed: {}", e);
@@ -4852,6 +4895,17 @@ async fn launcher_restore_session(id: String) -> Result<serde_json::Value, Strin
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// `launcher_restore_session`'s answer during maintenance: the stored session,
+/// kept, plus the maintenance notice for the status line.
+fn maintenance_restore(session: mabi_pack2::launcher::auth::NexonSession, e: &anyhow::Error) -> serde_json::Value {
+    let (end, title) = match e.downcast_ref::<mabi_pack2::launcher::auth::AuthError>() {
+        Some(mabi_pack2::launcher::auth::AuthError::Maintenance { end, title, .. }) => (*end, title.clone()),
+        _ => (0, String::new()),
+    };
+    log::warn!("[Launcher] {}", e);
+    serde_json::json!({ "session": session, "maintenance": { "end": end, "title": title } })
 }
 
 /// Import session from the official Nexon Launcher's cookie store.
@@ -5114,11 +5168,19 @@ async fn launcher_get_passport(session: SessionInfo) -> Result<String, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
-/// Check if the game is in maintenance.
+/// Check if the game is in maintenance: `{ active, start, end, title, url }`
+/// (times are unix seconds from Nexon's notice; 0 = not given).
 #[tauri::command]
-async fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String> {
+async fn launcher_check_maintenance(session: SessionInfo) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        mabi_pack2::launcher::patch::is_maintenance(&session).map_err(|e| e.to_string())
+        let (active, notice) = mabi_pack2::launcher::patch::maintenance_state(&session).map_err(|e| e.to_string())?;
+        let n = notice.unwrap_or(mabi_pack2::launcher::news::MaintenanceWindow {
+            title: String::new(),
+            url: String::new(),
+            start: 0,
+            end: 0,
+        });
+        Ok(serde_json::json!({ "active": active, "start": n.start, "end": n.end, "title": n.title, "url": n.url }))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -5126,9 +5188,16 @@ async fn launcher_check_maintenance(session: SessionInfo) -> Result<bool, String
 /// refreshed". The GUI looks for it and asks the user to log in again.
 const RELOGIN_MARKER: &str = "[RELOGIN] ";
 
-/// Error text for the GUI; session-expired errors carry [`RELOGIN_MARKER`].
+/// Prefix on command errors meaning "Nexon refused the session during
+/// maintenance": the GUI keeps the session and does not ask for a new login.
+const MAINTENANCE_MARKER: &str = "[MAINTENANCE] ";
+
+/// Error text for the GUI; session-expired errors carry [`RELOGIN_MARKER`],
+/// maintenance refusals [`MAINTENANCE_MARKER`].
 fn auth_err(e: anyhow::Error) -> String {
-    if mabi_pack2::launcher::auth::is_session_expired(&e) {
+    if mabi_pack2::launcher::auth::is_maintenance_error(&e) {
+        format!("{}{}", MAINTENANCE_MARKER, e)
+    } else if mabi_pack2::launcher::auth::is_session_expired(&e) {
         format!("{}{}", RELOGIN_MARKER, e)
     } else {
         e.to_string()
@@ -8028,6 +8097,7 @@ pub fn run() {
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, api_start, api_stop, nexon_login_webview,
 
             fetch_web_mods_catalog, install_web_mod, list_installed_web_mods, remove_web_mod,
+            read_uotiara_install, set_uotiara_mods_installed,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 
