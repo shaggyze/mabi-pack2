@@ -84,6 +84,13 @@ Each [release](https://github.com/shaggyze/mabi-pack2/releases/latest) carries `
 
 The desktop app checks for a newer release at startup and shows it in the log and in Settings › Engine. **Update to X** there downloads the new exe, checks that it runs and reports the expected version, replaces the running exe and restarts. **Install mabi-patcher updates automatically** does this at startup without a click. Both settings can be turned off. Replacing an exe under `Program Files` needs the app to run as administrator; otherwise use the installer.
 
+Startup runs these steps in order, each behind its own setting:
+
+1. mabi-patcher self-update (Settings › Engine). An installed update restarts the app, and the new exe runs the steps again.
+2. **Update website mods at startup** reinstalls each mod in `mods/web/` whose catalog version changed. `mods/web/versions.json` records the version installed. A mod installed before this setting existed has no recorded version and is reinstalled once.
+3. Game files: **Check for game updates on start** and **Auto-update on launch** (Settings › Patcher). Current files skip the patch.
+4. **Launch the game after the startup updates** launches with the active profile. It skips the launch when the game files are still out of date. The `after_launch` hook starts other programs after the game.
+
 The CI build of the Linux CLI is on the **Actions** tab (`CLI build` workflow).
 
 ### Windows (desktop app + CLI)
