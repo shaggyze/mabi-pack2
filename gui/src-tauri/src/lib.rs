@@ -1,6 +1,7 @@
 use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, patch, encryption, rgn as rgn_lib};
 
 mod vfs_ops;
+mod site;
 mod world_preview;
 mod kanan_import;
 
@@ -4464,29 +4465,37 @@ fn write_web_mod_versions(v: &std::collections::BTreeMap<u32, String>) -> Result
     std::fs::write(web_mod_versions_path(), json).map_err(|e| e.to_string())
 }
 
-/// Build one website mod via `POST pack_url` and save it to `mods/web/`.
-/// Replaces this mod's earlier file of the same format and records `version`.
-/// Returns the saved file path.
+/// Install one website mod into `mods/web/` and record `version`.
+/// Signed in: the website builds it (`POST pack_url`, any revision). Signed out,
+/// or the website refuses: `source` (`{commit, files}` of the chosen revision
+/// from `/api/mods/catalog`) is downloaded from GitHub and packed here.
+/// Replaces this mod's earlier file of the same format. Returns the saved path.
 #[tauri::command]
-fn install_web_mod(pack_url: String, id: u32, name: String, format: String, version: Option<String>) -> Result<String, String> {
-    if format != "it" && format != "pack" { return Err("format must be 'it' or 'pack'".into()); }
-    if !pack_url.starts_with("https://") && !pack_url.starts_with("http://") {
-        return Err("pack URL must be http(s)".into());
+async fn install_web_mod(app: tauri::AppHandle, pack_url: String, id: u32, name: String, format: String, version: Option<String>, revision: Option<String>, source: Option<serde_json::Value>) -> Result<String, String> {
+    let token = site::session_token(&app).await;
+    tauri::async_runtime::spawn_blocking(move || install_web_mod_blocking(pack_url, id, name, format, version, revision, token, source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The website's package for one mod at `revision` (none = latest).
+/// `Ok(None)` = the website wants a signed-in account (HTTP 401/403).
+fn site_build_web_mod(pack_url: &str, id: u32, format: &str, revision: Option<&str>, token: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut body = serde_json::json!({ "selected": [id], "format": format });
+    if let Some(rev) = revision.filter(|r| !r.is_empty()) {
+        body["versions"] = serde_json::json!({ id.to_string(): rev });
     }
-    let req = serde_json::json!({ "selected": [id], "format": format }).to_string();
-    let resp = match ureq::post(&pack_url)
+    let resp = match ureq::post(pack_url)
         .timeout(std::time::Duration::from_secs(180))
         .set("Content-Type", "application/json")
-        .send_string(&req)
+        .set("Cookie", &format!("mabipatcher_session={}", token))
+        .send_string(&body.to_string())
     {
         Ok(r) => r,
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => return Ok(None),
         Err(ureq::Error::Status(code, r)) => {
             let msg: String = r.into_string().unwrap_or_default().chars().take(200).collect();
-            return Err(if code == 401 || code == 403 {
-                format!("HTTP {}: the website requires a logged-in account to build packages", code)
-            } else {
-                format!("HTTP {}: {}", code, msg.trim())
-            });
+            return Err(format!("HTTP {}: {}", code, msg.trim()));
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -4496,12 +4505,40 @@ fn install_web_mod(pack_url: String, id: u32, name: String, format: String, vers
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), 1 << 30), &mut bytes).map_err(|e| e.to_string())?;
     if bytes.is_empty() { return Err("the website returned an empty package".into()); }
+    Ok(Some(bytes))
+}
+
+fn install_web_mod_blocking(pack_url: String, id: u32, name: String, format: String, version: Option<String>, revision: Option<String>, token: Option<String>, source: Option<serde_json::Value>) -> Result<String, String> {
+    if format != "it" && format != "pack" { return Err("format must be 'it' or 'pack'".into()); }
+    if !pack_url.starts_with("https://") && !pack_url.starts_with("http://") {
+        return Err("pack URL must be http(s)".into());
+    }
     let dir = web_mods_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let safe: String = name.chars()
         .map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' })
         .collect::<String>().trim().chars().take(80).collect();
     let dest = dir.join(format!("MOD{:04} - {}.{}", id, safe, format));
+
+    let site_bytes = match &token {
+        Some(t) => site_build_web_mod(&pack_url, id, &format, revision.as_deref(), t)?,
+        None => None,
+    };
+    // Build the GitHub copy before touching the old file, so a failure keeps it.
+    let built = if site_bytes.is_none() {
+        let src = source.ok_or_else(|| "sign in to the website to install this mod version (no GitHub source)".to_string())?;
+        let commit = src.get("commit").and_then(|c| c.as_str()).unwrap_or_default().to_string();
+        let files: Vec<mabi_pack2::uotiara::CatalogFile> = serde_json::from_value(src.get("files").cloned().unwrap_or_default())
+            .map_err(|e| format!("catalog files: {}", e))?;
+        let staging = dir.join(".building");
+        let _ = std::fs::remove_dir_all(&staging);
+        let out = staging.join(dest.file_name().unwrap());
+        mabi_pack2::uotiara::build_from_github(&commit, &files, &out, "})wWb4?-sVGHNoPKpc", 999)
+            .map_err(|e| { let _ = std::fs::remove_dir_all(&staging); e.to_string() })?;
+        log::info!("[Mods] Built MOD{:04} from GitHub (uotiara {})", id, &commit[..commit.len().min(7)]);
+        Some(out)
+    } else { None };
+
     // A renamed mod would otherwise leave its old file beside the new one.
     let prefix = format!("MOD{:04}", id);
     let ext = format!(".{}", format);
@@ -4511,7 +4548,14 @@ fn install_web_mod(pack_url: String, id: u32, name: String, format: String, vers
             std::fs::remove_file(e.path()).map_err(|e| e.to_string())?;
         }
     }
-    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    match (site_bytes, built) {
+        (Some(bytes), _) => std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?,
+        (None, Some(out)) => {
+            std::fs::rename(&out, &dest).or_else(|_| std::fs::copy(&out, &dest).map(|_| ())).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_dir_all(dir.join(".building"));
+        }
+        (None, None) => unreachable!(),
+    }
     let mut versions = read_web_mod_versions();
     match version.filter(|v| !v.is_empty()) {
         Some(v) => { versions.insert(id, v); }
@@ -4520,7 +4564,6 @@ fn install_web_mod(pack_url: String, id: u32, name: String, format: String, vers
     write_web_mod_versions(&versions)?;
     Ok(dest.to_string_lossy().to_string())
 }
-
 /// Installed website mods: id, file format and the catalog version recorded at
 /// install (null for mods installed before versions were recorded).
 #[tauri::command]
@@ -4681,7 +4724,9 @@ fn delete_webview_cookies() {
 #[tauri::command]
 async fn reset_login_cache(app: tauri::AppHandle) -> Result<usize, String> {
     use tauri::Manager;
-    let win = app.get_webview_window("main").ok_or("no main window")?;
+    // get_webview, not get_webview_window: the Browser tab's child webview makes
+    // "main" a multi-webview window, which get_webview_window no longer returns.
+    let win = app.get_webview("main").ok_or("no main window")?;
     tauri::async_runtime::spawn_blocking(move || {
         let cookies = win.cookies().map(|c| c.len()).unwrap_or(0);
         win.clear_all_browsing_data().map_err(|e| e.to_string())?;
@@ -5179,7 +5224,7 @@ struct TrayItems {
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = app.get_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -7982,7 +8027,7 @@ mod elevated_drop {
 
     /// Enable WM_DROPFILES on the main window. Call once, only when elevated.
     pub fn install(app: &tauri::AppHandle) -> Result<(), String> {
-        let win = app.get_webview_window("main").ok_or("no main window")?;
+        let win = app.get_window("main").ok_or("no main window")?;
         let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as HWND;
         let _ = APP.set(app.clone());
         unsafe {
@@ -8071,7 +8116,7 @@ pub fn run() {
             // or minimized when there is no tray icon to restore the window from.
             let args: Vec<String> = std::env::args().skip(1).collect();
             if mabi_pack2::launcher::autostart::wants_minimized(&args) {
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_window("main") {
                     match app.tray_by_id(TRAY_ID) {
                         Some(tray) => {
                             let _ = tray.set_visible(true);
@@ -8164,6 +8209,9 @@ pub fn run() {
 
             fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod,
             read_uotiara_install, set_uotiara_mods_installed,
+            site::site_account, site::site_login, site::site_logout, site::site_get_selections, site::site_put_selections, site::site_upload_mod,
+            site::browser_show, site::browser_set_bounds, site::browser_hide, site::browser_navigate, site::browser_action,
+            site::browser_state, site::browser_set_theme,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 

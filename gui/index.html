@@ -32,6 +32,10 @@
           <span class="nav-icon">&#128202;</span>
             <span class="nav-text" id="tab-dashboard-text" data-i18n="tab_dashboard">Dashboard</span>
         </button>
+        <button class="nav-item" data-tab="browser" id="tab-browser" data-tooltip="tab_browser">
+          <span class="nav-icon">&#127760;</span>
+          <span class="nav-text" id="tab-browser-text" data-i18n="tab_browser">Browser</span>
+        </button>
         <button class="nav-item" data-tab="extract" id="tab-extract" data-tooltip="tab_extract">
           <span class="nav-icon">🔓</span>
           <span class="nav-text" id="tab-extract-text" data-i18n="tab_extract">Extract</span>
@@ -533,6 +537,21 @@
           <button id="differ-run" class="run-btn" data-tooltip="tooltip_differ_run">GENERATE DIFF</button>
       </div>
 
+      <!-- Browser Tab: the page area hosts a native child webview (site.rs) -->
+      <div id="browser" class="tab-content">
+        <div class="browser-toolbar">
+          <button class="tab-btn browser-nav-btn" id="btn-browser-back" data-tooltip="browser_back" aria-label="Back">&#8592;</button>
+          <button class="tab-btn browser-nav-btn" id="btn-browser-forward" data-tooltip="browser_forward" aria-label="Forward">&#8594;</button>
+          <button class="tab-btn browser-nav-btn" id="btn-browser-reload" data-tooltip="browser_reload" aria-label="Reload">&#8635;</button>
+          <button class="tab-btn browser-nav-btn" id="btn-browser-home" data-tooltip="browser_home" aria-label="Home">&#8962;</button>
+          <input type="text" id="browser-address" class="form-input" spellcheck="false" autocomplete="off" placeholder="Address" data-i18n-placeholder="browser_address_placeholder" />
+          <button class="tab-btn" id="btn-browser-go" data-i18n="browser_go">Go</button>
+        </div>
+        <div id="browser-view" class="browser-view">
+          <span id="browser-placeholder" class="browser-placeholder" data-i18n="browser_loading">Loading…</span>
+        </div>
+      </div>
+
       <!-- Mods Tab -->
       <div id="mods" class="tab-content">
         <div class="mods-panel">
@@ -559,6 +578,21 @@
               <label class="mods-installed-filter" data-tooltip="tooltip_mods_uotiara_sync"><input type="checkbox" id="mods-uotiara-sync" checked /> <span data-i18n="mods_uotiara_sync">Sync with uotiara</span></label>
               <span id="mods-count" class="mods-count"></span>
               <button class="tab-btn" id="btn-mods-refresh" data-i18n="mods_refresh">Refresh</button>
+            </div>
+            <div id="mods-account" class="mods-account" style="display:none">
+              <div id="mods-account-out" class="mods-account-row">
+                <span class="mods-account-label" data-i18n="mods_account_signed_out">Sign in to your website account to install mods and keep your selections in sync.</span>
+                <input type="text" id="mods-account-user" class="form-input" autocomplete="username" placeholder="Username" data-i18n-placeholder="mods_account_user" />
+                <input type="password" id="mods-account-pass" class="form-input" autocomplete="current-password" placeholder="Password" data-i18n-placeholder="mods_account_pass" />
+                <button class="tab-btn primary" id="btn-mods-account-login" data-i18n="mods_account_login">Sign in</button>
+                <button class="tab-btn" id="btn-mods-account-web" data-tooltip="tooltip_mods_account_web" data-i18n="mods_account_web">Open in Browser</button>
+              </div>
+              <div id="mods-account-in" class="mods-account-row" style="display:none">
+                <span id="mods-account-name" class="mods-account-label"></span>
+                <span id="mods-account-sel" class="mods-count"></span>
+                <button class="tab-btn primary" id="btn-mods-account-sync" data-tooltip="tooltip_mods_account_sync" data-i18n="mods_account_sync">Install my selections</button>
+                <button class="tab-btn" id="btn-mods-account-logout" data-i18n="mods_account_logout">Sign out</button>
+              </div>
             </div>
             <div id="mods-uotiara-status" class="mods-path"></div>
             <div id="mods-list" class="mods-list">

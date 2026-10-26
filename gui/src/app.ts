@@ -246,10 +246,31 @@ interface WebMod {
     files?: number;
     hasDelete?: boolean;
     tags?: string[];
+    /** Latest catalog revision id (`/api/mods/catalog`); null/absent = archived. */
+    revision?: string | null;
+    /** Every revision, newest first. */
+    versions?: WebModVersion[];
 }
 
-/** Default catalog source: the website's Mods page (its bundle carries the catalog). */
+/** One revision of a website mod. `commit` + `fileList` let the exe build it from
+ *  GitHub without a website account (revisions that delete files need the site). */
+interface WebModVersion {
+    id: string;
+    version: string;
+    files: number;
+    hasDelete: boolean;
+    commit?: string | null;
+    fileList?: { path: string; action: string; sha256: string }[];
+}
+
+/** The website's Mods page. Older configs store it as the catalog URL. */
 const DEFAULT_MOD_CATALOG_URL = "https://shaggyze.website/mabipatcher/mods";
+/** The website's versioned catalog (JSON): mods with every revision. */
+const SITE_MOD_CATALOG_API = "https://shaggyze.website/api/mods/catalog";
+const SITE_HOME = "https://shaggyze.website/mabipatcher/";
+
+/** Signed-in website account (subset of `/api/auth/me`). */
+interface SiteAccount { username: string; displayName?: string; }
 
 /** Build a DOM element with a class and plain-text content (never innerHTML for mod metadata). */
 function elText<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
@@ -363,6 +384,17 @@ class App {
     /** uotiara installer record (registry), read when the Online view loads. */
     private uotiara: UotiaraInfo | null = null;
     private uotiaraSyncing = false;
+    /** Website account (shared cookie with the Browser tab); null = signed out. */
+    private siteAccount: SiteAccount | null = null;
+    /** The account's saved picks: mod id → catalog revision id. */
+    private siteSelections: Record<string, string> = {};
+    /** Installed website mods: id → revision recorded at install (installed_web_mods_info). */
+    private webModRevisions = new Map<number, string | null>();
+    private siteSyncing = false;
+    /** Browser tab: webview created, and the address-bar poll timer. */
+    private browserOpened = false;
+    private browserPoll: number | undefined;
+    private lastSiteCheck = 0;
     /** App version from the exe (get_app_version); fills {version} in locale strings. */
     private appVersion: string = "";
 
@@ -517,6 +549,8 @@ class App {
             ["syncSettingsUI", () => this.syncSettingsUI()],
             ["initTooltip", () => this.initTooltip()],
             ["setupNavigation", () => this.setupNavigation()],
+            ["setupBrowser", () => this.setupBrowser()],
+            ["setupSiteAccount", () => this.setupSiteAccount()],
             ["setupDashboard", () => this.setupDashboard()],
             ["setupJobQueue", () => this.setupJobQueue()],
             ["setupVfsEditing", () => this.setupVfsEditing()],
@@ -608,16 +642,22 @@ class App {
         await this.launcherDoLaunch();
     }
 
-    /** Startup mods step: reinstall each installed website mod whose catalog
-     *  version differs from the one recorded at install. */
+    /** Startup mods step: when signed in to the website, install the account's
+     *  selections first (missing or on another revision); then reinstall each
+     *  other installed website mod whose catalog revision differs from the one
+     *  recorded at install. */
     private async startupModsUpdate() {
         try {
+            await this.refreshSiteAccount();
+            if (this.siteAccount) await this.syncSiteSelections();
             const installed = await invoke("installed_web_mods_info") as { id: number; format: string; version: string | null }[];
             if (installed.length === 0) return;
             const catalog = new Map((await this.loadWebModCatalog()).map(m => [m.id, m]));
             const stale = installed.flatMap(i => {
                 const m = catalog.get(i.id);
-                return m?.version && m.version !== i.version ? [{ mod: m, format: i.format }] : [];
+                // An account pick pins its revision; syncSiteSelections handled those.
+                if (!m?.revision || this.siteSelections[String(i.id)]) return [];
+                return m.revision !== i.version ? [{ mod: m, format: i.format }] : [];
             });
             if (stale.length === 0) {
                 this.log(this.t("log_mods_autoupdate_skip"), "info");
@@ -627,10 +667,7 @@ class App {
             let updated = 0;
             for (const { mod, format } of stale) {
                 try {
-                    const saved = await invoke("install_web_mod", {
-                        packUrl: this.modPackUrl(), id: mod.id, name: mod.name, format, version: mod.version,
-                    }) as string;
-                    this.log(this.t("log_mods_web_installed", [mod.name, saved]), "info");
+                    await this.installWebMod(mod, format, mod.revision ?? null, false);
                     updated++;
                 } catch (e) {
                     this.log(this.t("log_mods_install_failed", [String(e)]), "error");
@@ -1038,6 +1075,31 @@ class App {
         const s = document.documentElement.style;
         if (o.font_size) s.fontSize = `${o.font_size}px`;
         else s.fontSize = '';
+        this.pushBrowserTheme();
+    }
+
+    /** Send the current theme colors to the Browser tab, which maps them onto the
+     *  website's CSS variables (site.rs). Runs after every theme or customizer change. */
+    private pushBrowserTheme() {
+        if (!isTauri()) return;
+        const css = getComputedStyle(document.body);
+        const v = (n: string) => css.getPropertyValue(n).trim();
+        const bg = v('--bg-deep') || '#16171d';
+        const accent = v('--accent-cyan') || '#38bdf8';
+        const hex = this.cssColorToHex(bg);
+        const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+        const alpha = (c: string, a: number) => {
+            const h = this.cssColorToHex(c);
+            return `rgba(${parseInt(h.slice(1, 3), 16)},${parseInt(h.slice(3, 5), 16)},${parseInt(h.slice(5, 7), 16)},${a})`;
+        };
+        const theme = {
+            bg, surface: v('--bg-surface'), input: v('--bg-input'),
+            text: v('--text-primary'), muted: v('--text-muted'), border: v('--border-glass'),
+            accent, accentBg: alpha(accent, 0.15), accentBorder: alpha(accent, 0.5),
+            font: v('--ui-font'),
+            dark: (0.299 * r + 0.587 * g + 0.114 * b) < 140,
+        };
+        invoke("browser_set_theme", { theme }).catch(() => { /* Browser tab not supported here */ });
     }
 
     private getCssVar(name: string): string {
@@ -2143,6 +2205,7 @@ class App {
         document.getElementById("btn-mods-view-online")?.classList.toggle("active", remote);
         const toolbar = document.getElementById("mods-online-toolbar");
         if (toolbar) toolbar.style.display = remote ? "" : "none";
+        this.renderSiteAccount();
     }
 
     /** Show the in-app API's state on the Mods tab badge. */
@@ -2195,6 +2258,28 @@ class App {
                         await this.applyModFromDashboard(dir + "/" + m.file);
                     });
                     header.append(btn);
+                    // Optional: share the .mod as a community mod on the website account.
+                    if (isTauri()) {
+                        const up = elText("button", "tab-btn", this.t("mods_upload"));
+                        up.dataset.tooltip = "tooltip_mods_upload";
+                        up.addEventListener("click", async () => {
+                            if (!this.siteAccount) await this.refreshSiteAccount();
+                            if (!this.siteAccount) { this.log(this.t("mods_upload_signin"), "warn"); return; }
+                            up.disabled = true;
+                            try {
+                                const status = await invoke("site_upload_mod", {
+                                    path: dir + "/" + m.file, title: m.name, creator: m.author ?? "",
+                                    description: m.description ?? "", version: m.version ?? "", category: (m.tags ?? [])[0] ?? "",
+                                }) as string;
+                                this.log(this.t(status === "pending" ? "log_mods_uploaded_pending" : "log_mods_uploaded", [m.name]), "success");
+                            } catch (e) {
+                                this.log(this.t("log_mods_upload_failed", [m.name, String(e)]), "error");
+                            } finally {
+                                up.disabled = false;
+                            }
+                        });
+                        header.append(up);
+                    }
                     const byline = [m.version, m.author].filter(Boolean) as string[];
                     byline.push(this.t("mod_file_count", [String(m.file_count)]));
                     const meta = elText("div", "mod-item-meta", byline.join(" · "));
@@ -2211,8 +2296,10 @@ class App {
 
     /** Catalog source: config override or the website's Mods page. http(s) only. */
     private modCatalogUrl(): string {
-        const u = (this.config.mod_remote_url || "").trim();
-        return /^https?:\/\//i.test(u) ? u : DEFAULT_MOD_CATALOG_URL;
+        const u = (this.config.mod_remote_url || "").trim().replace(/\/+$/, "");
+        // The Mods page URL (the old default) now means the site's JSON catalog.
+        if (!/^https?:\/\//i.test(u) || u === DEFAULT_MOD_CATALOG_URL) return SITE_MOD_CATALOG_API;
+        return u;
     }
 
     /** The website builds packages at `<origin>/api/pack` (POST {selected, format}). */
@@ -2232,8 +2319,6 @@ class App {
         if (!this.webModCatalog || force) {
             if (empty) { empty.textContent = this.t("mods_loading"); empty.style.display = ""; }
             try {
-                // Fetched in Rust (no CORS); the site has no JSON list, so the
-                // command reads the catalog out of the Mods page's JS bundle.
                 await this.loadWebModCatalog();
                 this.populateModCategories();
             } catch (e) {
@@ -2245,8 +2330,164 @@ class App {
             }
         }
         await this.refreshInstalledWebMods();
+        await this.refreshSiteAccount();
         if (this.modBrowserMode === 'remote') this.renderRemoteMods();
         await this.syncFromUotiara();
+    }
+
+    // ── Website account (Mods tab) ──────────────────────────────────────────
+
+    /** Read the website session (shared with the Browser tab) and the account's picks. */
+    private async refreshSiteAccount() {
+        if (!isTauri()) return;
+        try {
+            const me = await invoke("site_account") as SiteAccount | null;
+            const was = this.siteAccount?.username;
+            this.siteAccount = me && typeof me.username === "string" ? me : null;
+            if (this.siteAccount) {
+                const res = await invoke("site_get_selections") as { selections?: Record<string, string>; updatedAt?: string | null };
+                this.siteSelections = { ...(res.selections ?? {}) };
+                // First sign-in from this PC: the account has never saved picks, so
+                // start them from the website mods installed here.
+                if (!res.updatedAt && this.webModRevisions.size > 0) {
+                    for (const [id, rev] of this.webModRevisions) {
+                        const m = this.webModCatalog?.find(w => w.id === id);
+                        const pick = rev && m?.versions?.some(v => v.id === rev) ? rev : m?.revision;
+                        if (pick) this.siteSelections[String(id)] = pick;
+                    }
+                    await this.saveSiteSelections();
+                }
+                if (was !== this.siteAccount.username) this.log(this.t("log_site_signed_in", [this.siteAccount.username]), "info");
+            } else {
+                this.siteSelections = {};
+            }
+        } catch (e) {
+            this.log(this.t("log_site_account_failed", [String(e)]), "warn");
+        }
+        this.renderSiteAccount();
+    }
+
+    private async saveSiteSelections() {
+        if (!this.siteAccount) return;
+        try {
+            const res = await invoke("site_put_selections", { selections: this.siteSelections }) as { selections?: Record<string, string> };
+            if (res?.selections) this.siteSelections = { ...res.selections };
+        } catch (e) {
+            this.log(this.t("log_site_selections_failed", [String(e)]), "warn");
+        }
+        this.renderSiteAccount();
+    }
+
+    /** Show the sign-in form or the signed-in row (Online view only). */
+    private renderSiteAccount() {
+        const box = document.getElementById("mods-account");
+        if (!box) return;
+        box.style.display = this.modBrowserMode === 'remote' && isTauri() ? "" : "none";
+        const out = document.getElementById("mods-account-out");
+        const inn = document.getElementById("mods-account-in");
+        if (out) out.style.display = this.siteAccount ? "none" : "";
+        if (inn) inn.style.display = this.siteAccount ? "" : "none";
+        const name = document.getElementById("mods-account-name");
+        if (name && this.siteAccount) name.textContent = this.t("mods_account_signed_in", [this.siteAccount.displayName || this.siteAccount.username]);
+        const sel = document.getElementById("mods-account-sel");
+        if (sel) sel.textContent = this.t("mods_account_selected", [String(Object.keys(this.siteSelections).length)]);
+        const btn = document.getElementById("btn-mods-account-sync") as HTMLButtonElement | null;
+        if (btn) btn.disabled = this.siteSyncing;
+    }
+
+    private setupSiteAccount() {
+        const login = async () => {
+            const user = document.getElementById("mods-account-user") as HTMLInputElement | null;
+            const pass = document.getElementById("mods-account-pass") as HTMLInputElement | null;
+            const btn = document.getElementById("btn-mods-account-login") as HTMLButtonElement | null;
+            if (!user || !pass || !user.value.trim() || !pass.value) return;
+            if (btn) btn.disabled = true;
+            try {
+                await invoke("site_login", { username: user.value.trim(), password: pass.value });
+                pass.value = "";
+                await this.refreshSiteAccount();
+                if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+                await this.syncFromUotiara();
+            } catch (e) {
+                this.log(this.t("log_site_login_failed", [String(e)]), "error");
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        };
+        document.getElementById("btn-mods-account-login")?.addEventListener("click", login);
+        document.getElementById("mods-account-pass")?.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Enter") login(); });
+        document.getElementById("btn-mods-account-web")?.addEventListener("click", () => {
+            this.openInBrowserTab(`${SITE_HOME}login?returnTo=${encodeURIComponent("/mabipatcher/mods")}`);
+        });
+        document.getElementById("btn-mods-account-logout")?.addEventListener("click", async () => {
+            try { await invoke("site_logout"); } catch (e) { this.log(String(e), "warn"); }
+            this.siteAccount = null;
+            this.siteSelections = {};
+            this.log(this.t("log_site_signed_out"), "info");
+            this.renderSiteAccount();
+            if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+        });
+        document.getElementById("btn-mods-account-sync")?.addEventListener("click", async () => {
+            await this.syncSiteSelections();
+            if (this.modBrowserMode === 'remote') this.renderRemoteMods();
+        });
+    }
+
+    /** Install every account pick that is missing here or on another revision,
+     *  and tick it in the uotiara installer. */
+    private async syncSiteSelections() {
+        if (!this.siteAccount || this.siteSyncing) return;
+        this.siteSyncing = true;
+        this.renderSiteAccount();
+        try {
+            if (!this.webModCatalog) await this.loadWebModCatalog();
+            await this.refreshInstalledWebMods();
+            const byId = new Map((this.webModCatalog ?? []).map(m => [m.id, m]));
+            const todo = Object.entries(this.siteSelections).flatMap(([id, rev]) => {
+                const m = byId.get(Number(id));
+                if (!m || !m.versions?.some(v => v.id === rev)) return [];
+                return this.webModsInstalled.has(m.id) && this.webModRevisions.get(m.id) === rev ? [] : [{ m, rev }];
+            });
+            const format = (document.getElementById("mods-format") as HTMLSelectElement | null)?.value === "pack" ? "pack" : "it";
+            let done = 0;
+            for (const { m, rev } of todo) {
+                this.renderUotiaraStatus(this.t("mods_account_syncing", [String(done + 1), String(todo.length)]));
+                try {
+                    await this.installWebMod(m, format, rev, false);
+                    done++;
+                } catch (e) {
+                    this.log(this.t("log_mods_install_failed", [String(e)]), "error");
+                }
+            }
+            this.log(this.t("log_site_sync_done", [String(done), String(todo.length)]), done === todo.length ? "info" : "warn");
+        } catch (e) {
+            this.log(this.t("log_site_selections_failed", [String(e)]), "warn");
+        } finally {
+            this.siteSyncing = false;
+            this.renderUotiaraStatus();
+            this.renderSiteAccount();
+        }
+    }
+
+    /** Build one website mod at `revision` (null = latest) into mods/web/, record
+     *  it, tick it in uotiara and, when `select`, save it as an account pick. */
+    private async installWebMod(m: WebMod, format: string, revision: string | null, select = true): Promise<string> {
+        const rev = revision ?? m.revision ?? null;
+        const v = m.versions?.find(x => x.id === rev);
+        // Without a website account the exe builds the revision from GitHub.
+        const source = v?.commit && !v.hasDelete ? { commit: v.commit, files: v.fileList ?? [] } : null;
+        const saved = await invoke("install_web_mod", {
+            packUrl: this.modPackUrl(), id: m.id, name: m.name, format, version: rev, revision: rev, source,
+        }) as string;
+        this.webModsInstalled.add(m.id);
+        this.webModRevisions.set(m.id, rev);
+        this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
+        await this.mirrorToUotiara(m.id, true);
+        if (select && this.siteAccount && rev && this.siteSelections[String(m.id)] !== rev) {
+            this.siteSelections[String(m.id)] = rev;
+            await this.saveSiteSelections();
+        }
+        return saved;
     }
 
     /**
@@ -2272,8 +2513,11 @@ class App {
                 this.renderUotiaraStatus(this.t("mods_uotiara_syncing", [String(done + failed + 1), String(missing.length)]));
                 const w = byId.get(m.id)!;
                 try {
-                    await invoke("install_web_mod", { packUrl: this.modPackUrl(), id: w.id, name: w.name, format });
-                    this.webModsInstalled.add(w.id);
+                    // An account pick keeps its revision; otherwise the latest. The
+                    // account picks are saved once after the loop, not per mod.
+                    const rev = this.siteSelections[String(w.id)] ?? w.revision ?? null;
+                    await this.installWebMod(w, format, rev, false);
+                    if (this.siteAccount && rev) this.siteSelections[String(w.id)] = rev;
                     done++;
                 } catch (e) {
                     failed++;
@@ -2285,6 +2529,7 @@ class App {
         } finally {
             this.uotiaraSyncing = false;
         }
+        if (done > 0) await this.saveSiteSelections();
         this.log(this.t("log_uotiara_synced", [String(done), String(missing.length)]), failed ? "warn" : "info");
         if (failed) this.log(this.t("log_mods_install_failed", [lastError]), "warn");
         this.renderUotiaraStatus();
@@ -2336,13 +2581,42 @@ class App {
         const arr: unknown[] = Array.isArray(raw) ? raw
             : (raw && Array.isArray((raw as any).mods)) ? (raw as any).mods : [];
         this.webModCatalog = arr.filter((m): m is WebMod =>
-            !!m && typeof (m as any).id === "number" && typeof (m as any).name === "string");
+            !!m && typeof (m as any).id === "number" && typeof (m as any).name === "string")
+            .map(m => this.normalizeWebMod(m));
         return this.webModCatalog;
+    }
+
+    /** `/api/mods/catalog` entries carry `latest` + `versions[]` (each with its files);
+     *  older catalogs carry `version` / `files` / `hasDelete` directly. */
+    private normalizeWebMod(raw: WebMod): WebMod {
+        const r = raw as WebMod & { latest?: string | null; versions?: unknown };
+        if (!Array.isArray(r.versions)) return raw;
+        const versions = (r.versions as any[])
+            .filter(v => v && typeof v.id === "string")
+            .map(v => {
+                const files = Array.isArray(v.files) ? v.files : [];
+                return { id: v.id as string, version: String(v.version ?? v.id),
+                    files: files.length, hasDelete: files.some((f: any) => f?.action === "delete"),
+                    commit: typeof v.commit === "string" ? v.commit : null,
+                    fileList: files.filter((f: any) => f && typeof f.path === "string").map((f: any) => ({
+                        path: String(f.path), action: String(f.action ?? "replace"), sha256: String(f.sha256 ?? "") })) };
+            });
+        const latest = versions.find(v => v.id === r.latest) ?? null;
+        return {
+            ...raw, versions, revision: latest?.id ?? null,
+            version: latest?.version ?? versions[0]?.version,
+            files: latest?.files ?? versions[0]?.files,
+            hasDelete: (latest ?? versions[0])?.hasDelete ?? false,
+        };
     }
 
     private async refreshInstalledWebMods() {
         try { this.webModsInstalled = new Set(await invoke("list_installed_web_mods") as number[]); }
         catch { /* keep previous set */ }
+        try {
+            const info = await invoke("installed_web_mods_info") as { id: number; version: string | null }[];
+            this.webModRevisions = new Map(info.map(i => [i.id, i.version ?? null]));
+        } catch { /* keep previous map */ }
     }
 
     private populateModCategories() {
@@ -2369,6 +2643,8 @@ class App {
         const cat = (document.getElementById("mods-category") as HTMLSelectElement | null)?.value || "";
         const installedOnly = (document.getElementById("mods-installed-only") as HTMLInputElement | null)?.checked ?? false;
         const shown = this.webModCatalog.filter(m =>
+            // Archived mods (no current revision) only while installed or picked.
+            (m.revision !== null || this.webModsInstalled.has(m.id) || !!this.siteSelections[String(m.id)]) &&
             (!cat || m.category === cat) &&
             (!installedOnly || this.webModsInstalled.has(m.id)) &&
             (!q || [m.name, m.description, m.author, m.category, ...(m.tags ?? [])]
@@ -2398,19 +2674,42 @@ class App {
         if (m.hasDelete) header.append(elText("span", "mod-item-badge-delete", this.t("mods_deletes_badge")));
 
         const actions = elText("span", "mod-item-actions");
+        // Version picker: the account pick, else the installed revision, else the latest.
+        let versionSel: HTMLSelectElement | null = null;
+        if (m.versions && m.versions.length > 0) {
+            versionSel = elText("select", "form-input mod-item-version");
+            versionSel.dataset.tooltip = "mods_version_tooltip";
+            for (const v of m.versions) {
+                const o = elText("option", "", v.id === m.revision ? this.t("mods_version_latest", [v.version]) : v.version);
+                o.value = v.id;
+                versionSel.append(o);
+            }
+            const want = this.siteSelections[String(m.id)] ?? this.webModRevisions.get(m.id) ?? m.revision;
+            if (want && m.versions.some(v => v.id === want)) versionSel.value = want;
+            versionSel.addEventListener("change", async () => {
+                // A picked mod keeps the new version on the account; install applies it here.
+                if (this.siteAccount && this.siteSelections[String(m.id)]) {
+                    this.siteSelections[String(m.id)] = versionSel!.value;
+                    await this.saveSiteSelections();
+                }
+            });
+            actions.append(versionSel);
+        }
         const installBtn = elText("button", "tab-btn", this.t(installed ? "mods_reinstall" : "mod_install"));
         installBtn.addEventListener("click", async () => {
             const format = (document.getElementById("mods-format") as HTMLSelectElement | null)?.value === "pack" ? "pack" : "it";
+            // Signed out, only revisions with a GitHub source can be built here.
+            const pick = m.versions?.find(v => v.id === (versionSel?.value || m.revision));
+            if (isTauri() && !this.siteAccount && pick && (!pick.commit || pick.hasDelete)) {
+                this.log(this.t("mods_signin_required"), "warn");
+                document.getElementById("mods-account-user")?.focus();
+                return;
+            }
             installBtn.disabled = true;
             installBtn.textContent = this.t("mod_installing");
             try {
-                const saved = await invoke("install_web_mod", {
-                    packUrl: this.modPackUrl(), id: m.id, name: m.name, format, version: m.version ?? null,
-                }) as string;
-                this.webModsInstalled.add(m.id);
-                this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
+                await this.installWebMod(m, format, versionSel?.value || null);
                 this.renderRemoteMods();
-                await this.mirrorToUotiara(m.id, true);
             } catch (e) {
                 installBtn.disabled = false;
                 installBtn.textContent = this.t(installed ? "mods_reinstall" : "mod_install");
@@ -2425,9 +2724,14 @@ class App {
                 try {
                     await invoke("remove_web_mod", { id: m.id });
                     this.webModsInstalled.delete(m.id);
+                    this.webModRevisions.delete(m.id);
                     this.log(this.t("log_mods_web_removed", [m.name]), "info");
-                    this.renderRemoteMods();
                     await this.mirrorToUotiara(m.id, false);
+                    if (this.siteAccount && this.siteSelections[String(m.id)]) {
+                        delete this.siteSelections[String(m.id)];
+                        await this.saveSiteSelections();
+                    }
+                    this.renderRemoteMods();
                 } catch (e) {
                     removeBtn.disabled = false;
                     this.log(this.t("log_mods_install_failed", [String(e)]), "error");
@@ -4900,6 +5204,10 @@ class App {
 
                 document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
                 document.getElementById(tab)?.classList.add("active");
+                // The Browser tab's page is a native webview drawn over the window:
+                // it must be hidden by hand when another tab shows.
+                if (tab === "browser") this.showBrowserTab();
+                else this.hideBrowserTab();
             });
         });
 
@@ -4919,6 +5227,122 @@ class App {
             const btn = document.getElementById("sidebar-toggle")!;
             sidebar.classList.toggle("collapsed");
             btn.textContent = sidebar.classList.contains("collapsed") ? "▶" : "◀";
+        });
+    }
+
+    // ── Browser tab ─────────────────────────────────────────────────────────
+
+    /** #browser-view in physical pixels (CSS px × devicePixelRatio, page zoom included). */
+    private browserRect() {
+        const el = document.getElementById("browser-view");
+        if (!el) return null;
+        const r = el.getBoundingClientRect(), k = window.devicePixelRatio || 1;
+        return { x: r.left * k, y: r.top * k, width: r.width * k, height: r.height * k };
+    }
+
+    private isBrowserTabActive() {
+        return document.getElementById("browser")?.classList.contains("active") ?? false;
+    }
+
+    private async showBrowserTab(url?: string) {
+        if (!isTauri()) return;
+        // Layout settles after the tab becomes display:flex.
+        await new Promise(r => requestAnimationFrame(() => r(null)));
+        const rect = this.browserRect();
+        if (!rect || !this.isBrowserTabActive()) return;
+        try {
+            await invoke("browser_show", { url: url ?? (this.browserOpened ? null : SITE_HOME), ...rect });
+            this.browserOpened = true;
+            const ph = document.getElementById("browser-placeholder");
+            if (ph) ph.style.display = "none";
+        } catch (e) {
+            this.log(this.t("log_browser_failed", [String(e)]), "error");
+            return;
+        }
+        this.pushBrowserTheme();
+        if (this.browserPoll === undefined) this.browserPoll = window.setInterval(() => this.pollBrowser(), 1000);
+        this.pollBrowser();
+    }
+
+    private hideBrowserTab() {
+        if (this.browserPoll !== undefined) { clearInterval(this.browserPoll); this.browserPoll = undefined; }
+        if (this.browserOpened) invoke("browser_hide").catch(() => {});
+    }
+
+    /** Switch to the Browser tab and open `url` there. */
+    private openInBrowserTab(url: string) {
+        const btn = document.querySelector('.nav-item[data-tab="browser"]') as HTMLElement | null;
+        if (!this.isBrowserTabActive()) {
+            btn?.dispatchEvent(new Event("click"));
+            // showBrowserTab from the click opens the home page first; navigate after.
+            setTimeout(() => this.browserGo(url), 50);
+        } else {
+            this.browserGo(url);
+        }
+    }
+
+    private async browserGo(url: string) {
+        if (!this.browserOpened) { await this.showBrowserTab(url); return; }
+        try {
+            const shown = await invoke("browser_navigate", { url }) as string;
+            const addr = document.getElementById("browser-address") as HTMLInputElement | null;
+            if (addr) addr.value = shown;
+        } catch (e) {
+            this.log(this.t("log_browser_failed", [String(e)]), "error");
+        }
+    }
+
+    /** Address bar follows the page (single-page sites change it via pushState). */
+    private async pollBrowser() {
+        if (!this.browserOpened) return;
+        try {
+            const s = await invoke("browser_state") as { url: string; title: string } | null;
+            const addr = document.getElementById("browser-address") as HTMLInputElement | null;
+            if (s && addr && document.activeElement !== addr && addr.value !== s.url) {
+                // The site's login/logout pages are single-page routes (no load event):
+                // leaving one is when the session cookie may have changed.
+                if (/\/mabipatcher\/(login|account|logout)/.test(addr.value) && Date.now() - this.lastSiteCheck > 3000) {
+                    this.lastSiteCheck = Date.now();
+                    this.refreshSiteAccount();
+                }
+                addr.value = s.url;
+            }
+        } catch { /* webview closing */ }
+    }
+
+    private setupBrowser() {
+        if (!isTauri()) return;
+        const act = (a: string) => invoke("browser_action", { action: a }).catch(e => this.log(this.t("log_browser_failed", [String(e)]), "warn"));
+        document.getElementById("btn-browser-back")?.addEventListener("click", () => act("back"));
+        document.getElementById("btn-browser-forward")?.addEventListener("click", () => act("forward"));
+        document.getElementById("btn-browser-reload")?.addEventListener("click", () => act("reload"));
+        document.getElementById("btn-browser-home")?.addEventListener("click", () => this.browserGo(SITE_HOME));
+        const addr = document.getElementById("browser-address") as HTMLInputElement | null;
+        const go = () => { const v = addr?.value.trim(); if (v) this.browserGo(v); };
+        document.getElementById("btn-browser-go")?.addEventListener("click", go);
+        addr?.addEventListener("keydown", e => {
+            if (e.key === "Enter") go();
+            if (e.key === "Escape") { addr.blur(); this.pollBrowser(); }
+        });
+        // Keep the native webview glued to #browser-view as the window or sidebar resizes.
+        const view = document.getElementById("browser-view");
+        if (view) {
+            new ResizeObserver(() => {
+                if (!this.browserOpened || !this.isBrowserTabActive()) return;
+                const rect = this.browserRect();
+                if (rect) invoke("browser_set_bounds", rect).catch(() => {});
+            }).observe(view);
+        }
+        // A sign-in or sign-out on the website in the Browser tab updates the Mods tab.
+        listen("browser-load", (ev: any) => {
+            const p = ev?.payload as { url?: string; finished?: boolean } | undefined;
+            if (!p?.finished) return;
+            const addrEl = document.getElementById("browser-address") as HTMLInputElement | null;
+            if (addrEl && p.url && document.activeElement !== addrEl) addrEl.value = p.url;
+            if (p.url?.startsWith("https://shaggyze.website/") && Date.now() - this.lastSiteCheck > 3000) {
+                this.lastSiteCheck = Date.now();
+                setTimeout(() => this.refreshSiteAccount(), 1500);
+            }
         });
     }
 
