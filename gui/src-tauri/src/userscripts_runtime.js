@@ -95,11 +95,12 @@
   }
 
   // ── Sandbox: scripts with grants get their own globals over the page's ────
-  var bound = new WeakMap();
   function makeSandbox(api) {
     // The proxy target is the script's own globals object, not window: a Proxy
     // must not hide a non-configurable property of its target, and window's
     // document/location/top are non-configurable ("'has' on proxy" TypeError).
+    // Per sandbox: each wrapper compares against this sandbox's own proxy.
+    var bound = new WeakMap();
     var local = Object.create(null);
     Object.keys(api).forEach(function (k) { local[k] = api[k]; });
     function isSelf(k) { return k === "window" || k === "self" || k === "globalThis" || k === "frames"; }
@@ -111,10 +112,17 @@
         if (isSelf(k)) return self;
         if (k in t) return t[k];
         var v = Reflect.get(window, k);
-        // Native window methods (setTimeout, addEventListener…) need the real window as this.
-        if (typeof v === "function" && !v.prototype) {
+        // Window methods need the real window as this. Page scripts (New Relic's
+        // nrWrapper) replace natives with plain functions, so every function is
+        // wrapped: calls get window for a sandbox this, while properties
+        // ($.fn) and `new` pass through the proxy unchanged.
+        // Capitalized globals (Object, HTMLElement, Image) are constructors: keep identity.
+        if (typeof v === "function" && typeof k === "string" && !/^[A-Z]/.test(k)) {
           var b = bound.get(v);
-          if (!b) { b = v.bind(window); bound.set(v, b); }
+          if (!b) {
+            b = new Proxy(v, { apply: function (f, that, args) { return Reflect.apply(f, that === self ? window : that, args); } });
+            bound.set(v, b);
+          }
           return b;
         }
         return v;

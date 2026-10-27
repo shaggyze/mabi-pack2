@@ -78,11 +78,22 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("Could not start the HTTP client: {e}"))
 }
 fn fetch_feed(token: &str) -> Result<CommunityFeed, String> {
-    let response = client()?
-        .get(format!("{}/api/community/sync", origin()))
-        .bearer_auth(token)
-        .send()
-        .map_err(|e| format!("Could not reach shaggyze.website: {e}"))?;
+    let client = client()?;
+    let send = || {
+        client
+            .get(format!("{}/api/community/sync", origin()))
+            .bearer_auth(token)
+            .send()
+    };
+    // The site sometimes resets a fresh connection (os error 10054): retry once.
+    let response = match send() {
+        Err(e) if e.is_connect() => {
+            std::thread::sleep(Duration::from_secs(2));
+            send()
+        }
+        other => other,
+    }
+    .map_err(|e| format!("Could not reach shaggyze.website: {e}"))?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(format!(

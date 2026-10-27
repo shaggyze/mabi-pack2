@@ -4191,6 +4191,8 @@ class App {
                 storedActiveId = result.active_id || "";
             }
             this.launcherProfiles = profiles;
+            // A reload follows a login, which may have saved a token.
+            this.noAutologinToken.clear();
 
             // Prefer stored active_id, fall back to previously selected, then first profile
             const activeId = storedActiveId || this.activeProfileId || this.launcherProfiles[0]?.id || "";
@@ -4311,6 +4313,8 @@ class App {
 
     private profileExpiryTimer: number | null = null;
     private sessionKeepAliveTimer: number | null = null;
+    /** Profiles whose autologin found no saved session token this run. */
+    private noAutologinToken = new Set<string>();
 
     /** While the app runs, renew the active profile's session when it has under an
      *  hour left (autologin), so it never lapses. A session with no known expiry is
@@ -4326,7 +4330,8 @@ class App {
             const due = p.session_expires_at
                 ? p.session_expires_at - now <= 3600
                 : !!p.last_login_at && now - p.last_login_at >= 6 * 3600;
-            if (!due) return;
+            // No saved token: autologin cannot renew it, so do not retry every 10 min.
+            if (!due || this.noAutologinToken.has(p.id)) return;
             this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_session_renew", [p.name])}`, "info");
             await this.autologinProfile(p.id);
         }, 10 * 60_000);
@@ -4669,7 +4674,12 @@ class App {
         try {
             const data = await invoke("launcher_load_profile", { id: profileId }) as any;
             const token = data.session_token_for_autologin;
-            if (!token) { this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autologin_no_token")}`, "warn"); return; }
+            if (!token) {
+                if (!this.noAutologinToken.has(profileId)) this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autologin_no_token")}`, "warn");
+                this.noAutologinToken.add(profileId);
+                return;
+            }
+            this.noAutologinToken.delete(profileId);
             this.setLauncherStatus(this.t("launcher_autologging"), "busy");
             const result = await invoke("launcher_autologin", { sessionToken: token, profileId }) as any;
             if (!result.session) throw new Error(this.t("launcher_err_session_refresh"));
