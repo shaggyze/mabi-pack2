@@ -6,10 +6,10 @@ interface Result {connected:boolean;owner:string;mods:Mod[];subscriptions:Record
 type Translate=(key:string,args?:string[])=>string;
 
 /** Account-specific downloads are separate from the public numeric mod catalog. */
-export function setupCommunityMods(t:Translate,log:(message:string)=>void,openUrl:(url:string)=>void):void{
+export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|'warn')=>void,openUrl:(url:string)=>void):void{
     if(!isTauri())return;
     const parent=document.querySelector('#mods .mods-panel');if(!parent)return;
-    const section=document.createElement('section');section.className='card';
+    const section=document.createElement('section');section.className='card community-card';
     const heading=document.createElement('h3');heading.textContent=t('community_title');
     const help=document.createElement('p');help.textContent=t('community_help');
     const link=document.createElement('a');link.href='https://shaggyze.website/mabipatcher/upload';link.textContent=t('community_website');
@@ -22,7 +22,9 @@ export function setupCommunityMods(t:Translate,log:(message:string)=>void,openUr
     reveal.setAttribute('aria-pressed','false');
     reveal.onclick=()=>{const show=input.type==='password';input.type=show?'text':'password';reveal.textContent=t(show?'community_hide':'community_show');reveal.setAttribute('aria-pressed',String(show));};
     const keyRow=document.createElement('div');keyRow.style.cssText='display:flex;gap:6px;align-items:center';input.style.flex='1';keyRow.append(input,reveal);label.append(keyRow);
-    const status=document.createElement('p');status.setAttribute('role','status');
+    const status=document.createElement('p');status.className='community-status';status.setAttribute('role','status');
+    const setStatus=(text:string,state:'ok'|'error'|'idle')=>{status.textContent=text;status.dataset.state=state;};
+    let connected='',lastError='',lastErrors='';
     const list=document.createElement('div');let busy=false;
     const controls:HTMLButtonElement[]=[];
     const button=(text:string,action:()=>Promise<Result>)=>{
@@ -31,20 +33,31 @@ export function setupCommunityMods(t:Translate,log:(message:string)=>void,openUr
     };
     async function run(action:()=>Promise<Result>){
         if(busy)return;busy=true;controls.forEach(b=>b.disabled=true);input.disabled=true;
-        try{render(await action());}catch(error){status.textContent=t('community_failed',[String(error)]);}
+        try{render(await action());}catch(error){const text=t('community_failed',[String(error)]);
+            // Keep a confirmed connection visible above a sync error.
+            setStatus(connected?`${connected} · ${text}`:text,'error');
+            // The 5-minute refresh repeats the same failure; log it once.
+            if(text!==lastError)log(text,'warn');lastError=text;}
         finally{busy=false;controls.forEach(b=>b.disabled=false);input.disabled=false;}
     }
     const sync=()=>invoke<Result>('community_mod_sync');
     const connect=button(t('community_connect'),async()=>{
-        const token=input.value.trim();input.value='';input.type='password';reveal.textContent=t('community_show');reveal.setAttribute('aria-pressed','false');await invoke('community_mod_connect',{token});return sync();
+        const token=input.value.trim();input.value='';input.type='password';reveal.textContent=t('community_show');reveal.setAttribute('aria-pressed','false');
+        // Report the connection on its own so a later sync error cannot hide it.
+        const owner=await invoke<string>('community_mod_connect',{token});
+        connected=t('community_connected',[owner]);setStatus(connected,'ok');log(connected,'info');
+        return sync();
     });
     const refresh=button(t('community_refresh'),sync);
     const disconnect=button(t('community_disconnect'),async()=>{await invoke('community_mod_disconnect');return sync();});
     function render(result:Result){
         // Drop row controls before rerendering so periodic refresh does not grow memory.
         controls.splice(3);list.replaceChildren();
-        status.textContent=result.connected?t('community_connected',[result.owner]):t('community_disconnected');
-        if(result.updated.length)log(t('community_updated',[result.updated.join(', ')]));
+        lastError='';connected=result.connected?t('community_connected',[result.owner]):'';
+        if(connected)setStatus(connected,'ok');else setStatus(t('community_disconnected'),'idle');
+        if(result.updated.length)log(t('community_updated',[result.updated.join(', ')]),'info');
+        // Per-mod errors repeat on every refresh; log them when they change.
+        const errs=result.errors.join('|');if(errs&&errs!==lastErrors)for(const e of result.errors)log(t('community_failed',[e]),'warn');lastErrors=errs;
         if(result.errors.length){const error=document.createElement('p');error.textContent=result.errors.join(' · ');list.append(error);}
         for(const mod of result.mods){
             const row=document.createElement('div');row.className='mod-item';

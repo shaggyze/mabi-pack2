@@ -1310,3 +1310,12 @@ button.run-btn {
 .mod-item-version { font-size: 11px; padding: 2px 4px; max-width: 150px; }
 
 .browser-script-error { color: #f87171; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Community Mods card sizes to its content below the main mods card. */
+.mods-panel { overflow-y: auto; }
+/* The main card keeps room for its list, which scrolls inside it; the
+   panel scrolls to reach the Community card below. */
+.mods-panel > .card:first-child { min-height: 480px; overflow: hidden; }
+.mods-panel > .card.community-card { flex: 0 0 auto; }
+.community-status { font-size: 12px; margin: 6px 0; }
+.community-status[data-state="ok"] { color: #4ade80; font-weight: 600; }
+.community-status[data-state="error"] { color: #f87171; }

@@ -2507,7 +2507,8 @@ class App {
         const inst = this.uotiara?.install;
         if (!this.config.uotiara_sync || !inst || !this.webModCatalog) return;
         const byId = new Map(this.webModCatalog.map(m => [m.id, m]));
-        const missing = inst.mods.filter(m => m.installed && byId.has(m.id) && !this.webModsInstalled.has(m.id));
+        // Archived mods (no catalog revision) cannot be installed; skip them.
+        const missing = inst.mods.filter(m => m.installed && !!byId.get(m.id)?.revision && !this.webModsInstalled.has(m.id));
         if (missing.length === 0) return;
         this.uotiaraSyncing = true;
         const format = (document.getElementById("mods-format") as HTMLSelectElement | null)?.value === "pack" ? "pack" : "it";
@@ -2519,13 +2520,26 @@ class App {
                 try {
                     // An account pick keeps its revision; otherwise the latest. The
                     // account picks are saved once after the loop, not per mod.
-                    const rev = this.siteSelections[String(w.id)] ?? w.revision ?? null;
-                    await this.installWebMod(w, format, rev, false);
+                    let rev = this.siteSelections[String(w.id)] ?? w.revision ?? null;
+                    try { await this.installWebMod(w, format, rev, false); }
+                    catch (e) {
+                        const text = String(e);
+                        if (/HTTP 4\d\d/.test(text)) {
+                            // A saved pick the site no longer offers: use the latest.
+                            if (!text.includes("available version") || !w.revision || rev === w.revision) throw e;
+                            rev = w.revision;
+                        } else {
+                            // One retry after a pause: long batches hit server timeouts.
+                            await new Promise(r => setTimeout(r, 3000));
+                        }
+                        await this.installWebMod(w, format, rev, false);
+                    }
                     if (this.siteAccount && rev) this.siteSelections[String(w.id)] = rev;
                     done++;
                 } catch (e) {
                     failed++;
                     lastError = String(e);
+                    this.log(this.t("log_uotiara_mod_failed", [w.name, lastError]), "warn");
                     // The site refusing every package (login required, offline): stop.
                     if (done === 0 && failed >= 3) break;
                 }
@@ -2535,7 +2549,6 @@ class App {
         }
         if (done > 0) await this.saveSiteSelections();
         this.log(this.t("log_uotiara_synced", [String(done), String(missing.length)]), failed ? "warn" : "info");
-        if (failed) this.log(this.t("log_mods_install_failed", [lastError]), "warn");
         this.renderUotiaraStatus();
         if (this.modBrowserMode === 'remote') this.renderRemoteMods();
     }
@@ -2780,7 +2793,7 @@ class App {
     }
 
     private setupModsActions() {
-        setupCommunityMods((key, args) => this.t(key, args), message => this.log(message, "info"), url => this.openInBrowserTab(url));
+        setupCommunityMods((key, args) => this.t(key, args), (message, level) => this.log(message, level), url => this.openInBrowserTab(url));
         document.getElementById("btn-open-mods-dir")?.addEventListener("click", async () => {
             try {
                 const dir = await invoke("get_mods_dir") as string;

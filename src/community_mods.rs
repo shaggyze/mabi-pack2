@@ -75,16 +75,23 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .timeout(Duration::from_secs(120))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| "Could not connect to Community Mods.".into())
+        .map_err(|e| format!("Could not start the HTTP client: {e}"))
 }
 fn fetch_feed(token: &str) -> Result<CommunityFeed, String> {
     let response = client()?
         .get(format!("{}/api/community/sync", origin()))
         .bearer_auth(token)
         .send()
-        .map_err(|_| "Could not connect to Community Mods.".to_string())?;
-    if !response.status().is_success() {
-        return Err("Community connection expired or revoked. Connect again in Mods.".into());
+        .map_err(|e| format!("Could not reach shaggyze.website: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "The website rejected this connection key (HTTP {}). Copy a new key from the website and connect again.",
+            status.as_u16()
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("The website returned HTTP {} for the mod list.", status.as_u16()));
     }
     let mut bytes = Vec::new();
     response
