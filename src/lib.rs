@@ -2,6 +2,7 @@ pub mod api;
 pub mod archive_cli;
 pub mod area;
 pub mod common;
+pub mod community_mods;
 pub mod launcher;
 pub mod common_ext;
 pub mod encryption;

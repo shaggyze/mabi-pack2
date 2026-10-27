@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "userscripts",
+  "description": "Browser tab pages may call only the userscript bridge (page_ready, gm); every call also needs the per-page token from the injected script.",
+  "webviews": ["browser*"],
+  "remote": {
+    "urls": ["https://*", "http://*"]
+  },
+  "permissions": ["userscripts:default"]
+}

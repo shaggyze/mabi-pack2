@@ -44,3 +44,6 @@ test_*.rs
 # Mobile icons: the desktop build uses only the icons tauri.conf.json lists.
 /gui/src-tauri/icons/android/
 /gui/src-tauri/icons/ios/
+
+# Browser tab userscripts (imported Tampermonkey backups, per user)
+userscripts/

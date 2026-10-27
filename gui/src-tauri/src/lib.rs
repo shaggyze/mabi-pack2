@@ -2,6 +2,7 @@ use mabi_pack2::{api, load_salts, extract, mod_file, pack_v1, common_ext, pack, 
 
 mod vfs_ops;
 mod site;
+mod userscripts;
 mod world_preview;
 mod kanan_import;
 
@@ -4319,6 +4320,23 @@ fn web_mods_dir() -> std::path::PathBuf {
         .join("web")
 }
 
+/// Website account sync for the owner's own approved (also private) uploads
+/// (src/community_mods.rs). Files go to `mods/community/` next to the exe.
+#[tauri::command]
+async fn community_mod_connect(token: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || mabi_pack2::community_mods::connect(&token))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn community_mod_disconnect() { mabi_pack2::community_mods::disconnect(); }
+
+#[tauri::command]
+async fn community_mod_sync(subscribe: Option<String>, unsubscribe: Option<String>) -> Result<mabi_pack2::community_mods::SyncResult, String> {
+    let root = web_mods_dir().parent().map(|p| p.join("community")).unwrap_or_else(|| std::path::PathBuf::from("mods").join("community"));
+    tauri::async_runtime::spawn_blocking(move || mabi_pack2::community_mods::sync(&root, subscribe.as_deref(), unsubscribe.as_deref()))
+        .await.map_err(|e| e.to_string())?
+}
 /// `https://host/path` → `https://host`.
 fn url_origin(url: &str) -> String {
     match url.find("://") {
@@ -8077,6 +8095,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
 
         .plugin(tauri_plugin_opener::init())
+        .plugin(userscripts::plugin())
 
         .setup(|app| {
 
@@ -8207,11 +8226,12 @@ pub fn run() {
 
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, api_start, api_stop, nexon_login_webview,
 
-            fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod,
+            fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod, community_mod_connect, community_mod_disconnect, community_mod_sync,
             read_uotiara_install, set_uotiara_mods_installed,
             site::site_account, site::site_login, site::site_logout, site::site_get_selections, site::site_put_selections, site::site_upload_mod,
             site::browser_show, site::browser_set_bounds, site::browser_hide, site::browser_navigate, site::browser_action,
-            site::browser_state, site::browser_set_theme,
+            site::browser_state, site::browser_set_theme, site::browser_tabs, site::browser_new_tab, site::browser_switch_tab, site::browser_close_tab,
+            userscripts::userscripts_list, userscripts::userscripts_set_enabled, userscripts::userscripts_run_menu, userscripts::userscripts_import, userscripts::userscripts_dir,
 
             launcher_import_session, launcher_login, launcher_autologin, launcher_get_passport,
 

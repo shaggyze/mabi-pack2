@@ -5,6 +5,7 @@ import { listen } from "./platform/event";
 import { isTauri } from "./platform/isTauri";
 import { locales as TRANSLATIONS } from "./locales";
 import { sessionTime } from "./sessionLabel";
+import { setupCommunityMods } from "./communityMods";
 import type { PMGViewer, PmgGeometry } from "./pmgLoader";
 import type { Mounted3d } from "./preview3d/panel";
 import type { AssetHost } from "./preview3d/worldData";
@@ -393,6 +394,9 @@ class App {
     private siteSyncing = false;
     /** Browser tab: webview created, and the address-bar poll timer. */
     private browserOpened = false;
+    private scriptsOpen = false;
+    private scriptsData: { id: string; name: string; version: string; description: string; enabled: boolean; active: boolean;
+        menu: { token: string; script: string; id: number; caption: string }[]; error?: string | null }[] = [];
     private browserPoll: number | undefined;
     private lastSiteCheck = 0;
     /** App version from the exe (get_app_version); fills {version} in locale strings. */
@@ -2776,6 +2780,7 @@ class App {
     }
 
     private setupModsActions() {
+        setupCommunityMods((key, args) => this.t(key, args), message => this.log(message, "info"), url => this.openInBrowserTab(url));
         document.getElementById("btn-open-mods-dir")?.addEventListener("click", async () => {
             try {
                 const dir = await invoke("get_mods_dir") as string;
@@ -5246,6 +5251,8 @@ class App {
 
     private async showBrowserTab(url?: string) {
         if (!isTauri()) return;
+        // The Scripts panel covers the page area; the webview stays hidden until it closes.
+        if (this.scriptsOpen) return;
         // Layout settles after the tab becomes display:flex.
         await new Promise(r => requestAnimationFrame(() => r(null)));
         const rect = this.browserRect();
@@ -5333,6 +5340,27 @@ class App {
                 if (rect) invoke("browser_set_bounds", rect).catch(() => {});
             }).observe(view);
         }
+        // Tabs: "Open in new tab/window", target=_blank and window.open add one (site.rs).
+        document.getElementById("btn-browser-newtab")?.addEventListener("click", async () => {
+            if (this.scriptsOpen) this.closeScriptsPanel();
+            if (!this.browserOpened) { await this.showBrowserTab(); return; }
+            invoke("browser_new_tab", { url: null }).catch(e => this.log(this.t("log_browser_failed", [String(e)]), "error"));
+        });
+        listen("browser-tabs", (ev: any) => this.renderBrowserTabs(ev?.payload));
+        // Userscripts panel.
+        document.getElementById("btn-browser-scripts")?.addEventListener("click", () => {
+            if (this.scriptsOpen) this.closeScriptsPanel(); else this.openScriptsPanel();
+        });
+        document.getElementById("btn-scripts-close")?.addEventListener("click", () => this.closeScriptsPanel());
+        document.getElementById("scripts-search")?.addEventListener("input", () => this.renderScripts());
+        document.getElementById("scripts-page-only")?.addEventListener("change", () => this.renderScripts());
+        document.getElementById("btn-scripts-import")?.addEventListener("click", () => this.importUserscripts());
+        document.getElementById("btn-scripts-folder")?.addEventListener("click", async () => {
+            try {
+                const dir = await invoke("userscripts_dir") as string;
+                await invoke("execute_terminal_command", { command: `explorer "${dir}"` });
+            } catch (e) { this.log(this.t("log_scripts_failed", [String(e)]), "error"); }
+        });
         // A sign-in or sign-out on the website in the Browser tab updates the Mods tab.
         listen("browser-load", (ev: any) => {
             const p = ev?.payload as { url?: string; finished?: boolean } | undefined;
@@ -5344,6 +5372,179 @@ class App {
                 setTimeout(() => this.refreshSiteAccount(), 1500);
             }
         });
+    }
+
+    private renderBrowserTabs(p: { tabs: { label: string; title: string; url: string }[]; active: string | null } | undefined) {
+        const strip = document.getElementById("browser-tabs");
+        if (!strip || !p) return;
+        strip.replaceChildren();
+        for (const tab of p.tabs) {
+            let host = "";
+            try { host = new URL(tab.url).hostname; } catch { /* about:blank while loading */ }
+            const el = document.createElement("div");
+            el.className = "browser-tab" + (tab.label === p.active ? " active" : "");
+            el.setAttribute("role", "tab");
+            el.title = (tab.title ? tab.title + "\n" : "") + tab.url;
+            const name = document.createElement("span");
+            name.className = "browser-tab-title";
+            name.textContent = tab.title || host || this.t("browser_new_tab_title");
+            const close = document.createElement("button");
+            close.className = "browser-tab-close";
+            close.textContent = "×";
+            close.title = this.t("browser_close_tab");
+            close.setAttribute("aria-label", this.t("browser_close_tab"));
+            const closeTab = () => invoke("browser_close_tab", { label: tab.label }).catch(e => this.log(this.t("log_browser_failed", [String(e)]), "warn"));
+            close.addEventListener("click", ev => { ev.stopPropagation(); closeTab(); });
+            // Middle click closes, as in other browsers.
+            el.addEventListener("auxclick", ev => { if (ev.button === 1) { ev.preventDefault(); closeTab(); } });
+            el.addEventListener("click", async () => {
+                if (this.scriptsOpen) this.closeScriptsPanel();
+                await invoke("browser_switch_tab", { label: tab.label }).catch(() => {});
+                this.pollBrowser();
+            });
+            el.append(name, close);
+            strip.appendChild(el);
+            if (tab.label === p.active) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+        this.pollBrowser();
+    }
+
+    private async openScriptsPanel() {
+        this.scriptsOpen = true;
+        await invoke("browser_hide").catch(() => {});
+        const panel = document.getElementById("browser-scripts-panel");
+        if (panel) panel.style.display = "flex";
+        const ph = document.getElementById("browser-placeholder");
+        if (ph) ph.style.display = "none";
+        document.getElementById("btn-browser-scripts")?.classList.add("active");
+        await this.refreshScripts();
+    }
+
+    private closeScriptsPanel() {
+        this.scriptsOpen = false;
+        const panel = document.getElementById("browser-scripts-panel");
+        if (panel) panel.style.display = "none";
+        document.getElementById("btn-browser-scripts")?.classList.remove("active");
+        if (this.isBrowserTabActive()) this.showBrowserTab();
+    }
+
+    private async refreshScripts() {
+        try {
+            const data = await invoke("userscripts_list") as { scripts: App["scriptsData"] };
+            this.scriptsData = data.scripts;
+        } catch (e) {
+            this.log(this.t("log_scripts_failed", [String(e)]), "error");
+        }
+        this.renderScripts();
+    }
+
+    private renderScripts() {
+        const list = document.getElementById("browser-scripts-list");
+        if (!list) return;
+        const q = ((document.getElementById("scripts-search") as HTMLInputElement | null)?.value || "").trim().toLowerCase();
+        const pageOnly = (document.getElementById("scripts-page-only") as HTMLInputElement | null)?.checked ?? false;
+        const all = this.scriptsData;
+        const count = document.getElementById("browser-scripts-count");
+        if (count) count.textContent = this.t("browser_scripts_count", [
+            String(all.filter(s => s.enabled).length), String(all.length), String(all.filter(s => s.active).length)]);
+        const shown = all.filter(s => (!pageOnly || s.active) &&
+            (!q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)));
+        list.replaceChildren();
+        if (!all.length) {
+            const empty = document.createElement("div");
+            empty.className = "browser-scripts-empty";
+            empty.textContent = this.t("browser_scripts_empty");
+            list.appendChild(empty);
+            return;
+        }
+        // Scripts running on the page first, then the rest in their saved order.
+        shown.sort((a, b) => Number(b.active) - Number(a.active));
+        for (const s of shown) {
+            const row = document.createElement("div");
+            row.className = "browser-script" + (s.enabled ? "" : " off");
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.checked = s.enabled;
+            box.addEventListener("change", async () => {
+                try {
+                    await invoke("userscripts_set_enabled", { id: s.id, enabled: box.checked });
+                    s.enabled = box.checked;
+                    row.classList.toggle("off", !s.enabled);
+                    if (count) count.textContent = this.t("browser_scripts_count", [
+                        String(all.filter(x => x.enabled).length), String(all.length), String(all.filter(x => x.active).length)]);
+                } catch (e) {
+                    box.checked = s.enabled;
+                    this.log(this.t("log_scripts_failed", [String(e)]), "error");
+                }
+            });
+            const main = document.createElement("div");
+            main.className = "browser-script-main";
+            const title = document.createElement("div");
+            const name = document.createElement("span");
+            name.className = "browser-script-name";
+            name.textContent = s.name;
+            title.appendChild(name);
+            if (s.version) {
+                const v = document.createElement("span");
+                v.className = "browser-script-ver";
+                v.textContent = s.version;
+                title.appendChild(v);
+            }
+            if (s.active) {
+                const b = document.createElement("span");
+                b.className = "browser-script-badge";
+                b.textContent = this.t("browser_scripts_running");
+                title.appendChild(b);
+            }
+            main.appendChild(title);
+            if (s.description) {
+                const d = document.createElement("div");
+                d.className = "browser-script-desc";
+                d.textContent = s.description;
+                d.title = s.description;
+                main.appendChild(d);
+            }
+            if (s.error) {
+                const err = document.createElement("div");
+                err.className = "browser-script-error";
+                err.textContent = this.t("browser_scripts_error", [s.error]);
+                err.title = s.error;
+                main.appendChild(err);
+            }
+            if (s.menu.length) {
+                const menu = document.createElement("div");
+                menu.className = "browser-script-menu";
+                for (const m of s.menu) {
+                    const btn = document.createElement("button");
+                    btn.className = "tab-btn";
+                    btn.textContent = m.caption;
+                    btn.addEventListener("click", async () => {
+                        this.closeScriptsPanel();
+                        invoke("userscripts_run_menu", { token: m.token, script: m.script, id: m.id })
+                            .catch(e => this.log(this.t("log_scripts_failed", [String(e)]), "warn"));
+                    });
+                    menu.appendChild(btn);
+                }
+                main.appendChild(menu);
+            }
+            row.append(box, main);
+            list.appendChild(row);
+        }
+    }
+
+    private async importUserscripts() {
+        const chosen = await open({
+            title: this.t("dlg_import_userscripts"),
+            filters: [{ name: this.t("dlg_filter_userscripts"), extensions: ["zip", "txt", "js"] }],
+        });
+        if (!chosen || Array.isArray(chosen)) return;
+        try {
+            const n = await invoke("userscripts_import", { path: chosen }) as number;
+            this.log(this.t("log_scripts_imported", [String(n)]), "success");
+        } catch (e) {
+            this.log(this.t("log_scripts_failed", [String(e)]), "error");
+        }
+        await this.refreshScripts();
     }
 
     private setupResizableList() {

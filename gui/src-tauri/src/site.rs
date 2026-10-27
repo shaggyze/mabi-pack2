@@ -20,8 +20,6 @@ const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Exe theme colors last sent by the page, as a JSON object. The Browser tab's
 /// start script reads it on every page load; `browser_set_theme` updates it.
 static THEME_JSON: Mutex<String> = Mutex::new(String::new());
-/// Title of the page shown in the Browser tab (document title changes).
-static BROWSER_TITLE: Mutex<String> = Mutex::new(String::new());
 
 fn main_webview(app: &AppHandle) -> Result<tauri::Webview, String> {
     app.get_webview("main").ok_or_else(|| "no main webview".to_string())
@@ -252,7 +250,32 @@ fn browser_start_script() -> String {
 }})();"##, host = SITE_HOST, theme = theme)
 }
 
-fn browser(app: &AppHandle) -> Option<tauri::Webview> { app.get_webview(BROWSER) }
+
+/// One Browser-tab page. Each is its own child webview of the main window
+/// (labels `browser`, `browser-1`, …); only the active one is shown.
+struct Tab { label: String, title: String }
+
+struct Tabs {
+    list: Vec<Tab>,
+    active: Option<String>,
+    next: u32,
+    /// Last page rectangle (physical pixels) and whether the Browser tab is showing.
+    rect: Option<(f64, f64, f64, f64)>,
+    visible: bool,
+}
+
+static TABS: Mutex<Tabs> = Mutex::new(Tabs { list: Vec::new(), active: None, next: 0, rect: None, visible: false });
+
+fn browser(app: &AppHandle) -> Option<tauri::Webview> {
+    let label = TABS.lock().unwrap().active.clone()?;
+    app.get_webview(&label)
+}
+
+/// Label and address of the page shown in the Browser tab.
+pub fn active_tab(app: &AppHandle) -> Option<(String, String)> {
+    let wv = browser(app)?;
+    Some((wv.label().to_string(), wv.url().ok()?.to_string()))
+}
 
 fn parse_url(url: &str) -> Result<tauri::Url, String> {
     let u = url.trim();
@@ -269,64 +292,154 @@ fn physical(x: f64, y: f64, width: f64, height: f64) -> (tauri::PhysicalPosition
      tauri::PhysicalSize::new(width.round().max(1.0) as u32, height.round().max(1.0) as u32))
 }
 
-/// Show the Browser tab's webview over the page rectangle (physical pixels of the
-/// main window). Creates it on first use at `url` (default: the website); afterwards
-/// `url` navigates only when given.
-#[tauri::command]
-pub async fn browser_show(app: AppHandle, url: Option<String>, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
-    use tauri::{WebviewBuilder, WebviewUrl};
-    let (pos, size) = physical(x, y, width, height);
-    if let Some(wv) = browser(&app) {
-        wv.set_bounds(tauri::Rect { position: pos.into(), size: size.into() }).map_err(|e| e.to_string())?;
-        wv.show().map_err(|e| e.to_string())?;
-        if let Some(u) = url { wv.navigate(parse_url(&u)?).map_err(|e| e.to_string())?; }
-        return Ok(());
+fn tabs_json(app: &AppHandle) -> serde_json::Value {
+    // Copy out first: Webview::url() waits for the main thread, which may be
+    // waiting for TABS in a page callback.
+    let (tabs, active) = {
+        let t = TABS.lock().unwrap();
+        (t.list.iter().map(|x| (x.label.clone(), x.title.clone())).collect::<Vec<_>>(), t.active.clone())
+    };
+    let list: Vec<serde_json::Value> = tabs.into_iter().map(|(label, title)| {
+        let url = app.get_webview(&label).and_then(|w| w.url().ok()).map(|u| u.to_string()).unwrap_or_default();
+        serde_json::json!({ "label": label, "title": title, "url": url })
+    }).collect();
+    serde_json::json!({ "tabs": list, "active": active })
+}
+
+fn emit_tabs(app: &AppHandle) { let _ = app.emit("browser-tabs", tabs_json(app)); }
+
+/// Show `label`, hide the other tabs (all of them while the Browser tab is hidden).
+fn show_only(app: &AppHandle, label: &str) {
+    let (labels, rect, visible) = {
+        let mut t = TABS.lock().unwrap();
+        t.active = Some(label.to_string());
+        (t.list.iter().map(|x| x.label.clone()).collect::<Vec<_>>(), t.rect, t.visible)
+    };
+    for l in labels {
+        let Some(wv) = app.get_webview(&l) else { continue };
+        if l == label && visible {
+            if let Some((x, y, w, h)) = rect {
+                let (pos, size) = physical(x, y, w, h);
+                let _ = wv.set_bounds(tauri::Rect { position: pos.into(), size: size.into() });
+            }
+            let _ = wv.show();
+            let _ = wv.set_focus();
+        } else {
+            let _ = wv.hide();
+        }
     }
-    let start = parse_url(url.as_deref().unwrap_or(SITE_HOME))?;
+}
+
+/// Open `url` in a new Browser tab (switched to when `activate`). Must not run on
+/// the main thread: `add_child` waits for it.
+pub fn open_tab(app: &AppHandle, url: tauri::Url, activate: bool) -> Result<String, String> {
+    use tauri::{WebviewBuilder, WebviewUrl};
     let window = app.get_window("main").ok_or("no main window")?;
+    let (label, rect, shown) = {
+        let mut t = TABS.lock().unwrap();
+        let label = if t.next == 0 { BROWSER.to_string() } else { format!("{}-{}", BROWSER, t.next) };
+        t.next += 1;
+        (label, t.rect, t.visible && (activate || t.active.is_none()))
+    };
+    // A tab that will not be shown starts as one pixel, so it does not flash over
+    // the other app tabs before hide(); show_only sizes it when it is switched to.
+    let (pos, size) = match rect { Some((x, y, w, h)) if shown => physical(x, y, w, h), _ => physical(0.0, 0.0, 1.0, 1.0) };
     let app_nav = app.clone();
     let app_title = app.clone();
     let app_load = app.clone();
-    let builder = WebviewBuilder::new(BROWSER, WebviewUrl::External(start))
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(url.clone()))
         .initialization_script(browser_start_script())
-        // target=_blank links and window.open stay in the Browser tab.
+        .initialization_script(crate::userscripts::bootstrap_script())
+        // "Open in new tab/window", target=_blank links and window.open → a new tab.
         .on_new_window(move |url, _| {
-            if let Some(wv) = app_nav.get_webview(BROWSER) { let _ = wv.navigate(url); }
+            let app = app_nav.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = open_tab(&app, url, true) { log::warn!("[Browser] New tab failed: {}", e); }
+            });
             tauri::webview::NewWindowResponse::Deny
         })
-        .on_document_title_changed(move |_, title| {
-            *BROWSER_TITLE.lock().unwrap() = title.clone();
-            let _ = app_title.emit("browser-title", title);
+        .on_document_title_changed(move |wv, title| {
+            {
+                let mut t = TABS.lock().unwrap();
+                if let Some(tab) = t.list.iter_mut().find(|x| x.label == wv.label()) { tab.title = title.clone(); }
+            }
+            if TABS.lock().unwrap().active.as_deref() == Some(wv.label()) {
+                let _ = app_title.emit("browser-title", title);
+            }
+            emit_tabs(&app_title);
         })
         .on_page_load(move |wv, payload| {
             let finished = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
+            if !finished { crate::userscripts::page_started(wv.label()); }
             // The start script carries the theme from when the webview was created;
             // a later theme change reaches new pages here.
             if finished {
                 let json = THEME_JSON.lock().unwrap().clone();
                 if !json.is_empty() { let _ = wv.eval(format!("window.__mpApplyTheme && window.__mpApplyTheme({})", json)); }
             }
-            let _ = app_load.emit("browser-load", serde_json::json!({ "url": payload.url().as_str(), "finished": finished }));
+            let active = TABS.lock().unwrap().active.as_deref() == Some(wv.label());
+            if active {
+                let _ = app_load.emit("browser-load", serde_json::json!({ "url": payload.url().as_str(), "finished": finished }));
+            }
+            emit_tabs(&app_load);
         });
-    // add_child blocks on the main thread; this async command runs on a worker.
     let wv = window.add_child(builder, pos, size).map_err(|e| e.to_string())?;
-    let _ = wv.set_focus();
-    log::info!("[Browser] Opened {}", url.as_deref().unwrap_or(SITE_HOME));
-    Ok(())
+    {
+        let mut t = TABS.lock().unwrap();
+        // A new tab opens to the right of the active one.
+        let at = t.active.as_ref().and_then(|a| t.list.iter().position(|x| &x.label == a)).map(|i| i + 1).unwrap_or(t.list.len());
+        t.list.insert(at, Tab { label: label.clone(), title: String::new() });
+    }
+    let first = TABS.lock().unwrap().active.is_none();
+    if activate || first { show_only(app, &label); } else { let _ = wv.hide(); }
+    emit_tabs(app);
+    log::info!("[Browser] Opened tab {}", url);
+    Ok(label)
 }
 
-/// Move/resize the Browser tab's webview (page layout changed). Physical pixels.
+/// Show the Browser tab's page over the page rectangle (physical pixels of the
+/// main window). Opens the first tab on first use at `url` (default: the
+/// website); afterwards `url` navigates the active tab only when given.
+#[tauri::command]
+pub async fn browser_show(app: AppHandle, url: Option<String>, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    {
+        let mut t = TABS.lock().unwrap();
+        t.rect = Some((x, y, width, height));
+        t.visible = true;
+    }
+    // Own statement: a guard in the match scrutinee would stay locked through
+    // the arms, and show_only/open_tab lock TABS again (self-deadlock).
+    let active = TABS.lock().unwrap().active.clone();
+    match active {
+        Some(label) => {
+            show_only(&app, &label);
+            if let (Some(u), Some(wv)) = (url, app.get_webview(&label)) { wv.navigate(parse_url(&u)?).map_err(|e| e.to_string())?; }
+            Ok(())
+        }
+        None => open_tab(&app, parse_url(url.as_deref().unwrap_or(SITE_HOME))?, true).map(|_| ()),
+    }
+}
+
+/// Move/resize the Browser tab's page (page layout changed). Physical pixels.
 #[tauri::command]
 pub fn browser_set_bounds(app: AppHandle, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    TABS.lock().unwrap().rect = Some((x, y, width, height));
     let Some(wv) = browser(&app) else { return Ok(()) };
     let (pos, size) = physical(x, y, width, height);
     wv.set_bounds(tauri::Rect { position: pos.into(), size: size.into() }).map_err(|e| e.to_string())
 }
 
-/// Hide the Browser tab's webview (another tab is shown). The page keeps running.
+/// Hide every Browser tab page (another app tab is shown, or a panel covers the
+/// page area). The pages keep running.
 #[tauri::command]
 pub fn browser_hide(app: AppHandle) -> Result<(), String> {
-    match browser(&app) { Some(wv) => wv.hide().map_err(|e| e.to_string()), None => Ok(()) }
+    let labels: Vec<String> = {
+        let mut t = TABS.lock().unwrap();
+        t.visible = false;
+        t.list.iter().map(|x| x.label.clone()).collect()
+    };
+    for l in labels { if let Some(wv) = app.get_webview(&l) { let _ = wv.hide(); } }
+    Ok(())
 }
 
 #[tauri::command]
@@ -351,13 +464,55 @@ pub fn browser_action(app: AppHandle, action: String) -> Result<(), String> {
     wv.eval(js).map_err(|e| e.to_string())
 }
 
-/// Current address and title (the address bar polls this: single-page sites change
-/// the address with history.pushState, which raises no load event).
+/// Current address and title of the active tab (the address bar polls this:
+/// single-page sites change the address with history.pushState, which raises no load event).
 #[tauri::command]
 pub fn browser_state(app: AppHandle) -> Option<serde_json::Value> {
     let wv = browser(&app)?;
     let url = wv.url().ok()?.to_string();
-    Some(serde_json::json!({ "url": url, "title": BROWSER_TITLE.lock().unwrap().clone() }))
+    let title = TABS.lock().unwrap().list.iter().find(|x| x.label == wv.label()).map(|x| x.title.clone()).unwrap_or_default();
+    Some(serde_json::json!({ "url": url, "title": title }))
+}
+
+/// `{tabs: [{label, title, url}], active}`.
+#[tauri::command]
+pub fn browser_tabs(app: AppHandle) -> serde_json::Value { tabs_json(&app) }
+
+/// New tab at `url` (default: the website), switched to.
+#[tauri::command]
+pub async fn browser_new_tab(app: AppHandle, url: Option<String>) -> Result<String, String> {
+    open_tab(&app, parse_url(url.as_deref().unwrap_or(SITE_HOME))?, true)
+}
+
+#[tauri::command]
+pub fn browser_switch_tab(app: AppHandle, label: String) -> Result<(), String> {
+    if !TABS.lock().unwrap().list.iter().any(|x| x.label == label) { return Err("no such tab".into()); }
+    show_only(&app, &label);
+    emit_tabs(&app);
+    Ok(())
+}
+
+/// Close one tab. Closing the last tab opens the website in a fresh one.
+#[tauri::command]
+pub async fn browser_close_tab(app: AppHandle, label: String) -> Result<(), String> {
+    let next = {
+        let mut t = TABS.lock().unwrap();
+        let Some(i) = t.list.iter().position(|x| x.label == label) else { return Ok(()) };
+        t.list.remove(i);
+        if t.active.as_deref() == Some(label.as_str()) {
+            t.active = None;
+            t.list.get(i).or_else(|| t.list.get(i.wrapping_sub(1))).map(|x| x.label.clone())
+        } else {
+            t.active.clone()
+        }
+    };
+    if let Some(wv) = app.get_webview(&label) { let _ = wv.close(); }
+    crate::userscripts::tab_closed(&label);
+    match next {
+        Some(l) => { show_only(&app, &l); emit_tabs(&app); }
+        None => { open_tab(&app, parse_url(SITE_HOME)?, true)?; }
+    }
+    Ok(())
 }
 
 /// Exe theme colors for the website (`{bg, surface, input, text, muted, border,
@@ -377,9 +532,12 @@ pub fn browser_set_theme(app: AppHandle, theme: serde_json::Value) -> Result<(),
     }
     let json = serde_json::Value::Object(clean).to_string();
     *THEME_JSON.lock().unwrap() = json.clone();
-    // Only the first page load reads THEME_JSON via the start script, so push it to the live page.
-    if let Some(wv) = browser(&app) {
-        let _ = wv.eval(format!("window.__mpApplyTheme && window.__mpApplyTheme({})", json));
+    // Only the first page load reads THEME_JSON via the start script, so push it to the live pages.
+    let labels: Vec<String> = TABS.lock().unwrap().list.iter().map(|x| x.label.clone()).collect();
+    for l in labels {
+        if let Some(wv) = app.get_webview(&l) {
+            let _ = wv.eval(format!("window.__mpApplyTheme && window.__mpApplyTheme({})", json));
+        }
     }
     Ok(())
 }

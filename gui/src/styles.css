@@ -1276,6 +1276,31 @@ button.run-btn {
 .browser-toolbar #browser-address { flex: 1; min-width: 0; font-family: monospace; font-size: 12px; }
 .browser-view { flex: 1; min-height: 0; position: relative; border-radius: 6px; background: var(--bg-input); display: flex; align-items: center; justify-content: center; }
 .browser-placeholder { font-size: 12px; color: var(--text-muted); }
+.browser-tabstrip { display: flex; align-items: flex-end; gap: 4px; min-width: 0; }
+.browser-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.browser-tab { display: flex; align-items: center; gap: 6px; flex: 0 1 200px; min-width: 90px; max-width: 220px; padding: 5px 6px 5px 10px;
+  border: 1px solid var(--border-glass); border-bottom: none; border-radius: 6px 6px 0 0; background: var(--bg-input);
+  color: var(--text-muted); font-size: 12px; cursor: pointer; user-select: none; }
+.browser-tab.active { background: var(--bg-surface); color: var(--text-primary); }
+.browser-tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-tab-close { flex: none; border: none; background: transparent; color: inherit; font-size: 13px; line-height: 1; padding: 1px 4px; border-radius: 4px; cursor: pointer; }
+.browser-tab-close:hover { background: rgba(127,127,127,.25); }
+.browser-scripts-panel { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px; overflow: hidden; }
+.browser-scripts-head, .browser-scripts-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.browser-scripts-spacer { flex: 1; }
+.browser-scripts-count { font-size: 12px; color: var(--text-muted); }
+.browser-scripts-filters #scripts-search { flex: 1; min-width: 160px; }
+.browser-scripts-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.browser-script { display: flex; gap: 10px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; background: var(--bg-surface); }
+.browser-script.off { opacity: .6; }
+.browser-script-main { flex: 1; min-width: 0; }
+.browser-script-name { font-size: 13px; color: var(--text-primary); }
+.browser-script-ver { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+.browser-script-badge { font-size: 10px; margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: var(--accent-neon); color: var(--bg-deep); }
+.browser-script-desc { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-script-menu { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.browser-script-menu .tab-btn { font-size: 11px; padding: 2px 8px; }
+.browser-scripts-empty { font-size: 12px; color: var(--text-muted); padding: 12px; }
 
 /* Mods tab: website account row */
 .mods-account { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid var(--border-glass); border-radius: 6px; background: var(--bg-input); }
@@ -1283,3 +1308,5 @@ button.run-btn {
 .mods-account-row .form-input { width: 150px; flex: 0 1 150px; }
 .mods-account-label { font-size: 12px; flex: 1 1 220px; min-width: 0; }
 .mod-item-version { font-size: 11px; padding: 2px 4px; max-width: 150px; }
+
+.browser-script-error { color: #f87171; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
