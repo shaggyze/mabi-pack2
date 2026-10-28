@@ -1319,3 +1319,7 @@ button.run-btn {
 .community-status { font-size: 12px; margin: 6px 0; }
 .community-status[data-state="ok"] { color: #4ade80; font-weight: 600; }
 .community-status[data-state="error"] { color: #f87171; }
+.community-card { gap: 8px; }
+.community-card .form-actions { align-self: flex-start; }
+.community-link { color: var(--accent-cyan); align-self: flex-start; }
+.community-link:hover { opacity: .8; }

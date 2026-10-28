@@ -310,6 +310,10 @@ struct Config {
 
     custom_themes: serde_json::Value,
 
+    /// Window layout: sidebar collapsed, list width, console and 3D view heights.
+    #[serde(default)]
+    ui_layout: serde_json::Value,
+
     #[serde(default)]
 
     patcher_game_path: String,
@@ -481,6 +485,7 @@ impl Default for Config {
             theme_overrides: serde_json::Value::Object(serde_json::Map::new()),
 
             custom_themes: serde_json::Value::Object(serde_json::Map::new()),
+            ui_layout: serde_json::Value::Object(serde_json::Map::new()),
 
             patcher_game_path: String::new(),
 

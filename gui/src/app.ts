@@ -124,6 +124,8 @@ interface Config {
     sequence_ignore_list: string[];
     theme_overrides: ThemeOverrides;
     custom_themes: Record<string, ThemeOverrides>;
+    /** Sidebar collapsed state and divider sizes in px, kept across restarts. */
+    ui_layout?: Record<string, number | boolean>;
     patcher_game_path: string;
     patcher_hyddwn_enabled: boolean;
     patcher_hyddwn_url: string;
@@ -5250,11 +5252,17 @@ class App {
             });
         });
 
-        document.getElementById("sidebar-toggle")?.addEventListener("click", () => {
-            const sidebar = document.querySelector(".sidebar") as HTMLElement;
-            const btn = document.getElementById("sidebar-toggle")!;
-            sidebar.classList.toggle("collapsed");
-            btn.textContent = sidebar.classList.contains("collapsed") ? "▶" : "◀";
+        const sidebar = document.querySelector(".sidebar") as HTMLElement | null;
+        const sidebarBtn = document.getElementById("sidebar-toggle");
+        const setCollapsed = (on: boolean) => {
+            sidebar?.classList.toggle("collapsed", on);
+            if (sidebarBtn) sidebarBtn.textContent = on ? "▶" : "◀";
+        };
+        if (this.layoutGet("sidebar-collapsed") === true) setCollapsed(true);
+        sidebarBtn?.addEventListener("click", () => {
+            const on = !sidebar?.classList.contains("collapsed");
+            setCollapsed(on);
+            this.layoutSet("sidebar-collapsed", on);
         });
     }
 
@@ -5570,13 +5578,33 @@ class App {
         await this.refreshScripts();
     }
 
+    /** Layout values live in config.json. Older versions kept the sizes in
+     *  localStorage, which a WebView2 profile reset wipes: read those once. */
+    private layoutGet(key: string): number | boolean | undefined {
+        const v = this.config.ui_layout?.[key];
+        if (v !== undefined) return v;
+        try {
+            const old = localStorage.getItem(key);
+            if (old !== null && old !== "" && !isNaN(Number(old))) { this.layoutSet(key, Number(old)); return Number(old); }
+        } catch { /* storage unavailable */ }
+        return undefined;
+    }
+
+    private layoutSet(key: string, value: number | boolean | undefined) {
+        const layout = { ...(this.config.ui_layout ?? {}) };
+        if (value === undefined) delete layout[key]; else layout[key] = value;
+        this.config.ui_layout = layout;
+        try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
+        void this.saveConfig();
+    }
+
     private setupResizableList() {
         const handle = document.getElementById("list-split-handle");
         const leftPane = document.querySelector(".file-list-pane") as HTMLElement | null;
         if (!handle || !leftPane) return;
 
-        const saved = localStorage.getItem("list-split-px");
-        if (saved) leftPane.style.flex = `0 0 ${saved}px`;
+        const saved = this.layoutGet("list-split-px");
+        if (typeof saved === "number") leftPane.style.flex = `0 0 ${saved}px`;
 
         let dragging = false;
         let startX = 0;
@@ -5603,7 +5631,7 @@ class App {
             handle.classList.remove("dragging");
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
-            localStorage.setItem("list-split-px", String(Math.round(leftPane.getBoundingClientRect().width)));
+            this.layoutSet("list-split-px", Math.round(leftPane.getBoundingClientRect().width));
         });
     }
 
@@ -5613,8 +5641,8 @@ class App {
         const consoleEl = document.querySelector(".log-container") as HTMLElement | null;
         if (!handle || !consoleEl) return;
 
-        const saved = localStorage.getItem("console-height-px");
-        if (saved) consoleEl.style.height = `${saved}px`;
+        const saved = this.layoutGet("console-height-px");
+        if (typeof saved === "number") consoleEl.style.height = `${saved}px`;
 
         let dragging = false;
         let startY = 0;
@@ -5642,11 +5670,11 @@ class App {
             handle.classList.remove("dragging");
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
-            localStorage.setItem("console-height-px", String(Math.round(consoleEl.getBoundingClientRect().height)));
+            this.layoutSet("console-height-px", Math.round(consoleEl.getBoundingClientRect().height));
         });
         handle.addEventListener("dblclick", () => {
             consoleEl.style.height = "";
-            localStorage.removeItem("console-height-px");
+            this.layoutSet("console-height-px", undefined);
         });
     }
 
@@ -5680,9 +5708,8 @@ class App {
         // dragged height becomes its preferred size but may still shrink to fit.
         const MIN_H = 240;
         const setPreferred = (h: number) => { viewport.style.flex = `0 1 ${Math.max(MIN_H, h)}px`; };
-        let saved: string | null = null;
-        try { saved = localStorage.getItem("preview-3d-height"); } catch { /* storage unavailable */ }
-        if (saved && !isNaN(parseInt(saved, 10))) setPreferred(parseInt(saved, 10));
+        const saved = this.layoutGet("preview-3d-height");
+        if (typeof saved === "number") setPreferred(saved);
         // Keep the renderer in step with layout changes (window resize, flex changes).
         if (typeof ResizeObserver !== "undefined") {
             new ResizeObserver(() => (window as any).__threeResizeFn?.()).observe(viewport);
@@ -5712,7 +5739,7 @@ class App {
             dragging = false;
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
-            try { localStorage.setItem("preview-3d-height", String(Math.round(viewport.getBoundingClientRect().height))); } catch { /* storage unavailable */ }
+            this.layoutSet("preview-3d-height", Math.round(viewport.getBoundingClientRect().height));
         });
     }
 

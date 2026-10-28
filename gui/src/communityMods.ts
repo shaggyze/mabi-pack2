@@ -12,7 +12,7 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
     const section=document.createElement('section');section.className='card community-card';
     const heading=document.createElement('h3');heading.textContent=t('community_title');
     const help=document.createElement('p');help.textContent=t('community_help');
-    const link=document.createElement('a');link.href='https://shaggyze.website/mabipatcher/upload';link.textContent=t('community_website');
+    const link=document.createElement('a');link.href='https://shaggyze.website/mabipatcher/upload';link.textContent=t('community_website');link.className='community-link';
     // The main window has no tabs: open the page in the app's Browser tab.
     link.addEventListener('click',event=>{event.preventDefault();openUrl(link.href);});
     const label=document.createElement('label');label.textContent=t('community_key');
@@ -24,7 +24,7 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
     const keyRow=document.createElement('div');keyRow.style.cssText='display:flex;gap:6px;align-items:center';input.style.flex='1';keyRow.append(input,reveal);label.append(keyRow);
     const status=document.createElement('p');status.className='community-status';status.setAttribute('role','status');
     const setStatus=(text:string,state:'ok'|'error'|'idle')=>{status.textContent=text;status.dataset.state=state;};
-    let connected='',lastError='',lastErrors='';
+    let connected='',lastError='',lastErrors='',lastOk='';
     const list=document.createElement('div');let busy=false;
     const controls:HTMLButtonElement[]=[];
     const button=(text:string,action:()=>Promise<Result>)=>{
@@ -37,7 +37,7 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
             // Keep a confirmed connection visible above a sync error.
             setStatus(connected?`${connected} · ${text}`:text,'error');
             // The 5-minute refresh repeats the same failure; log it once.
-            if(text!==lastError)log(text,'warn');lastError=text;}
+            if(text!==lastError)log(text,'warn');lastError=text;lastOk='';}
         finally{busy=false;controls.forEach(b=>b.disabled=false);input.disabled=false;}
     }
     const sync=()=>invoke<Result>('community_mod_sync');
@@ -55,6 +55,10 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
         controls.splice(3);list.replaceChildren();
         lastError='';connected=result.connected?t('community_connected',[result.owner]):'';
         if(connected)setStatus(connected,'ok');else setStatus(t('community_disconnected'),'idle');
+        // A working sync logs once, then again when the counts change or after an error.
+        // A key that stopped working logs the disconnect; a fresh start without a key does not.
+        const ok=result.connected?t('community_sync_ok',[String(result.mods.length),String(Object.keys(result.subscriptions).length)]):lastOk?t('community_disconnected'):'';
+        if(ok&&ok!==lastOk)log(ok,'info');lastOk=ok;
         if(result.updated.length)log(t('community_updated',[result.updated.join(', ')]),'info');
         // Per-mod errors repeat on every refresh; log them when they change.
         const errs=result.errors.join('|');if(errs&&errs!==lastErrors)for(const e of result.errors)log(t('community_failed',[e]),'warn');lastErrors=errs;
@@ -71,7 +75,9 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
         }
         if(result.connected&&!result.mods.length){const empty=document.createElement('p');empty.textContent=t('community_empty');list.append(empty);}
     }
-    section.append(heading,help,link,label,connect,refresh,disconnect,status,list);parent.append(section);
+    // Buttons share one row; a flex column card would stretch each to full width.
+    const actions=document.createElement('div');actions.className='form-actions';actions.append(connect,refresh,disconnect);
+    section.append(heading,help,link,label,actions,status,list);parent.append(section);
     void run(sync);
     // Only explicit subscriptions update; the native backend serializes all
     // connection and sync operations and validates every downloaded package.

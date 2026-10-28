@@ -47,3 +47,7 @@ test_*.rs
 
 # Browser tab userscripts (imported Tampermonkey backups, per user)
 userscripts/
+# Installed mods (website catalog downloads); README and example stay tracked
+/mods/*
+!/mods/README.md
+!/mods/example.mod
