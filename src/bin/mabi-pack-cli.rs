@@ -125,6 +125,12 @@ fn main() -> Result<()> {
                 ),
         )
         .subcommand(
+            Command::new("apply-mods")
+                .about("Build the game's package/uotiara_00001.it from the uotiara files in appdata/data plus every installed mod.")
+                .arg(Arg::new("game").short('g').long("game").value_name("GAME_PATH").help("Game install, appdata or patchdata folder").required(true))
+                .arg(Arg::new("mods").short('m').long("mods").value_name("MODS_DIR").help("Folder holding the web and community mod folders (default: mods next to the exe)").required(false))
+        )
+        .subcommand(
             Command::new("list")
                 .about("Output the file list of a .it pack.")
                 .arg(Arg::new("input").short('i').long("input").value_name("PACK_NAME").help("Set the input pack name").required(true))
@@ -213,11 +219,22 @@ fn main() -> Result<()> {
     if matches.subcommand_matches("extract").is_some()
         || matches.subcommand_matches("list").is_some()
         || matches.subcommand_matches("batch").is_some()
+        || matches.subcommand_matches("apply-mods").is_some()
     {
         mabi_pack2::init_salts_blocking(true);
         all_salts = load_salts();
     }
 
+    if let Some(sub_matches) = matches.subcommand_matches("apply-mods") {
+        let game = sub_matches.get_one::<String>("game").unwrap();
+        let mods = sub_matches.get_one::<String>("mods").map(std::path::PathBuf::from).unwrap_or_else(|| {
+            std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("mods"))).unwrap_or_else(|| "mods".into())
+        });
+        let report = mabi_pack2::game_mods::apply(std::path::Path::new(game), &mods, &all_salts)?;
+        for s in &report.skipped { eprintln!("skipped {}", s); }
+        println!("{}: {} mods, {} files", report.archive, report.mods, report.files);
+        return Ok(());
+    }
     if let Some(sub_matches) = matches.subcommand_matches("list") {
         let cli_key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
         let input_fname = sub_matches.get_one::<String>("input").unwrap();

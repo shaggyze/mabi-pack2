@@ -493,6 +493,60 @@ pub fn run_pack_with_options(
     Ok(())
 }
 
+/// Write an archive from entries whose payloads are already compressed and
+/// encrypted for Sub mode and `iv` under their own names. Offsets and checksums
+/// are set here. Merging archives this way copies payloads without recompressing.
+pub fn write_raw_archive(
+    output_fname: &str,
+    header_salt: &str,
+    entries_salt: &str,
+    iv: u32,
+    items: Vec<(FileEntry, Vec<u8>)>,
+) -> Result<(), Error> {
+    anyhow::ensure!(!items.is_empty(), "No files to pack");
+    for (ent, content) in &items {
+        common::validate_entry_path(&ent.name).context("cannot pack this file")?;
+        anyhow::ensure!(content.len() == ent.raw_size as usize, "Payload size mismatch for {}", ent.name);
+    }
+    let options = PackOptions { entries_key: Some(entries_salt.to_string()), ..Default::default() };
+    let profile = PackProfile::load(header_salt, iv, &options)?;
+    let name = common::get_final_file_name(output_fname)?;
+    let header_off = encryption::gen_header_offset(&name) as u64;
+    let entries_off = encryption::gen_entries_offset(&name) as u64;
+    let header_key = encryption::gen_header_key(&name, &profile.header_salt);
+    let entries_key = encryption::gen_entries_key(&name, &profile.entries_salt);
+    let entries_size: usize = items.iter().map(|(e, _)| e.name.encode_utf16().count() * 2 + 40).sum();
+
+    let fs = OpenOptions::new().create(true).write(true).truncate(true).open(output_fname)?;
+    let mut stm = BufWriter::new(fs);
+    let start_content_off = ceil_1024(header_off + entries_off + ((entries_size as u64 + 3) & !3));
+    stm.get_ref().set_len(start_content_off)?;
+    let mut content_off = start_content_off;
+    let mut entries = Vec::with_capacity(items.len());
+    for (mut ent, content) in items {
+        stm.seek(SeekFrom::Start(content_off))?;
+        stm.write_all(&content)?;
+        ent.offset = ((content_off - start_content_off) / 1024) as u32;
+        let key_sum = ent.key.iter().fold(0u32, |s, v| s.wrapping_add(*v as u32));
+        ent.checksum = ent.flags.wrapping_add(ent.offset).wrapping_add(ent.original_size)
+            .wrapping_add(ent.raw_size).wrapping_add(key_sum);
+        content_off = ceil_1024(content_off + ent.raw_size as u64);
+        entries.push(ent);
+    }
+    stm.seek(SeekFrom::Start(header_off))?;
+    write_header(entries.len() as u32, &header_key, &mut stm, &profile).context("writing header failed")?;
+    stm.seek(SeekFrom::Start(header_off + entries_off))?;
+    write_entries(&entries, &entries_key, &mut stm, &profile).context("writing entries failed")?;
+    stm.seek(SeekFrom::End(0))?;
+    {
+        let mut enc = encryption::Snow2Encoder::new_iv_mode(&header_key, profile.iv, profile.mode, &mut stm);
+        enc.write_u32::<LittleEndian>(header_off as u32)?;
+        enc.finish()?;
+    }
+    stm.flush().context("Flushing packed archive failed")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

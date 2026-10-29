@@ -7,6 +7,7 @@ pub mod launcher;
 pub mod common_ext;
 pub mod encryption;
 pub mod extract;
+pub mod game_mods;
 pub mod itemdb;
 pub mod list;
 pub mod mcp;

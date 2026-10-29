@@ -6,7 +6,7 @@ interface Result {connected:boolean;owner:string;mods:Mod[];subscriptions:Record
 type Translate=(key:string,args?:string[])=>string;
 
 /** Account-specific downloads are separate from the public numeric mod catalog. */
-export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|'warn')=>void,openUrl:(url:string)=>void):void{
+export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|'warn')=>void,openUrl:(url:string)=>void,onFilesChanged:()=>void):void{
     if(!isTauri())return;
     const parent=document.querySelector('#mods .mods-panel');if(!parent)return;
     const section=document.createElement('section');section.className='card community-card';
@@ -24,7 +24,7 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
     const keyRow=document.createElement('div');keyRow.style.cssText='display:flex;gap:6px;align-items:center';input.style.flex='1';keyRow.append(input,reveal);label.append(keyRow);
     const status=document.createElement('p');status.className='community-status';status.setAttribute('role','status');
     const setStatus=(text:string,state:'ok'|'error'|'idle')=>{status.textContent=text;status.dataset.state=state;};
-    let connected='',lastError='',lastErrors='',lastOk='';
+    let connected='',lastError='',lastErrors='',lastOk='';let lastSubs:string|null=null;
     const list=document.createElement('div');let busy=false;
     const controls:HTMLButtonElement[]=[];
     const button=(text:string,action:()=>Promise<Result>)=>{
@@ -60,6 +60,10 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
         const ok=result.connected?t('community_sync_ok',[String(result.mods.length),String(Object.keys(result.subscriptions).length)]):lastOk?t('community_disconnected'):'';
         if(ok&&ok!==lastOk)log(ok,'info');lastOk=ok;
         if(result.updated.length)log(t('community_updated',[result.updated.join(', ')]),'info');
+        // A download, update or removal changes the files the game archive is built from.
+        const subs=Object.keys(result.subscriptions).sort().join('|');
+        if(result.updated.length||(lastSubs!==null&&subs!==lastSubs))onFilesChanged();
+        lastSubs=subs;
         // Per-mod errors repeat on every refresh; log them when they change.
         const errs=result.errors.join('|');if(errs&&errs!==lastErrors)for(const e of result.errors)log(t('community_failed',[e]),'warn');lastErrors=errs;
         if(result.errors.length){const error=document.createElement('p');error.textContent=result.errors.join(' · ');list.append(error);}

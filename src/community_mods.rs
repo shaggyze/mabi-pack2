@@ -276,6 +276,8 @@ pub fn sync(
     unsubscribe: Option<&str>,
 ) -> Result<SyncResult, String> {
     let _lock = LOCK.lock().map_err(|_| "Community sync is busy.")?;
+    // Downloads must not rewrite a file the game-archive merge has open.
+    let _files = crate::game_mods::lock();
     let Some(token) = crate::launcher::keystore::load_secret(CREDENTIAL) else {
         return Ok(SyncResult {
             connected: false,

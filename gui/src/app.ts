@@ -518,6 +518,12 @@ class App {
             }
         } catch (e) { console.error("Failed to load config", e); }
 
+        // Pack the loose uotiara files now, so the first apply only copies entries.
+        if (isTauri() && this.config.patcher_game_path) {
+            invoke<number>("prepare_mods_cache", { gamePath: this.config.patcher_game_path })
+                .catch(e => console.warn("prepare_mods_cache", e));
+        }
+
         // Pre-fetch all engine salts in the background
         invoke("get_all_salts").then((s) => {
             this.engineSalts = s as string[];
@@ -959,6 +965,7 @@ class App {
             ["btn_reset_config",         "tooltip_reset_config"],
             ["btn_wipe_assoc",           "tooltip_wipe_assoc"],
             ["btn-open-mods-dir",        "tooltip_open_mods_dir"],
+            ["btn-apply-mods-game",      "tooltip_mods_apply_game"],
             ["btn-new-mod-template",     "tooltip_new_mod_template"],
         ];
         tooltipPairs.forEach(([id, key]) => {
@@ -2488,6 +2495,7 @@ class App {
         this.webModsInstalled.add(m.id);
         this.webModRevisions.set(m.id, rev);
         this.log(this.t("log_mods_web_installed", [m.name, saved]), "info");
+        this.scheduleApplyMods();
         await this.mirrorToUotiara(m.id, true);
         if (select && this.siteAccount && rev && this.siteSelections[String(m.id)] !== rev) {
             this.siteSelections[String(m.id)] = rev;
@@ -2745,6 +2753,7 @@ class App {
                     this.webModsInstalled.delete(m.id);
                     this.webModRevisions.delete(m.id);
                     this.log(this.t("log_mods_web_removed", [m.name]), "info");
+                    this.scheduleApplyMods();
                     await this.mirrorToUotiara(m.id, false);
                     if (this.siteAccount && this.siteSelections[String(m.id)]) {
                         delete this.siteSelections[String(m.id)];
@@ -2794,8 +2803,39 @@ class App {
         } catch (err) { alert(this.t("mod_apply_failed", [String(err)])); }
     }
 
+    private applyModsTimer: number | undefined;
+    private applyModsRunning = 0;
+
+    /** Rebuild the game's uotiara_00001.it 3 s after the last mod change, so a
+     *  sync of many mods builds it once. */
+    private scheduleApplyMods() {
+        window.clearTimeout(this.applyModsTimer);
+        this.applyModsTimer = window.setTimeout(() => void this.applyModsToGame(), 3000);
+    }
+
+    /** Merge the uotiara files and every installed mod into the game's package folder. */
+    private async applyModsToGame() {
+        const gp = this.config.patcher_game_path;
+        if (!gp) { this.log(this.t("log_mods_apply_no_game"), "warn"); return; }
+        const btn = document.getElementById("btn-apply-mods-game") as HTMLButtonElement | null;
+        // A click and the timer can overlap; the button comes back after the last run.
+        this.applyModsRunning++;
+        if (btn) btn.disabled = true;
+        this.log(this.t("log_mods_applying"), "info");
+        try {
+            const r = await invoke<{ archive: string; mods: number; files: number; skipped: string[] }>("apply_mods_to_game", { gamePath: gp });
+            for (const s of r.skipped) this.log(this.t("log_mods_apply_skipped", [s]), "warn");
+            this.log(this.t("log_mods_applied", [String(r.mods), String(r.files), r.archive]), "success");
+        } catch (e) {
+            this.log(this.t("log_mods_apply_failed", [String(e)]), "error");
+        } finally {
+            if (--this.applyModsRunning === 0 && btn) btn.disabled = false;
+        }
+    }
+
     private setupModsActions() {
-        setupCommunityMods((key, args) => this.t(key, args), (message, level) => this.log(message, level), url => this.openInBrowserTab(url));
+        setupCommunityMods((key, args) => this.t(key, args), (message, level) => this.log(message, level), url => this.openInBrowserTab(url), () => this.scheduleApplyMods());
+        document.getElementById("btn-apply-mods-game")?.addEventListener("click", () => void this.applyModsToGame());
         document.getElementById("btn-open-mods-dir")?.addEventListener("click", async () => {
             try {
                 const dir = await invoke("get_mods_dir") as string;

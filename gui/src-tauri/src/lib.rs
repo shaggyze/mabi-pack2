@@ -4533,6 +4533,9 @@ fn site_build_web_mod(pack_url: &str, id: u32, format: &str, revision: Option<&s
 
 fn install_web_mod_blocking(pack_url: String, id: u32, name: String, format: String, version: Option<String>, revision: Option<String>, token: Option<String>, source: Option<serde_json::Value>) -> Result<String, String> {
     if format != "it" && format != "pack" { return Err("format must be 'it' or 'pack'".into()); }
+    // The game-archive merge reads these files: wait for it.
+    let _files = mabi_pack2::game_mods::lock();
+
     if !pack_url.starts_with("https://") && !pack_url.starts_with("http://") {
         return Err("pack URL must be http(s)".into());
     }
@@ -4587,7 +4590,26 @@ fn install_web_mod_blocking(pack_url: String, id: u32, name: String, format: Str
     write_web_mod_versions(&versions)?;
     Ok(dest.to_string_lossy().to_string())
 }
-/// Installed website mods: id, file format and the catalog version recorded at
+/// Build `package\uotiara_00001.it` in the game from the uotiara files in
+/// `appdata\data` plus every installed mod (src/game_mods.rs).
+#[tauri::command]
+async fn apply_mods_to_game(game_path: String) -> Result<mabi_pack2::game_mods::ApplyReport, String> {
+    if game_path.trim().is_empty() { return Err("set the game folder in Settings first".into()); }
+    let mods = web_mods_dir().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("mods"));
+    let salts = load_salts();
+    tauri::async_runtime::spawn_blocking(move || {
+        mabi_pack2::game_mods::apply(std::path::Path::new(&game_path), &mods, &salts).map_err(|e| format!("{:#}", e))
+    }).await.map_err(|e| e.to_string())?
+}
+/// Pack the loose uotiara files into the mods cache in the background at startup.
+#[tauri::command]
+async fn prepare_mods_cache(game_path: String) -> Result<usize, String> {
+    if game_path.trim().is_empty() { return Ok(0); }
+    let mods = web_mods_dir().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("mods"));
+    tauri::async_runtime::spawn_blocking(move || {
+        mabi_pack2::game_mods::prepare(std::path::Path::new(&game_path), &mods).map_err(|e| format!("{:#}", e))
+    }).await.map_err(|e| e.to_string())?
+}/// Installed website mods: id, file format and the catalog version recorded at
 /// install (null for mods installed before versions were recorded).
 #[tauri::command]
 fn installed_web_mods_info() -> Vec<serde_json::Value> {
@@ -4651,7 +4673,13 @@ fn set_uotiara_mods_installed(ids: Vec<u32>, installed: bool) -> Result<usize, S
 
 /// Delete an installed website mod's files from `mods/web/`.
 #[tauri::command]
-fn remove_web_mod(id: u32) -> Result<u32, String> {
+async fn remove_web_mod(id: u32) -> Result<u32, String> {
+    // Off the main thread: the lock below can wait for a running merge.
+    tauri::async_runtime::spawn_blocking(move || remove_web_mod_blocking(id)).await.map_err(|e| e.to_string())?
+}
+fn remove_web_mod_blocking(id: u32) -> Result<u32, String> {
+    // The game-archive merge reads these files: wait for it.
+    let _files = mabi_pack2::game_mods::lock();
     let prefix = format!("MOD{:04}", id);
     let mut removed = 0;
     for e in std::fs::read_dir(web_mods_dir()).map_err(|e| e.to_string())?.flatten() {
@@ -8231,7 +8259,7 @@ pub fn run() {
 
             get_mods_dir, list_mod_files, load_mod_file, get_mod_template, get_api_port, api_start, api_stop, nexon_login_webview,
 
-            fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod, community_mod_connect, community_mod_disconnect, community_mod_sync,
+            fetch_web_mods_catalog, install_web_mod, installed_web_mods_info, list_installed_web_mods, remove_web_mod, community_mod_connect, community_mod_disconnect, community_mod_sync, apply_mods_to_game,prepare_mods_cache,
             read_uotiara_install, set_uotiara_mods_installed,
             site::site_account, site::site_login, site::site_logout, site::site_get_selections, site::site_put_selections, site::site_upload_mod,
             site::browser_show, site::browser_set_bounds, site::browser_hide, site::browser_navigate, site::browser_action,
