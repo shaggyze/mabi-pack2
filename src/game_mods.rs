@@ -14,7 +14,7 @@ use crate::encryption::Snow2Mode;
 use anyhow::{Context, Error};
 use memmap2::Mmap;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
@@ -190,6 +190,16 @@ impl Source {
         anyhow::ensure!(end <= self.mmap.len() as u64, "{} extends past the archive end", ent.name);
         Ok(&self.mmap[start as usize..end as usize])
     }
+
+    /// Decode a stored payload to prove it reads back, so a corrupt mod is
+    /// skipped and never copied into the game archive.
+    fn check(&self, ent: &FileEntry) -> Result<(), Error> {
+        let data = crate::extract::extract_single_file_to_memory(&self.mmap, self.content_off, ent, self.iv, self.mode)
+            .with_context(|| format!("{} does not decode", ent.name))?;
+        anyhow::ensure!(data.len() == ent.original_size as usize,
+            "{} decodes to {} bytes, expected {}", ent.name, data.len(), ent.original_size);
+        Ok(())
+    }
 }
 
 /// Files in merge order, by lowercase archive name: a later source for the
@@ -202,11 +212,17 @@ enum Input { Archive(Source), Files(Vec<PathBuf>) }
 
 impl Merge {
     /// Checks every entry first, so one bad mod is skipped and the others install.
-    fn add_archive(&mut self, inputs: &mut Vec<Input>, source: Source) -> Result<(), Error> {
-        let names = source.entries.iter().map(|ent| {
+    /// With `decode`, stored payloads that are copied as is are decoded too.
+    fn add_archive(&mut self, inputs: &mut Vec<Input>, source: Source, decode: bool) -> Result<(), Error> {
+        let names = source.entries.par_iter().map(|ent| {
             let name = game_name(&ent.name);
             common::validate_entry_path(&name)?;
-            if source.reencodes(ent, &name) { source.take(ent, name.clone())?; } else { source.stored(ent)?; }
+            if source.reencodes(ent, &name) {
+                source.take(ent, name.clone())?;
+            } else {
+                source.stored(ent)?;
+                if decode { source.check(ent)?; }
+            }
             Ok(name)
         }).collect::<Result<Vec<_>, Error>>()?;
         let src = inputs.len();
@@ -255,6 +271,30 @@ fn loose_signature(files: &[(String, PathBuf)]) -> String {
         }
     }
     format!("{:016x}", h.finish())
+}
+
+/// A mod file's path, size and change time: a mod that decoded once under this
+/// key is not decoded again until the file changes.
+fn mod_key(path: &Path) -> Option<String> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some(format!("{}|{}|{}", path.display(), m.len(), t))
+}
+
+/// The `mod_key`s of mods that decoded on an earlier apply or startup check.
+fn read_decoded(path: &Path) -> HashSet<String> {
+    std::fs::read_to_string(path).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
+}
+
+/// Replace the list by rename: the CLI and the GUI may write it at once. A
+/// lost write only means those mods are decoded again.
+fn write_decoded(path: &Path, keys: Vec<String>) {
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() { return; }
+    let tmp = dir.join(format!("decoded-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, keys.join("\n")).is_err() || std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// The packed loose files, rebuilt only when a loose file changed.
@@ -314,6 +354,21 @@ pub fn prepare(game_path: &Path, mods_root: &Path) -> Result<usize, Error> {
         loose_archive(loose, &mods_root.join(".cache"))?;
         log::info!("[MODS] loose uotiara files ready ({} files) in {:?}", count, started.elapsed());
     }
+    // Decode new or changed .it mods now, so an apply only copies them.
+    let decoded_path = mods_root.join(".cache").join("decoded.txt");
+    let mut decoded = read_decoded(&decoded_path);
+    let mut added = 0;
+    for archive in installed_archives(mods_root) {
+        if !archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("it")) { continue; }
+        let Some(key) = mod_key(&archive) else { continue };
+        if decoded.contains(&key) { continue; }
+        let ok = open_it(&archive, &[]).is_ok_and(|s| s.entries.par_iter().all(|e| s.check(e).is_ok()));
+        if ok { decoded.insert(key); added += 1; }
+    }
+    if added > 0 {
+        write_decoded(&decoded_path, decoded.into_iter().collect());
+        log::info!("[MODS] {} mods decoded and ready in {:?}", added, started.elapsed());
+    }
     Ok(count)
 }
 /// Build and install the merged archive. `game_path` is any path the patcher
@@ -345,23 +400,35 @@ pub fn apply(game_path: &Path, mods_root: &Path, salts: &[String]) -> Result<App
         } else if backup.is_file() { Some(backup.clone()) } else if dest.is_file() { Some(dest.clone()) } else { None };
         if let Some(base) = base {
             let source = open_it(&base, salts).with_context(|| format!("read the uotiara base {}", base.display()))?;
-            merge.add_archive(&mut inputs, source)?;
+            merge.add_archive(&mut inputs, source, false)?;
         }
         log::info!("[MODS] base read in {:?}", started.elapsed());
 
+        // Mods that decoded on an earlier apply, unchanged since.
+        let decoded_path = mods_root.join(".cache").join("decoded.txt");
+        let decoded = read_decoded(&decoded_path);
+        let mut passed = Vec::new();
         let mut report = ApplyReport { archive: dest.to_string_lossy().to_string(), mods: 0, files: 0, skipped: vec![] };
         for (i, archive) in installed_archives(mods_root).into_iter().enumerate() {
             let name = archive.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let opened = if archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("pack")) {
+            let is_pack = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("pack"));
+            let key = if is_pack { None } else { mod_key(&archive) };
+            let opened = if is_pack {
                 pack_files(&archive, &work.join(format!("pack{}", i))).and_then(|files| merge.add_files(&mut inputs, files))
             } else {
-                open_it(&archive, salts).and_then(|source| merge.add_archive(&mut inputs, source))
+                open_it(&archive, salts).and_then(|source| {
+                    // Read the key again once the file is mapped: a file replaced
+                    // since the first read must be decoded.
+                    let cached = key.as_ref().is_some_and(|k| decoded.contains(k)) && mod_key(&archive) == key;
+                    merge.add_archive(&mut inputs, source, !cached)
+                })
             };
             match opened {
-                Ok(()) => report.mods += 1,
+                Ok(()) => { report.mods += 1; passed.extend(key); }
                 Err(e) => report.skipped.push(format!("{}: {}", name, e)),
             }
         }
+        write_decoded(&decoded_path, passed);
         anyhow::ensure!(!merge.0.is_empty(), "nothing to install: no uotiara files in {} and no readable mods", appdata.join("data").display());
         log::info!("[MODS] {} mods read in {:?}", report.mods, started.elapsed());
 
@@ -406,5 +473,31 @@ mod tests {
         assert_eq!(game_name("data\\XML\\B.xml"), "data\\local\\xml\\B.xml");
         assert_eq!(game_name("data\\local\\xml\\c.xml"), "data\\local\\xml\\c.xml");
         assert_eq!(game_name("data\\gfx\\d.dds"), "data\\gfx\\d.dds");
+    }
+
+    #[test]
+    fn corrupt_stored_payload_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("mabi-mods-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(ARCHIVE);
+        let item = encode("data\\gfx\\a.txt".into(), b"uotiara ".repeat(400)).unwrap();
+        crate::pack::write_raw_archive(&path.to_string_lossy(), HEADER_SALT, ENTRIES_SALT, 0, vec![item]).unwrap();
+
+        let good = open_it(&path, &[]).unwrap();
+        good.check(&good.entries[0]).unwrap();
+        let start = (good.content_off + good.entries[0].offset as u64 * 1024) as usize;
+        drop(good);
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        for b in &mut bytes[start + 4..start + 24] { *b ^= 0xA5; }
+        std::fs::write(&path, &bytes).unwrap();
+        let bad = open_it(&path, &[]).unwrap();
+        assert!(bad.check(&bad.entries[0]).is_err());
+        let mut merge = Merge::default();
+        let mut inputs = Vec::new();
+        let ent_check = merge.add_archive(&mut inputs, bad, true);
+        assert!(ent_check.is_err() && merge.0.is_empty());
+        drop(inputs);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
