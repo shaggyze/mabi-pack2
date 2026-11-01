@@ -16,6 +16,7 @@
         "title": "mabi-patcher",
         "width": 1100,
         "height": 850,
+        "visible": false,
         "dragDropEnabled": true
       }
     ],

@@ -6,9 +6,10 @@ interface Result {connected:boolean;owner:string;mods:Mod[];subscriptions:Record
 type Translate=(key:string,args?:string[])=>string;
 
 /** Account-specific downloads are separate from the public numeric mod catalog. */
-export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|'warn')=>void,openUrl:(url:string)=>void,onFilesChanged:()=>void):void{
-    if(!isTauri())return;
-    const parent=document.querySelector('#mods .mods-panel');if(!parent)return;
+export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|'warn')=>void,openUrl:(url:string)=>void,onFilesChanged:()=>void):Promise<void>{
+    // Resolves after the first sync, so startup can wait for its mod downloads.
+    if(!isTauri())return Promise.resolve();
+    const parent=document.querySelector('#mods .mods-panel');if(!parent)return Promise.resolve();
     const section=document.createElement('section');section.className='card community-card';
     const heading=document.createElement('h3');heading.textContent=t('community_title');
     const help=document.createElement('p');help.textContent=t('community_help');
@@ -82,8 +83,9 @@ export function setupCommunityMods(t:Translate,log:(message:string,level:'info'|
     // Buttons share one row; a flex column card would stretch each to full width.
     const actions=document.createElement('div');actions.className='form-actions';actions.append(connect,refresh,disconnect);
     section.append(heading,help,link,label,actions,status,list);parent.append(section);
-    void run(sync);
+    const first=run(sync);
     // Only explicit subscriptions update; the native backend serializes all
     // connection and sync operations and validates every downloaded package.
     window.setInterval(()=>void run(sync),5*60*1000);
+    return first;
 }

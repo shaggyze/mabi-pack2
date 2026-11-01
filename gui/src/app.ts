@@ -544,8 +544,29 @@ class App {
         // 3. Apply Theme Immediately
         this.applyTheme();
 
-        // 4. Initialize rest
-        this.init();
+        // The window starts hidden (tauri.conf.json), so it first appears in the
+        // saved theme. A self-update restarts before it ever shows.
+        let started = false;
+        const start = () => {
+            if (started) return;
+            started = true;
+            invoke("reveal_main_window").catch(() => {});
+            // 4. Initialize rest
+            this.init();
+        };
+        if (isTauri() && this.config.app_update_check && this.config.app_auto_update) {
+            // A download still running after 12 s shows the window; the restart replaces it.
+            const late = window.setTimeout(() => { this.selfUpdateChecked = true; start(); }, 12000);
+            const restarting = await this.startupSelfUpdate();
+            window.clearTimeout(late);
+            if (restarting) {
+                // The new exe starts 1.5 s after the swap; this one shows only if that fails.
+                window.setTimeout(start, 10000);
+                return;
+            }
+            if (restarting === false) this.selfUpdateChecked = true;
+        }
+        start();
     }
 
     private async init() {
@@ -641,9 +662,12 @@ class App {
      *  game files, then launch. An "already current" step skips to the next one. */
     private async runStartupChain() {
         // A self-update restarts into the new exe, which runs the chain again.
-        if (this.config.app_update_check && await this.checkAppUpdate(true)) return;
+        if (this.config.app_update_check && !this.selfUpdateChecked && await this.checkAppUpdate(true)) return;
         if (this.config.mods_auto_update) await this.startupModsUpdate();
         const gameReady = await this.startupGameUpdate();
+        // Updated mods rebuild uotiara_00001.it on a 3 s timer; the game starts after it.
+        await this.communityFirstSync.catch(() => {});
+        await this.flushApplyMods();
         if (!this.config.launcher_auto_launch) return;
         if (!gameReady) {
             this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_autolaunch_skip")}`, "warn");
@@ -2803,18 +2827,43 @@ class App {
         } catch (err) { alert(this.t("mod_apply_failed", [String(err)])); }
     }
 
+    /** The self-update check already ran before the window showed. */
+    private selfUpdateChecked = false;
     private applyModsTimer: number | undefined;
     private applyModsRunning = 0;
+    private applyModsLast: Promise<void> = Promise.resolve();
+    /** The Mods tab's first community sync; it can download mods at startup. */
+    private communityFirstSync: Promise<void> = Promise.resolve();
 
     /** Rebuild the game's uotiara_00001.it 3 s after the last mod change, so a
      *  sync of many mods builds it once. */
     private scheduleApplyMods() {
         window.clearTimeout(this.applyModsTimer);
-        this.applyModsTimer = window.setTimeout(() => void this.applyModsToGame(), 3000);
+        this.applyModsTimer = window.setTimeout(() => {
+            this.applyModsTimer = undefined;
+            void this.applyModsToGame();
+        }, 3000);
+    }
+
+    /** Runs a pending rebuild now and waits for the last one to finish. */
+    private async flushApplyMods() {
+        if (this.applyModsTimer !== undefined) {
+            window.clearTimeout(this.applyModsTimer);
+            this.applyModsTimer = undefined;
+            await this.applyModsToGame();
+            return;
+        }
+        await this.applyModsLast;
     }
 
     /** Merge the uotiara files and every installed mod into the game's package folder. */
-    private async applyModsToGame() {
+    private applyModsToGame(): Promise<void> {
+        // Runs queue behind each other: two at once would both write uotiara_00001.it.
+        this.applyModsLast = this.applyModsLast.then(() => this.applyModsRun());
+        return this.applyModsLast;
+    }
+
+    private async applyModsRun() {
         const gp = this.config.patcher_game_path;
         if (!gp) { this.log(this.t("log_mods_apply_no_game"), "warn"); return; }
         const btn = document.getElementById("btn-apply-mods-game") as HTMLButtonElement | null;
@@ -2834,7 +2883,7 @@ class App {
     }
 
     private setupModsActions() {
-        setupCommunityMods((key, args) => this.t(key, args), (message, level) => this.log(message, level), url => this.openInBrowserTab(url), () => this.scheduleApplyMods());
+        this.communityFirstSync = setupCommunityMods((key, args) => this.t(key, args), (message, level) => this.log(message, level), url => this.openInBrowserTab(url), () => this.scheduleApplyMods());
         document.getElementById("btn-apply-mods-game")?.addEventListener("click", () => void this.applyModsToGame());
         document.getElementById("btn-open-mods-dir")?.addEventListener("click", async () => {
             try {
@@ -7861,6 +7910,20 @@ class App {
             this.log(`${tag} ${msg}`, atStartup ? "info" : "error");
             return false;
         }
+    }
+
+    /** Self-update while the window is still hidden. The check gets 3 s; on a slow
+     *  network it returns null and the startup chain checks again after the window
+     *  shows. Returns true when the new exe is installed and the app is restarting. */
+    private async startupSelfUpdate(): Promise<boolean | null> {
+        const timeout = new Promise<null>(r => window.setTimeout(() => r(null), 3000));
+        const info = await Promise.race([
+            invoke<{ newer: boolean }>("check_app_update").catch(() => null),
+            timeout,
+        ]);
+        if (!info) return null;
+        if (!info.newer) return false;
+        return await this.installAppUpdate();
     }
 
     /** Checks for a newer release, then downloads it over this exe and restarts into

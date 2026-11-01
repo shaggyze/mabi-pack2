@@ -941,7 +941,12 @@ fn apply_runtime_settings(app: &tauri::AppHandle, config: &Config) {
     mabi_pack2::launcher::auth::set_product_id(config.product_id);
     MINIMIZE_TO_TRAY.store(config.minimize_to_tray, std::sync::atomic::Ordering::Relaxed);
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_visible(config.minimize_to_tray);
+        // A --minimized start lives in the tray until the window shows; hiding the
+        // icon then would leave no way to open it.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let in_tray = mabi_pack2::launcher::autostart::wants_minimized(&args)
+            && app.get_window("main").map(|w| !w.is_visible().unwrap_or(true)).unwrap_or(false);
+        let _ = tray.set_visible(config.minimize_to_tray || in_tray);
     }
 }
 
@@ -3562,6 +3567,29 @@ fn get_app_exe_dir() -> String {
 }
 
 
+
+static MAIN_WINDOW_REVEALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shows the main window, which starts hidden (tauri.conf.json) so it first
+/// appears in the saved theme. A `--minimized` start stays in the tray, or shows
+/// minimized when there is no tray icon. Only the first call acts.
+#[tauri::command]
+fn reveal_main_window(app: tauri::AppHandle) {
+    if MAIN_WINDOW_REVEALED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Some(win) = app.get_window("main") else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if mabi_pack2::launcher::autostart::wants_minimized(&args) {
+        if app.tray_by_id(TRAY_ID).is_none() {
+            let _ = win.show();
+            let _ = win.minimize();
+        }
+        return;
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+}
 
 /// The app version (from gui/src-tauri/Cargo.toml, kept in step with tauri.conf.json
 /// by scripts/set-version). The GUI shows it in the title and sidebar tag.
@@ -8167,18 +8195,21 @@ pub fn run() {
             // `--minimized` (the Start with Windows entry): start hidden in the tray,
             // or minimized when there is no tray icon to restore the window from.
             let args: Vec<String> = std::env::args().skip(1).collect();
+            // The window itself starts hidden; reveal_main_window keeps it in the tray.
             if mabi_pack2::launcher::autostart::wants_minimized(&args) {
-                if let Some(win) = app.get_window("main") {
-                    match app.tray_by_id(TRAY_ID) {
-                        Some(tray) => {
-                            let _ = tray.set_visible(true);
-                            let _ = win.hide();
-                        }
-                        None => {
-                            let _ = win.minimize();
-                        }
-                    }
+                if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                    let _ = tray.set_visible(true);
                 }
+            }
+
+            // The page shows the window after applying its theme and the startup
+            // self-update check. This shows it anyway if the page never calls.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    reveal_main_window(h);
+                });
             }
 
             warn!("[GUI] mabi-pack2 started, log_level={}", config.log_level);
@@ -8237,7 +8268,7 @@ pub fn run() {
             check_app_update,
             install_app_update,
 
-            get_app_version,
+            get_app_version, reveal_main_window,
 
             list_pack_contents, create_archive, extract_pack_to,
 
