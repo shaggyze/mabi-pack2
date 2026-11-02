@@ -39,6 +39,12 @@ Detailed documentation is in [docs/](docs/README.md).
 - `.mod` files are plain TOML. A mod can replace files, delete files, patch bytes at offsets, and turn game features on or off. Create one with "New .mod Template" or `mabi-patcher mod template`. See [docs/GUI.md](docs/GUI.md#mods).
 - Edit an archive from the List tab like a file manager: multi-select, drag files in from Explorer onto a folder, move rows by dragging, Delete and F2, merge another archive, extract a selection or drag it out to Explorer. A "file already exists" dialog lets you overwrite, rename or skip. You can save queued edits and apply them later.
 - Features tab: search and edit an archive's `features.xml.compiled`, with readable names for known feature hashes.
+- **Apply to Game** builds `package\uotiara_00001.it` from the loose uotiara files plus every installed mod. It runs after an install or removal, and at startup when a uotiara update replaced the archive.
+
+### Browser
+- **Browser tab** opens the [MabiPatcher website](https://shaggyze.website/mabipatcher/) inside the app: the mod catalog, XML Editor, Asset Preview, 3D Renderer and Database pages.
+- Several tabs, back, forward, reload, home and an address bar. A website sign-in here also syncs your saved mod picks with the Mods tab.
+- A Tampermonkey-compatible userscript runner. Scripts load from `userscripts\` beside the exe, and the Scripts panel imports a Tampermonkey backup `.zip` or a single `.user.js`.
 
 ### Patcher and launcher (Mabinogi NA)
 - **Nexon login**:
@@ -77,6 +83,18 @@ Models from the UoTiara mod pack, rendered by the GUI's preview. These models' t
 ![Runda dungeon room](docs/screenshots/preview3d-runda-dungeon-room.png)
 ![Barri dungeon floor](docs/screenshots/preview3d-bangor-dungeon-room.png)
 ![Taillteann tree](docs/screenshots/preview3d-taillteann-tree.png)
+
+### Browser tab
+
+The MabiPatcher website open in the Browser tab.
+
+![Mod catalog with a version picker per mod](docs/screenshots/browser-mods.png)
+![Loading screen while a region scene loads](docs/screenshots/browser-loading-screen.png)
+![Asset Preview: Dunbarton scene with the prop editor and the city hall model](docs/screenshots/browser-asset-preview-cityhall.png)
+![Asset Preview: scene music player and the bank model](docs/screenshots/browser-asset-preview-scene-sound.png)
+![3D Renderer: Nao animation on a stage](docs/screenshots/browser-3d-renderer.png)
+![Database: 42,212 item records with filters](docs/screenshots/browser-database.png)
+![XML Editor](docs/screenshots/browser-xml-editor.png)
 
 ## Download and build
 
@@ -154,6 +172,7 @@ More detail (build scripts, pre-commit checks, tests, CI) is in [docs/DEVELOPMEN
 | **Mods** | Apply local `.mod` files, or browse and install mods from the website. |
 | **Patcher** | Check, patch, verify or repair the game; choose files, check all installs, pause and resume. |
 | **Features** | Edit `features.xml.compiled`. |
+| **Browser** | Open the MabiPatcher website and other pages in tabs, and run Tampermonkey-style userscripts. |
 | **Launcher** | Log in (or import a login from your browser), manage profiles, choose the game folder, launch. |
 | **Settings** | Language, theme, file associations, portable mode, the in-app REST API, minimize to tray, patcher ignore list, hooks, launch mode and (under Advanced) the Nexon product id. |
 
