@@ -10,14 +10,17 @@
   <style>html,body{background:#0a111a;color:#fff}</style>
   <link rel="stylesheet" href="/src/styles.css" />
   <script>
-    const savedTheme = localStorage.getItem("mabi_theme") || "sky-dark";
-    const themeClass = "theme-" + savedTheme;
+    // The saved theme and its background, before the first paint (app.ts stores both).
+    var savedTheme = "sky-dark", savedBg = "";
+    try { savedTheme = localStorage.getItem("mabi_theme") || savedTheme; savedBg = localStorage.getItem("mabi_theme_bg") || ""; } catch (e) {}
+    var themeClass = "theme-" + savedTheme;
     document.documentElement.className = themeClass;
-    document.addEventListener("DOMContentLoaded", () => { document.body.className = themeClass; });
+    if (savedBg) document.documentElement.style.background = savedBg;
   </script>
   <script type="module" src="/src/app.ts" defer></script>
   </head>
-  <body class="theme-sky-dark">
+  <body>
+  <script>document.body.className = themeClass;</script>
   <div class="app-layout">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -711,6 +714,34 @@
         <!-- Autostart sub-tab -->
         <div id="stab-autostart" class="settings-stab-content">
           <div class="settings-section">
+            <h4 style="margin:0 0 10px 0;" data-i18n="set_startup">Startup &amp; Automation</h4>
+            <div class="sys-stat" data-tooltip="tooltip_app_update_check">
+              <span data-i18n="label_app_update_check">Check for mabi-patcher updates at startup</span>
+              <label class="switch"><input type="checkbox" id="settings-app-update-check"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" data-tooltip="tooltip_app_auto_update">
+              <span data-i18n="label_app_auto_update">Install mabi-patcher updates automatically</span>
+              <label class="switch"><input type="checkbox" id="settings-app-auto-update"><span class="slider"></span></label>
+            </div>
+            <div class="form-actions" style="margin-bottom:8px;">
+              <button class="tab-btn btn-sm" id="btn-app-update-check" data-i18n="btn_app_update_check" data-tooltip="tooltip_btn_app_update_check">Check for updates</button>
+              <button class="tab-btn btn-sm primary" id="btn-app-update-install" data-tooltip="tooltip_btn_app_update_install" style="display:none;"></button>
+              <span id="app-update-status" class="launcher-field-hint"></span>
+            </div>
+            <div class="sys-stat" data-tooltip="tooltip_mods_auto_update">
+              <span data-i18n="label_mods_auto_update">Update website mods at startup</span>
+              <label class="switch"><input type="checkbox" id="settings-mods-auto-update"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" id="settings-start-with-windows-row">
+              <span data-i18n="label_start_with_windows">Start with Windows (in the tray)</span>
+              <label class="switch"><input type="checkbox" id="settings-start-with-windows"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_patcher_run_elevated">Always run as Administrator</span>
+              <label class="switch"><input type="checkbox" id="patcher-run-elevated"><span class="slider"></span></label>
+            </div>
+            <p class="launcher-field-hint" style="margin:4px 0 0 0" data-i18n="hint_startup_more">Game file updates are on the Patcher tab; launching the game is on the Launcher tab.</p>
+            <h4 style="margin:16px 0 10px 0;border-top:1px solid var(--border-glass);padding-top:12px;" data-i18n="set_file_open">Opening an archive</h4>
             <div class="sys-stat">
               <span id="label_startup_extract">Auto extract</span>
               <label class="switch"><input type="checkbox" id="settings-startup-extract"><span class="slider"></span></label>
@@ -765,27 +796,6 @@
               <span data-i18n="label_settings_fetch_remote_salts">Download the salt list at startup</span>
               <label class="switch"><input type="checkbox" id="settings-fetch-remote-salts"><span class="slider"></span></label>
             </div>
-            <div class="sys-stat" data-tooltip="tooltip_app_update_check">
-              <span data-i18n="label_app_update_check">Check for mabi-patcher updates at startup</span>
-              <label class="switch"><input type="checkbox" id="settings-app-update-check"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat" data-tooltip="tooltip_app_auto_update">
-              <span data-i18n="label_app_auto_update">Install mabi-patcher updates automatically</span>
-              <label class="switch"><input type="checkbox" id="settings-app-auto-update"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat" data-tooltip="tooltip_mods_auto_update">
-              <span data-i18n="label_mods_auto_update">Update website mods at startup</span>
-              <label class="switch"><input type="checkbox" id="settings-mods-auto-update"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat" data-tooltip="tooltip_launcher_auto_launch">
-              <span data-i18n="label_launcher_auto_launch">Launch the game after the startup updates</span>
-              <label class="switch"><input type="checkbox" id="settings-launcher-auto-launch"><span class="slider"></span></label>
-            </div>
-            <div class="form-actions" style="margin-bottom:16px;">
-              <button class="tab-btn btn-sm" id="btn-app-update-check" data-i18n="btn_app_update_check" data-tooltip="tooltip_btn_app_update_check">Check for updates</button>
-              <button class="tab-btn btn-sm primary" id="btn-app-update-install" data-tooltip="tooltip_btn_app_update_install" style="display:none;"></button>
-              <span id="app-update-status" class="launcher-field-hint"></span>
-            </div>
             <div class="form-group">
               <label id="label_log">Log Level:</label>
               <select id="settings-log">
@@ -819,10 +829,6 @@
             <div class="sys-stat" style="margin-top:6px;">
               <span data-i18n="label_minimize_to_tray">Minimize to tray on close</span>
               <label class="switch"><input type="checkbox" id="settings-minimize-to-tray"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat" style="margin-top:6px;" id="settings-start-with-windows-row">
-              <span data-i18n="label_start_with_windows">Start with Windows (in the tray)</span>
-              <label class="switch"><input type="checkbox" id="settings-start-with-windows"><span class="slider"></span></label>
             </div>
             <div style="margin-top:10px;">
               <label style="font-size:0.78em;opacity:0.65;" data-i18n="label_config_path">Config file location:</label>
@@ -894,6 +900,41 @@
                   <!-- Launcher sub-tab -->
         <div id="stab-launcher" class="settings-stab-content">
           <div class="settings-section">
+            <h4 style="margin:0 0 10px 0;" id="label_launch_mode" data-i18n="label_launch_mode">Launch Mode</h4>
+            <div class="sys-stat" data-tooltip="tooltip_launcher_auto_launch">
+              <span data-i18n="label_launcher_auto_launch">Launch the game after the startup updates</span>
+              <label class="switch"><input type="checkbox" id="settings-launcher-auto-launch"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat" data-tooltip="tooltip_launcher_minimize_on_launch">
+              <span data-i18n="label_launcher_minimize_on_launch">Minimize mabi-patcher to tray on Launch</span>
+              <label class="switch"><input type="checkbox" id="settings-launcher-minimize-on-launch"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span id="label_launch_nexon_launcher" data-i18n="label_launch_nexon_launcher">Via Nexon Launcher</span>
+              <label class="switch"><input type="checkbox" id="launch-use-nexon-launcher"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_launcher_show_time_logged_in">Show time logged in (in place of time left)</span>
+              <label class="switch"><input type="checkbox" id="launcher-show-time-logged-in"><span class="slider"></span></label>
+            </div>
+            <div class="sys-stat">
+              <span data-i18n="label_launcher_session_fallback">Assume 8 h session when Nexon gives no expiry</span>
+              <label class="switch"><input type="checkbox" id="launcher-session-fallback"><span class="slider"></span></label>
+            </div>
+            <div class="form-group" style="margin-top:8px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_launch_cmd_override" data-i18n="label_launch_cmd_override">Custom Launch Command (leave blank for auto)</label>
+              <textarea id="launch-cmd-override" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="{client_dir}\Client.exe {args} /P:{passport}"></textarea>
+            </div>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px" id="label_launch_hooks_only" data-i18n="label_launch_hooks_only">Launch Hooks</h4>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_launch_cmd" data-i18n="label_pre_launch_cmd">Before Launch</label>
+              <textarea id="pre-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before starting client)" data-i18n-placeholder="ph_pre_launch_cmd"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:4px">
+              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_post_launch_cmd" data-i18n="label_post_launch_cmd">After Launch</label>
+              <textarea id="post-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run after client starts)" data-i18n-placeholder="ph_post_launch_cmd"></textarea>
+            </div>
+            <hr style="border:0;border-top:1px solid var(--border-glass);margin:12px 0;">
             <h4 style="margin:0 0 10px 0;" data-i18n="set_login_auth">Login & Auth</h4>
             <div class="sys-stat">
               <span id="label-reset-login" data-i18n="label_reset_login">Clear WebView Login Cache (Fixes stuck 'Stay Logged In')</span>
@@ -1001,10 +1042,6 @@
               <span data-i18n="label_patcher_focus_on_start">Switch to Patcher tab on start</span>
               <label class="switch"><input type="checkbox" id="patcher-focus-on-start"><span class="slider"></span></label>
             </div>
-            <div class="sys-stat">
-              <span data-i18n="label_patcher_run_elevated">Always run as Administrator</span>
-              <label class="switch"><input type="checkbox" id="patcher-run-elevated"><span class="slider"></span></label>
-            </div>
             <div class="form-group" style="display:flex;align-items:center;gap:8px;margin-top:6px">
               <label style="font-size:0.8rem;color:var(--text-muted);white-space:nowrap" data-i18n="label_patcher_max_workers">Parallel workers</label>
               <input type="number" id="patcher-max-workers" class="form-input" min="1" max="32" value="10" style="width:64px">
@@ -1039,24 +1076,7 @@
               <label style="font-size:0.8rem;color:var(--text-muted)" id="label_patcher_server_url">Patch Server URL</label>
               <input type="text" id="patcher-hyddwn-url" class="form-input" placeholder="http://127.0.0.1:11000">
             </div>
-            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:10px" id="label_launch_mode" data-i18n="label_launch_mode">Launch Mode</h4>
-            <div class="sys-stat">
-              <span id="label_launch_nexon_launcher" data-i18n="label_launch_nexon_launcher">Via Nexon Launcher</span>
-              <label class="switch"><input type="checkbox" id="launch-use-nexon-launcher"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span data-i18n="label_launcher_show_time_logged_in">Show time logged in (in place of time left)</span>
-              <label class="switch"><input type="checkbox" id="launcher-show-time-logged-in"><span class="slider"></span></label>
-            </div>
-            <div class="sys-stat">
-              <span data-i18n="label_launcher_session_fallback">Assume 8 h session when Nexon gives no expiry</span>
-              <label class="switch"><input type="checkbox" id="launcher-session-fallback"><span class="slider"></span></label>
-            </div>
-            <div class="form-group" style="margin-top:8px">
-              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_launch_cmd_override" data-i18n="label_launch_cmd_override">Custom Launch Command (leave blank for auto)</label>
-              <textarea id="launch-cmd-override" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="{client_dir}\Client.exe {args} /P:{passport}"></textarea>
-            </div>
-            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px" id="label_launch_hooks" data-i18n="label_launch_hooks">Patch &amp; Launch Hooks</h4>
+            <h4 style="margin-top:14px;border-top:1px solid var(--border-glass);padding-top:12px" id="label_patch_hooks" data-i18n="label_patch_hooks">Patch Hooks</h4>
             <div class="form-group" style="margin-top:4px">
               <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_patch_cmd" data-i18n="label_pre_patch_cmd">Before Patch</label>
               <textarea id="pre-patch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before patching)" data-i18n-placeholder="ph_pre_patch_cmd"></textarea>
@@ -1064,14 +1084,6 @@
             <div class="form-group" style="margin-top:4px">
               <label style="font-size:0.8rem;color:var(--text-muted)" id="label_post_patch_cmd" data-i18n="label_post_patch_cmd">After Patch</label>
               <textarea id="post-patch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run after patching)" data-i18n-placeholder="ph_post_patch_cmd"></textarea>
-            </div>
-            <div class="form-group" style="margin-top:4px">
-              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_pre_launch_cmd" data-i18n="label_pre_launch_cmd">Before Launch</label>
-              <textarea id="pre-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run before starting client)" data-i18n-placeholder="ph_pre_launch_cmd"></textarea>
-            </div>
-            <div class="form-group" style="margin-top:4px">
-              <label style="font-size:0.8rem;color:var(--text-muted)" id="label_post_launch_cmd" data-i18n="label_post_launch_cmd">After Launch</label>
-              <textarea id="post-launch-cmd" class="form-input" rows="2" style="font-family:monospace;font-size:0.78rem;resize:vertical" placeholder="(command to run after client starts)" data-i18n-placeholder="ph_post_launch_cmd"></textarea>
             </div>
           </div>
         </div>

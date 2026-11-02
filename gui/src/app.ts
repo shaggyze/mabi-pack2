@@ -34,6 +34,9 @@ interface FileEntry {
 /** Answer to a "target already exists" conflict in the List tab editor. */
 type VfsConflictAction = "overwrite" | "newer" | "size" | "rename" | "skip";
 
+/** prepare_mods_cache: the startup check of the game's uotiara_00001.it. */
+interface ModsPrepareReport { loose_files: number; mods: number; up_to_date: boolean }
+
 interface AggregateEntry extends FileEntry {
     source_archive: string;
     salt_used: string;
@@ -106,6 +109,7 @@ interface Config {
     app_auto_update: boolean;
     mods_auto_update: boolean;
     launcher_auto_launch: boolean;
+    launcher_minimize_on_launch: boolean;
     auto_convert_features: boolean;
     auto_convert_pmg: boolean;
     list_full_sequence: boolean;
@@ -306,6 +310,7 @@ class App {
         app_auto_update: false,
         mods_auto_update: false,
         launcher_auto_launch: false,
+        launcher_minimize_on_launch: false,
         auto_convert_features: false,
         auto_convert_pmg: false,
         list_full_sequence: false,
@@ -520,8 +525,8 @@ class App {
 
         // Pack the loose uotiara files now, so the first apply only copies entries.
         if (isTauri() && this.config.patcher_game_path) {
-            invoke<number>("prepare_mods_cache", { gamePath: this.config.patcher_game_path })
-                .catch(e => console.warn("prepare_mods_cache", e));
+            this.modsPrepared = invoke<ModsPrepareReport | null>("prepare_mods_cache", { gamePath: this.config.patcher_game_path })
+                .catch(e => { console.warn("prepare_mods_cache", e); return null; });
         }
 
         // Pre-fetch all engine salts in the background
@@ -550,7 +555,7 @@ class App {
         const start = () => {
             if (started) return;
             started = true;
-            invoke("reveal_main_window").catch(() => {});
+            invoke("reveal_main_window", { background: this.themeBackground() }).catch(() => {});
             // 4. Initialize rest
             this.init();
         };
@@ -667,6 +672,21 @@ class App {
         const gameReady = await this.startupGameUpdate();
         // Updated mods rebuild uotiara_00001.it on a 3 s timer; the game starts after it.
         await this.communityFirstSync.catch(() => {});
+        // A uotiara update or a mod added outside the app leaves the game's archive
+        // behind its files; rebuild it before the launch.
+        // Checked again after the boot check: a sync or mod update may have rebuilt it
+        // since. Without mods the uotiara installer's own archive stays as it is.
+        let prep = await this.modsPrepared;
+        if (prep && !prep.up_to_date && this.applyModsTimer === undefined) {
+            await this.applyModsLast;
+            prep = await invoke<ModsPrepareReport | null>("prepare_mods_cache", { gamePath: this.config.patcher_game_path }).catch(() => prep);
+        }
+        if (prep && !prep.up_to_date && prep.mods > 0) {
+            this.log(this.t("log_mods_stale", [String(prep.mods)]), "info");
+            this.scheduleApplyMods();
+        } else if (prep && prep.loose_files + prep.mods > 0) {
+            this.log(this.t("log_mods_current", [String(prep.mods)]), "info");
+        }
         await this.flushApplyMods();
         if (!this.config.launcher_auto_launch) return;
         if (!gameReady) {
@@ -934,6 +954,7 @@ class App {
             { id: "settings-app-auto-update", prop: "app_auto_update" },
             { id: "settings-mods-auto-update", prop: "mods_auto_update" },
             { id: "settings-launcher-auto-launch", prop: "launcher_auto_launch" },
+            { id: "settings-launcher-minimize-on-launch", prop: "launcher_minimize_on_launch" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -1005,10 +1026,26 @@ class App {
 
         // Set tooltips on .sys-stat spans — use the ID as the key so the resolver
         // translates dynamically at display time (survives locale changes without re-calling this)
-        document.querySelectorAll<HTMLElement>(".sys-stat > span[id]").forEach(span => {
-            // Prefer the element's locale key; fall back to the id (which is a key for older labels).
-            const key = span.dataset.i18n || span.id;
-            if (key) span.dataset.tooltip = key;
+        // One tooltip per row, on the row, its label and its switch. The key is the
+        // row's or switch's own, else tooltip_<name> for a label_<name> label, else
+        // the label text. A button in the row keeps its own tooltip.
+        const isKey = (k: string | undefined) => !!k && this.t(k) !== k;
+        document.querySelectorAll<HTMLElement>(".sys-stat").forEach(row => {
+            const span = row.querySelector<HTMLElement>(":scope > span");
+            const sw = row.querySelector<HTMLElement>("label.switch");
+            const box = sw?.querySelector<HTMLElement>("input");
+            const labelKey = [span?.dataset.i18n, span?.id].find(isKey) ?? "";
+            const named = labelKey.startsWith("label_") ? "tooltip_" + labelKey.slice(6) : "";
+            const key = row.dataset.tooltip || sw?.dataset.tooltip || box?.dataset.tooltip
+                || (isKey(named) ? named : labelKey);
+            if (!key) return;
+            for (const el of [row, span, sw, box]) if (el) el.dataset.tooltip = key;
+        });
+        // A form field's label shows the field's tooltip, and the other way round.
+        document.querySelectorAll<HTMLElement>("#settings label + input, #settings label + select, #settings label + textarea").forEach(field => {
+            const label = field.previousElementSibling as HTMLElement;
+            const key = label.dataset.tooltip || field.dataset.tooltip;
+            if (key) { label.dataset.tooltip = key; field.dataset.tooltip = key; }
         });
 
         // Set tooltips on radio labels
@@ -1024,9 +1061,21 @@ class App {
         const cls = `theme-${this.config.theme}`;
         document.documentElement.className = cls;
         document.body.className = cls;
-        localStorage.setItem("mabi_theme", this.config.theme);
         this.applyThemeOverrides();
+        // index.html paints this background before app.ts loads on the next start.
+        const bg = this.themeBackground();
+        document.documentElement.style.background = bg;
+        try {
+            localStorage.setItem("mabi_theme", this.config.theme);
+            localStorage.setItem("mabi_theme_bg", bg);
+        } catch { /* no storage: the next start paints the default first */ }
         this.syncCustomizerUI();
+    }
+
+    /** The theme's page color (--bg-deep, overrides included) as #rrggbb. */
+    private themeBackground(): string {
+        const v = getComputedStyle(document.body).getPropertyValue("--bg-deep").trim();
+        return /^#[0-9a-f]{6}$/i.test(v) ? v : "#0a111a";
     }
 
     private applyThemeOverrides() {
@@ -2832,6 +2881,8 @@ class App {
     private applyModsTimer: number | undefined;
     private applyModsRunning = 0;
     private applyModsLast: Promise<void> = Promise.resolve();
+    /** The startup mods check: loose uotiara files packed, game archive current or not. */
+    private modsPrepared: Promise<ModsPrepareReport | null> = Promise.resolve(null);
     /** The Mods tab's first community sync; it can download mods at startup. */
     private communityFirstSync: Promise<void> = Promise.resolve();
 
@@ -5197,6 +5248,7 @@ class App {
             this.setLauncherStatus(this.t("launcher_launched"), "ok");
             this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_launched", [String(r.executable), String(r.argumentCount)])}`, "info");
             if (postLaunchCmd) this.log(`${this.t("log_tag_launcher")} ${this.t("log_launcher_post_launch", [postLaunchCmd])}`, "info");
+            if (this.config.launcher_minimize_on_launch) invoke("hide_to_tray").catch(() => {});
         } catch (e: any) {
             e = this.errWithSession(e);
             // Any failed token refresh means the stored session is dead: offer a fresh login.
@@ -5973,6 +6025,7 @@ class App {
             { id: "settings-app-auto-update", prop: "app_auto_update" },
             { id: "settings-mods-auto-update", prop: "mods_auto_update" },
             { id: "settings-launcher-auto-launch", prop: "launcher_auto_launch" },
+            { id: "settings-launcher-minimize-on-launch", prop: "launcher_minimize_on_launch" },
             { id: "settings-auto-features", prop: "auto_convert_features" },
             { id: "settings-auto-pmg", prop: "auto_convert_pmg" },
             { id: "extract-auto-png", prop: "auto_convert_png" },
@@ -7770,14 +7823,26 @@ class App {
         document.body.appendChild(tip);
         let showTimer: number | null = null;
 
+        // Any value that is a locale key resolves to its translation; raw text passes through.
+        const textOf = (anchor: HTMLElement) => {
+            const key = anchor.dataset.tooltip || '';
+            const translated = this.t(key);
+            return translated && translated !== key ? translated : key;
+        };
+        // The Browser tab's page is a native window drawn above this document, so a
+        // tooltip beside the sidebar is hidden under it. A title tooltip is drawn by
+        // Windows above every window.
+        const overNativePage = (anchor: HTMLElement) =>
+            this.browserOpened && !this.scriptsOpen && this.isBrowserTabActive() && !!anchor.closest('.sidebar');
+
         const show = (anchor: HTMLElement) => {
-            // Resolve locale key: if value starts with "tooltip_", look it up
-            let text = anchor.dataset.tooltip || '';
-            // Any value that is a locale key resolves to its translation; raw text passes through.
-            const translated = this.t(text);
-            if (translated && translated !== text) text = translated;
+            const text = textOf(anchor);
             if (!text) return;
             tip.textContent = text;
+            // Measure at the top left: a fixed box near the right edge shrinks to the
+            // space left, which gives the wrong size for the new position.
+            tip.style.left = '0px';
+            tip.style.top = '0px';
             tip.style.opacity = '1';
 
             const r = anchor.getBoundingClientRect();
@@ -7795,6 +7860,14 @@ class App {
             const anchor = (e.target as Element).closest('[data-tooltip]') as HTMLElement | null;
             if (showTimer) clearTimeout(showTimer);
             if (!anchor?.dataset.tooltip) { tip.style.opacity = '0'; return; }
+            if (overNativePage(anchor)) {
+                tip.style.opacity = '0';
+                anchor.title = textOf(anchor);
+                anchor.dataset.tipTitle = '1';
+                return;
+            }
+            // Drop a title set over the Browser tab so it does not show beside this tooltip.
+            if (anchor.dataset.tipTitle) { anchor.removeAttribute('title'); delete anchor.dataset.tipTitle; }
             showTimer = window.setTimeout(() => show(anchor), 180);
         });
 

@@ -342,14 +342,55 @@ fn pack_files(archive: &Path, tmp: &Path) -> Result<Vec<(String, PathBuf)>, Erro
     }).collect())
 }
 
+#[derive(serde::Serialize, Debug)]
+pub struct PrepareReport {
+    /// Loose uotiara files in appdata\data.
+    pub loose_files: usize,
+    /// Installed mod archives (.it and .pack).
+    pub mods: usize,
+    /// The game's archive was built from these loose files and mods, and none
+    /// of them (nor the archive) changed since.
+    pub up_to_date: bool,
+}
+
+/// Written after an install: a fingerprint of its inputs and of the result.
+const INSTALLED_SIG: &str = "installed.sig";
+
+/// The loose files' and each mod archive's fingerprint, read before a build.
+fn inputs_key(loose: &[(String, PathBuf)], mods: &[PathBuf]) -> String {
+    let mut key = loose_signature(loose);
+    for m in mods { key.push('\n'); key.push_str(&mod_key(m).unwrap_or_default()); }
+    key
+}
+
+/// The inputs plus the base `.bak` (used when there are no loose files) and
+/// the installed archive, as they are after the install.
+fn install_signature(inputs: &str, no_loose: bool, backup: &Path, dest: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    inputs.hash(&mut h);
+    if no_loose { mod_key(backup).hash(&mut h); }
+    mod_key(dest).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// Pack the loose uotiara files into the cache ahead of time (at startup), so
-/// the first apply only copies stored entries. Returns the file count.
-pub fn prepare(game_path: &Path, mods_root: &Path) -> Result<usize, Error> {
+/// the first apply only copies stored entries, and report whether the game's
+/// archive still matches the loose files and mods.
+pub fn prepare(game_path: &Path, mods_root: &Path) -> Result<PrepareReport, Error> {
     let _guard = lock();
     let started = std::time::Instant::now();
     let appdata = crate::launcher::patch::GameRoots::resolve(game_path).appdata;
+    let package = appdata.join("package");
     let loose = loose_files(&appdata.join("data"));
     let count = loose.len();
+    let archives = installed_archives(mods_root);
+    let dest = package.join(ARCHIVE);
+    let backup = package.join(format!("{}.bak", ARCHIVE));
+    // Nothing to build: an apply would fail, so there is nothing to bring up to date.
+    let nothing = count == 0 && archives.is_empty();
+    let up_to_date = nothing || std::fs::read_to_string(mods_root.join(".cache").join(INSTALLED_SIG))
+        .is_ok_and(|s| s.lines().next().unwrap_or("").trim() == install_signature(&inputs_key(&loose, &archives), count == 0, &backup, &dest));
     if count > 0 {
         loose_archive(loose, &mods_root.join(".cache"))?;
         log::info!("[MODS] loose uotiara files ready ({} files) in {:?}", count, started.elapsed());
@@ -358,7 +399,7 @@ pub fn prepare(game_path: &Path, mods_root: &Path) -> Result<usize, Error> {
     let decoded_path = mods_root.join(".cache").join("decoded.txt");
     let mut decoded = read_decoded(&decoded_path);
     let mut added = 0;
-    for archive in installed_archives(mods_root) {
+    for archive in archives.iter().cloned() {
         if !archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("it")) { continue; }
         let Some(key) = mod_key(&archive) else { continue };
         if decoded.contains(&key) { continue; }
@@ -369,7 +410,8 @@ pub fn prepare(game_path: &Path, mods_root: &Path) -> Result<usize, Error> {
         write_decoded(&decoded_path, decoded.into_iter().collect());
         log::info!("[MODS] {} mods decoded and ready in {:?}", added, started.elapsed());
     }
-    Ok(count)
+    log::info!("[MODS] {} installed mods, game archive {}", archives.len(), if up_to_date { "up to date" } else { "needs a rebuild" });
+    Ok(PrepareReport { loose_files: count, mods: archives.len(), up_to_date })
 }
 /// Build and install the merged archive. `game_path` is any path the patcher
 /// accepts (install root, appdata, patchdata or Client.exe).
@@ -395,6 +437,19 @@ pub fn apply(game_path: &Path, mods_root: &Path, salts: &[String]) -> Result<App
         let mut merge = Merge::default();
         let mut inputs: Vec<Input> = Vec::new();
         let loose = loose_files(&appdata.join("data"));
+        let archives = installed_archives(mods_root);
+        // Read before the build: a file that changes during it makes the next check stale.
+        let read_key = inputs_key(&loose, &archives);
+        let no_loose = loose.is_empty();
+        let sig_path = mods_root.join(".cache").join(INSTALLED_SIG);
+        // The last install recorded the archive it wrote. A different archive there
+        // now came from the uotiara installer: it is the new base, so the rebuild
+        // keeps its content and does not go back to the older .bak.
+        let installed_key = std::fs::read_to_string(&sig_path).ok().and_then(|s| s.lines().nth(1).map(String::from));
+        if no_loose && dest.is_file() && installed_key.is_some_and(|k| Some(k) != mod_key(&dest)) {
+            set_readonly(&backup, false);
+            std::fs::copy(&dest, &backup).context("keep the replaced uotiara archive as the base")?;
+        }
         let base = if !loose.is_empty() {
             Some(loose_archive(loose, &mods_root.join(".cache"))?)
         } else if backup.is_file() { Some(backup.clone()) } else if dest.is_file() { Some(dest.clone()) } else { None };
@@ -409,7 +464,7 @@ pub fn apply(game_path: &Path, mods_root: &Path, salts: &[String]) -> Result<App
         let decoded = read_decoded(&decoded_path);
         let mut passed = Vec::new();
         let mut report = ApplyReport { archive: dest.to_string_lossy().to_string(), mods: 0, files: 0, skipped: vec![] };
-        for (i, archive) in installed_archives(mods_root).into_iter().enumerate() {
+        for (i, archive) in archives.into_iter().enumerate() {
             let name = archive.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let is_pack = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("pack"));
             let key = if is_pack { None } else { mod_key(&archive) };
@@ -451,11 +506,16 @@ pub fn apply(game_path: &Path, mods_root: &Path, salts: &[String]) -> Result<App
         }
         // Same volume: rename swaps the whole file, so a failure leaves the old one.
         let had = dest.exists();
+        let _ = std::fs::remove_file(&sig_path);
         set_readonly(&dest, false);
         let swapped = std::fs::rename(&built, &dest)
             .with_context(|| format!("replace {} (is the game running?)", dest.display()));
         if swapped.is_ok() || had { set_readonly(&dest, true); }
         swapped?;
+        // The startup check compares against this to find a stale game archive.
+        // Line 1: the startup check. Line 2: this archive, to spot a replacement.
+        let _ = std::fs::write(&sig_path, format!("{}\n{}",
+            install_signature(&read_key, no_loose, &backup, &dest), mod_key(&dest).unwrap_or_default()));
         log::info!("[MODS] installed in {:?}", started.elapsed());
         Ok(report)
     })();
@@ -499,5 +559,81 @@ mod tests {
         assert!(ent_check.is_err() && merge.0.is_empty());
         drop(inputs);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_reports_a_stale_game_archive() {
+        let root = std::env::temp_dir().join(format!("mabi-mods-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let appdata = root.join("appdata");
+        let mods = root.join("mods");
+        std::fs::create_dir_all(appdata.join("data").join("xml")).unwrap();
+        std::fs::create_dir_all(appdata.join("package")).unwrap();
+        let loose = appdata.join("data").join("xml").join("a.xml");
+        std::fs::write(&loose, b"<a/>").unwrap();
+
+        let salts = vec![ENTRIES_SALT.to_string()];
+        // Never installed: stale.
+        assert!(!prepare(&appdata, &mods).unwrap().up_to_date);
+        apply(&appdata, &mods, &salts).unwrap();
+        let report = prepare(&appdata, &mods).unwrap();
+        assert!(report.up_to_date);
+        assert_eq!((report.loose_files, report.mods), (1, 0));
+
+        // A uotiara update changes a loose file: the game archive is stale.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&loose, b"<a version=\"515\"/>").unwrap();
+        assert!(!prepare(&appdata, &mods).unwrap().up_to_date);
+        apply(&appdata, &mods, &salts).unwrap();
+        assert!(prepare(&appdata, &mods).unwrap().up_to_date);
+
+        // A newly installed mod makes it stale too.
+        std::fs::create_dir_all(mods.join("web")).unwrap();
+        let item = encode("data\\gfx\\m.txt".into(), b"mod".to_vec()).unwrap();
+        crate::pack::write_raw_archive(&mods.join("web").join("MOD0001.it").to_string_lossy(), HEADER_SALT, ENTRIES_SALT, 0, vec![item]).unwrap();
+        let report = prepare(&appdata, &mods).unwrap();
+        assert!(!report.up_to_date);
+        assert_eq!(report.mods, 1);
+        set_readonly(&appdata.join("package").join(ARCHIVE), false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replaced_uotiara_archive_becomes_the_base() {
+        let root = std::env::temp_dir().join(format!("mabi-mods-replaced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let appdata = root.join("appdata");
+        let mods = root.join("mods");
+        let package = appdata.join("package");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(mods.join("web")).unwrap();
+        let salts = vec![ENTRIES_SALT.to_string()];
+        let dest = package.join(ARCHIVE);
+        let uotiara = |text: &[u8]| {
+            set_readonly(&dest, false);
+            let item = encode("data\\gfx\\uotiara.txt".into(), text.to_vec()).unwrap();
+            crate::pack::write_raw_archive(&dest.to_string_lossy(), HEADER_SALT, ENTRIES_SALT, 0, vec![item]).unwrap();
+        };
+        let item = encode("data\\gfx\\m.txt".into(), b"mod".to_vec()).unwrap();
+        crate::pack::write_raw_archive(&mods.join("web").join("MOD0001.it").to_string_lossy(), HEADER_SALT, ENTRIES_SALT, 0, vec![item]).unwrap();
+
+        uotiara(b"v514");
+        apply(&appdata, &mods, &salts).unwrap();
+        assert!(prepare(&appdata, &mods).unwrap().up_to_date);
+
+        // The uotiara installer writes a new archive over the merged one.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        uotiara(b"v515 build");
+        assert!(!prepare(&appdata, &mods).unwrap().up_to_date);
+        apply(&appdata, &mods, &salts).unwrap();
+        let built = open_it(&dest, &salts).unwrap();
+        let ent = built.entries.iter().find(|e| e.name.ends_with("uotiara.txt")).unwrap();
+        let data = crate::extract::extract_single_file_to_memory(&built.mmap, built.content_off, ent, built.iv, built.mode).unwrap();
+        assert_eq!(data, b"v515 build");
+        assert!(built.entries.iter().any(|e| e.name.ends_with("m.txt")));
+        drop(built);
+        set_readonly(&dest, false);
+        set_readonly(&package.join(format!("{}.bak", ARCHIVE)), false);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

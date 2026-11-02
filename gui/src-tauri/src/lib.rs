@@ -242,6 +242,10 @@ struct Config {
     #[serde(default)]
     launcher_auto_launch: bool,
 
+    /// Hide the window to the tray once the game has launched.
+    #[serde(default)]
+    launcher_minimize_on_launch: bool,
+
     list_full_sequence: bool,
 
     pack_wrap_data: bool,
@@ -449,6 +453,7 @@ impl Default for Config {
             app_auto_update: false,
             mods_auto_update: false,
             launcher_auto_launch: false,
+            launcher_minimize_on_launch: false,
 
             list_full_sequence: false,
 
@@ -946,7 +951,9 @@ fn apply_runtime_settings(app: &tauri::AppHandle, config: &Config) {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let in_tray = mabi_pack2::launcher::autostart::wants_minimized(&args)
             && app.get_window("main").map(|w| !w.is_visible().unwrap_or(true)).unwrap_or(false);
-        let _ = tray.set_visible(config.minimize_to_tray || in_tray);
+        // After hide_to_tray the icon is the only way back to the window.
+        let hidden = HIDDEN_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = tray.set_visible(config.minimize_to_tray || in_tray || hidden);
     }
 }
 
@@ -3573,10 +3580,15 @@ static MAIN_WINDOW_REVEALED: std::sync::atomic::AtomicBool = std::sync::atomic::
 /// Shows the main window, which starts hidden (tauri.conf.json) so it first
 /// appears in the saved theme. A `--minimized` start stays in the tray, or shows
 /// minimized when there is no tray icon. Only the first call acts.
+/// ackground (#rrggbb, the theme's page color) fills the window until the
+/// page paints, so no default color shows first.
 #[tauri::command]
-fn reveal_main_window(app: tauri::AppHandle) {
+fn reveal_main_window(app: tauri::AppHandle, background: Option<String>) {
     if MAIN_WINDOW_REVEALED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
+    }
+    if let (Some(rgb), Some(view)) = (background.as_deref().and_then(parse_hex_rgb), app.get_webview_window("main")) {
+        let _ = view.set_background_color(Some(tauri::window::Color(rgb.0, rgb.1, rgb.2, 255)));
     }
     let Some(win) = app.get_window("main") else { return };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -3589,6 +3601,14 @@ fn reveal_main_window(app: tauri::AppHandle) {
     }
     let _ = win.show();
     let _ = win.set_focus();
+}
+
+/// #rrggbb as its red, green and blue bytes.
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().strip_prefix('#')?;
+    if h.len() != 6 || !h.is_ascii() { return None; }
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some((byte(0)?, byte(2)?, byte(4)?))
 }
 
 /// The app version (from gui/src-tauri/Cargo.toml, kept in step with tauri.conf.json
@@ -4629,13 +4649,14 @@ async fn apply_mods_to_game(game_path: String) -> Result<mabi_pack2::game_mods::
         mabi_pack2::game_mods::apply(std::path::Path::new(&game_path), &mods, &salts).map_err(|e| format!("{:#}", e))
     }).await.map_err(|e| e.to_string())?
 }
-/// Pack the loose uotiara files into the mods cache in the background at startup.
+/// Pack the loose uotiara files into the mods cache in the background at startup,
+/// and report whether the game's uotiara_00001.it matches the files and mods.
 #[tauri::command]
-async fn prepare_mods_cache(game_path: String) -> Result<usize, String> {
-    if game_path.trim().is_empty() { return Ok(0); }
+async fn prepare_mods_cache(game_path: String) -> Result<Option<mabi_pack2::game_mods::PrepareReport>, String> {
+    if game_path.trim().is_empty() { return Ok(None); }
     let mods = web_mods_dir().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("mods"));
     tauri::async_runtime::spawn_blocking(move || {
-        mabi_pack2::game_mods::prepare(std::path::Path::new(&game_path), &mods).map_err(|e| format!("{:#}", e))
+        mabi_pack2::game_mods::prepare(std::path::Path::new(&game_path), &mods).map(Some).map_err(|e| format!("{:#}", e))
     }).await.map_err(|e| e.to_string())?
 }/// Installed website mods: id, file format and the catalog version recorded at
 /// install (null for mods installed before versions were recorded).
@@ -5295,6 +5316,8 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 
 const TRAY_ID: &str = "main";
 static MINIMIZE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set while hide_to_tray has the window hidden, so a settings save keeps the icon.
+static HIDDEN_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tray menu items, kept so the frontend can set their translated labels.
 struct TrayItems {
@@ -5307,6 +5330,25 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+    // hide_to_tray shows the icon without minimize_to_tray; the open window hides it again.
+    HIDDEN_TO_TRAY.store(false, std::sync::atomic::Ordering::Relaxed);
+    if !MINIMIZE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(tray) = app.tray_by_id(TRAY_ID) { let _ = tray.set_visible(false); }
+    }
+}
+
+/// Hide the window to the tray (after a launch). Without a tray icon the
+/// window minimizes, so it can always be opened again.
+#[tauri::command]
+fn hide_to_tray(app: tauri::AppHandle) {
+    let Some(w) = app.get_window("main") else { return };
+    match app.tray_by_id(TRAY_ID) {
+        Some(tray) if tray.set_visible(true).is_ok() => {
+            HIDDEN_TO_TRAY.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = w.hide();
+        }
+        _ => { let _ = w.minimize(); }
     }
 }
 
@@ -8208,7 +8250,7 @@ pub fn run() {
                 let h = handle.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(15));
-                    reveal_main_window(h);
+                    reveal_main_window(h, None);
                 });
             }
 
@@ -8328,7 +8370,7 @@ pub fn run() {
             launcher_import_browser, launcher_save_profile_session,
             kanan_import::kanan_default_path, kanan_import::kanan_list_accounts, kanan_import::kanan_import_accounts, kanan_import::kanan_import_otp, kanan_import::hyddwn_list_accounts, kanan_import::hyddwn_import_accounts,
 
-            shared_config_load, shared_config_save, fetch_news, open_external_url, reset_login_cache, set_tray_labels,
+            shared_config_load, shared_config_save, fetch_news, open_external_url, reset_login_cache, set_tray_labels, hide_to_tray,
             get_start_with_windows, set_start_with_windows,
 
             world_preview::itemdb_load, world_preview::itemdb_for_model, world_preview::itemdb_search,

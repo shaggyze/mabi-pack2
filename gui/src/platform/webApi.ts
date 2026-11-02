@@ -93,6 +93,7 @@ export async function webInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
       return true as T; // suppresses the (Windows-only) elevation warning, irrelevant to a browser tab
     case "request_elevation":
     case "reveal_main_window":
+    case "hide_to_tray":
       return undefined as T;
     case "drain_log_buffer":
       return [] as T;
